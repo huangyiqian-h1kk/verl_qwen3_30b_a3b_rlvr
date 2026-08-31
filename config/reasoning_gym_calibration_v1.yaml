@@ -1,0 +1,167 @@
+version: reasoning_gym_calibration_v1
+reasoning_gym_version: "0.1.25"
+system_prompt_file: config/unicode_system_prompt.txt
+samples_per_stratum: 24
+base_seed: 20260818
+
+# 8 task families x 2 difficulty bands x 24 examples = 384 prompts.
+# These are deliberately above Reasoning Gym's small-model defaults.  The
+# baseline decides which strata are actually usable for Qwen3-30B-A3B.
+strata:
+  - task: polynomial_equations
+    tier: medium
+    config:
+      min_terms: 3
+      max_terms: 5
+      min_value: 1
+      max_value: 150
+      min_degree: 2
+      max_degree: 3
+    accept:
+      answer_not_equal: ""
+
+  - task: polynomial_equations
+    tier: hard
+    config:
+      min_terms: 5
+      max_terms: 7
+      min_value: 1
+      max_value: 500
+      min_degree: 3
+      max_degree: 4
+    accept:
+      answer_not_equal: ""
+
+  - task: intermediate_integration
+    tier: medium
+    config:
+      problem_types: [polynomial_exp_trig, cyclic, repeated_parts, log_inverse_trig]
+      problem_type_weights: [0.30, 0.20, 0.30, 0.20]
+      linear_lower_bound: 1
+      linear_upper_bound: 12
+      min_linear_degree: 2
+      max_linear_degree: 5
+      outer_constant_min: 1
+      outer_constant_max: 5
+      min_poly_degree: 3
+      max_poly_degree: 4
+    accept:
+      answer_not_contains: "Integral("
+
+  - task: intermediate_integration
+    tier: hard
+    config:
+      problem_types: [polynomial_exp_trig, cyclic, repeated_parts, log_inverse_trig]
+      problem_type_weights: [0.35, 0.15, 0.40, 0.10]
+      linear_lower_bound: 1
+      linear_upper_bound: 25
+      min_linear_degree: 4
+      max_linear_degree: 8
+      outer_constant_min: 2
+      outer_constant_max: 12
+      min_poly_degree: 5
+      max_poly_degree: 7
+    accept:
+      answer_not_contains: "Integral("
+
+  - task: countdown
+    tier: medium
+    config:
+      min_numbers: 6
+      max_numbers: 7
+      min_value: 1
+      max_value: 150
+      min_target: 300
+      max_target: 3000
+
+  - task: countdown
+    tier: hard
+    config:
+      min_numbers: 8
+      max_numbers: 9
+      min_value: 1
+      max_value: 300
+      min_target: 1000
+      max_target: 10000
+
+  - task: cryptarithm
+    tier: medium
+    config:
+      min_words: 2
+      max_words: 3
+      allow_leading_zero: false
+
+  - task: cryptarithm
+    tier: hard
+    config:
+      min_words: 3
+      max_words: 4
+      allow_leading_zero: false
+
+  - task: knights_knaves
+    tier: medium
+    config:
+      n_people: 4
+      depth_constraint: 3
+      width_constraint: 3
+
+  - task: knights_knaves
+    tier: hard
+    config:
+      n_people: 5
+      depth_constraint: 3
+      width_constraint: 3
+
+  - task: graph_color
+    tier: medium
+    config:
+      num_colors: 4
+      min_num_vertices: 16
+      max_num_vertices: 20
+      edge_probability: 0.20
+
+  - task: graph_color
+    tier: hard
+    config:
+      num_colors: 3
+      min_num_vertices: 24
+      max_num_vertices: 30
+      edge_probability: 0.15
+
+  - task: shortest_path
+    tier: medium
+    config:
+      min_rows: 10
+      max_rows: 14
+      min_cols: 10
+      max_cols: 14
+      p_blocked: 0.25
+    accept:
+      answer_not_equal: infeasible
+
+  - task: shortest_path
+    tier: hard
+    config:
+      min_rows: 16
+      max_rows: 22
+      min_cols: 16
+      max_cols: 22
+      p_blocked: 0.30
+    accept:
+      answer_not_equal: infeasible
+
+  - task: quantum_lock
+    tier: medium
+    config:
+      difficulty: 14
+    accept:
+      metadata_path: difficulty.difficulty
+      min_value: 7
+
+  - task: quantum_lock
+    tier: hard
+    config:
+      difficulty: 24
+    accept:
+      metadata_path: difficulty.difficulty
+      min_value: 15

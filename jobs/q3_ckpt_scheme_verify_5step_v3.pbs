@@ -1,0 +1,388 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=08:00:00
+#PBS -N q3_ckpt5_v3
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/q3_ckpt5_v3_${PBS_JOBID}.log
+
+# Lightweight checkpoint rehearsal with external safe rotation for:
+#   Qwen3-30B-A3B-Instruct-2507 + DAPO + Megatron + vLLM
+#
+# Save every 5 steps and submit the SAME script twice, sequentially:
+#
+# On the login node, capture the current Home quota headroom immediately before
+# each qsub.  ABCI compute nodes do not provide the show_quota command:
+#
+#      HOME_FREE_GIB=$(show_quota -b G | \
+#        awk -v home_path="$HOME" '$1 == home_path {print $3 - $2; exit}')
+#      test -n "$HOME_FREE_GIB"
+#
+#   1) Run to step 10, producing full checkpoints/snapshots at steps 5 and 10:
+#      qsub -v RTYPE=rt_HF,PHASE=save10,HOME_FREE_GIB_AT_SUBMIT="$HOME_FREE_GIB" \
+#        jobs/q3_ckpt_scheme_verify_5step_v3.pbs
+#
+#   2) Resume from step 10 and save step 15.  Home must rotate to steps 10/15,
+#      while group snapshots must retain steps 5/10/15:
+#      qsub -v RTYPE=rt_HF,PHASE=resume15,HOME_FREE_GIB_AT_SUBMIT="$HOME_FREE_GIB" \
+#        jobs/q3_ckpt_scheme_verify_5step_v3.pbs
+#
+# Never submit both phases concurrently.  PHASE=resume15 requires save10 to have
+# completed successfully.  Independently load the step-15 group snapshot after
+# phase 2.  This is a disposable infrastructure rehearsal, not an LR pilot and
+# not the beginning of the formal training run.
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+EXPECTED_VERL_COMMIT=62ac6d6e9fccc09ab6af2171217cee6e290b799b
+
+PHASE=${PHASE:?qsub must set PHASE=save10 or PHASE=resume15}
+HOME_FREE_GIB_AT_SUBMIT=${HOME_FREE_GIB_AT_SUBMIT:-}
+case "$PHASE" in
+  save10)
+    TARGET_STEPS=10
+    SAVE_FREQ=5
+    ;;
+  resume15)
+    TARGET_STEPS=15
+    SAVE_FREQ=5
+    ;;
+  *)
+    echo "[FAIL] unsupported PHASE=$PHASE; expected save10 or resume15" >&2
+    exit 2
+    ;;
+esac
+
+MODEL_KEY=inst2507
+MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+DATASET_TAG=dapo
+DATA_DIR=$PROJ/data/full_v1
+TRAIN_FILES=$DATA_DIR/dapo_unicode_train.parquet
+VAL_FILES=$DATA_DIR/dapo_unicode_holdout.parquet
+AUDIT_FILE=$DATA_DIR/audit_v2.json
+SYSTEM_PROMPT_FILE=$PROJ/config/unicode_system_prompt.txt
+REWARD_FILE=$PROJ/rewards/unicode_math_reward_v3.py
+LAUNCHER=$PROJ/jobs/run_qwen3_30b_a3b_megatron.sh
+
+# Keep this identity unchanged between save10 and resume15.
+EXPERIMENT_NAME=inst2507_dapo_unicode_ckptverify_5step_v3
+FULL_CKPT_DIR=$HOME/ckpts/verl_full/$EXPERIMENT_NAME
+SNAP_DIR=$PROJ/ckpts/model_snapshots/$EXPERIMENT_NAME
+
+mkdir -p \
+  "$PROJ/logs" \
+  "$PROJ/outputs/reward_debug" \
+  "$FULL_CKPT_DIR" \
+  "$SNAP_DIR"
+
+command -v flock >/dev/null || {
+  echo "[FAIL] flock is required" >&2
+  exit 2
+}
+exec 9>"$FULL_CKPT_DIR/.training.lock"
+if ! flock -n 9; then
+  echo "[FAIL] another process holds the rehearsal lock: $FULL_CKPT_DIR" >&2
+  exit 3
+fi
+printf 'job=%s phase=%s host=%s started=%s\n' \
+  "${PBS_JOBID:-manual}" "$PHASE" "$(hostname)" \
+  "$(date --iso-8601=seconds)" >&9
+
+LOG=$PROJ/logs/ckptverify_5step_${PHASE}_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+
+# Apply the NumPy-2/Megatron compatibility alias in the driver and every Ray
+# worker without modifying the shared Conda environment.
+export PYTHONPATH="$PROJ/compat${PYTHONPATH:+:$PYTHONPATH}"
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export WANDB_MODE=disabled
+export TOKENIZER_FALLBACK_DIR=$MODEL_PATH
+export ACC_WEIGHT=1.0
+export FORMAT_WEIGHT=0.2
+export REQUIRE_VERL_MATH_DAPO=1
+export REWARD_DEBUG_RATE=0
+export REWARD_DEBUG_LOG=
+export KEEP_FULL_CKPTS=2
+export FULL_CKPT_PRUNER=$PROJ/scripts/prune_full_checkpoints_v3.sh
+
+python "$REWARD_FILE"
+python "$PROJ/scripts/preflight_model_and_data.py" \
+  --project "$PROJ" \
+  --model-key "$MODEL_KEY" \
+  --model-path "$MODEL_PATH" \
+  --dataset-tag "$DATASET_TAG" \
+  --train-file "$TRAIN_FILES" \
+  --val-file "$VAL_FILES" \
+  --reward-file "$REWARD_FILE" \
+  --launcher "$LAUNCHER" \
+  --verl-src "$VERL_SRC" \
+  --expected-verl-commit "$EXPECTED_VERL_COMMIT" \
+  --dataset-audit "$AUDIT_FILE" \
+  --max-prompt-length 2048
+
+bash "$PROJ/scripts/checkpoint_preflight.sh" "$FULL_CKPT_DIR"
+
+tracker=$FULL_CKPT_DIR/latest_checkpointed_iteration.txt
+
+enforce_home_headroom() {
+  local required_gib=$1
+
+  # This branch is useful outside ABCI compute nodes and retains the original
+  # live quota check whenever show_quota is actually available.
+  if command -v show_quota >/dev/null 2>&1; then
+    bash "$PROJ/scripts/check_home_quota.sh" \
+      "$FULL_CKPT_DIR" "$required_gib" "$required_gib"
+    return
+  fi
+
+  case "$HOME_FREE_GIB_AT_SUBMIT" in
+    ''|*[!0-9]*)
+      echo "[FAIL] show_quota is unavailable on this compute node." >&2
+      echo "[FAIL] Run show_quota on the login node and submit with:" >&2
+      echo "[FAIL]   -v RTYPE=rt_HF,PHASE=$PHASE,HOME_FREE_GIB_AT_SUBMIT=<free_GiB>" >&2
+      exit 5
+      ;;
+  esac
+
+  echo "[quota] source=login-node submission snapshot"
+  echo "[quota] free_at_submit=${HOME_FREE_GIB_AT_SUBMIT}GiB required=${required_gib}GiB"
+  echo "[quota] warning: queued jobs cannot re-query quota on the compute node"
+  if [ "$HOME_FREE_GIB_AT_SUBMIT" -lt "$required_gib" ]; then
+    echo "[FAIL] insufficient /home quota headroom at submission" >&2
+    exit 5
+  fi
+  echo "[PASS] /home quota submission guard"
+}
+
+if [ "$PHASE" = save10 ]; then
+  if [ -f "$tracker" ]; then
+    echo "[FAIL] save10 must start from a fresh rehearsal directory: $FULL_CKPT_DIR" >&2
+    echo "[FAIL] existing tracker: $(tr -d '[:space:]' < "$tracker")" >&2
+    exit 4
+  fi
+  # Two full checkpoints must coexist after step 10.
+  enforce_home_headroom 1500
+else
+  if [ ! -f "$tracker" ]; then
+    echo "[FAIL] resume15 requires the committed step-10 tracker: $tracker" >&2
+    exit 4
+  fi
+  committed_step=$(tr -d '[:space:]' < "$tracker")
+  if [ "$committed_step" != 10 ]; then
+    echo "[FAIL] resume15 expected tracker=10, got: $committed_step" >&2
+    exit 4
+  fi
+  for step in 5 10; do
+    if [ ! -d "$FULL_CKPT_DIR/global_step_$step" ]; then
+      echo "[FAIL] resume15 is missing full checkpoint global_step_$step" >&2
+      exit 4
+    fi
+    if [ ! -f "$SNAP_DIR/global_step_$step/.complete" ]; then
+      echo "[FAIL] resume15 requires complete group snapshot global_step_$step" >&2
+      exit 4
+    fi
+  done
+
+  # A third checkpoint may temporarily coexist before verl removes step 5.
+  # Use the largest measured checkpoint plus 100 GiB as the resume headroom.
+  largest_ckpt_gib=0
+  for step in 5 10; do
+    size_gib=$(du -s --block-size=1G "$FULL_CKPT_DIR/global_step_$step" | awk '{print $1}')
+    if [ "$size_gib" -gt "$largest_ckpt_gib" ]; then
+      largest_ckpt_gib=$size_gib
+    fi
+  done
+  resume_required_gib=$((largest_ckpt_gib + 100))
+  echo "[quota] measured largest checkpoint=${largest_ckpt_gib}GiB"
+  echo "[quota] dynamic resume requirement=${resume_required_gib}GiB"
+  enforce_home_headroom "$resume_required_gib"
+fi
+
+# Target step is an operational control and intentionally omitted from the
+# resume fingerprint.  Save frequency remains 5 in both phases.
+python "$PROJ/scripts/check_run_fingerprint.py" \
+  --checkpoint-dir "$FULL_CKPT_DIR" \
+  --item "purpose=checkpoint_rehearsal_5step_v3" \
+  --item "model_key=$MODEL_KEY" \
+  --item "model_path=$MODEL_PATH" \
+  --item "dataset_tag=$DATASET_TAG" \
+  --item "train_batch_size=4" \
+  --item "rollout_n=2" \
+  --item "ppo_mini_batch_size=4" \
+  --item "ppo_epochs=1" \
+  --item "actor_lr=1e-6" \
+  --item "max_prompt_length=2048" \
+  --item "max_response_length=512" \
+  --item "enable_thinking=false" \
+  --item "actor_tp_pp_ep=2,2,2" \
+  --item "ref_tp_pp_ep=2,2,2" \
+  --item "rollout_tp_gen_ep=4,4" \
+  --item "save_contents=model,hf_model,optimizer,extra" \
+  --item "verl_commit=$EXPECTED_VERL_COMMIT" \
+  --hash-file "train_data=$TRAIN_FILES" \
+  --hash-file "val_data=$VAL_FILES" \
+  --hash-file "reward=$REWARD_FILE" \
+  --hash-file "launcher=$LAUNCHER" \
+  --hash-file "system_prompt=$SYSTEM_PROMPT_FILE"
+
+python "$PROJ/scripts/write_baseline_metadata.py" \
+  --output-dir "$SNAP_DIR" \
+  --model-key "$MODEL_KEY" \
+  --model-path "$MODEL_PATH" \
+  --experiment-name="$EXPERIMENT_NAME" \
+  --system-prompt-file "$SYSTEM_PROMPT_FILE" \
+  --verl-src "$VERL_SRC"
+
+WATCHER_LOG=$PROJ/logs/snapshot_watcher_${EXPERIMENT_NAME}.log
+bash "$PROJ/scripts/snapshot_watcher_v3.sh" \
+  watch "$FULL_CKPT_DIR" "$SNAP_DIR" 30 >> "$WATCHER_LOG" 2>&1 &
+WATCHER_PID=$!
+
+stop_watcher() {
+  local require_success=${1:-0}
+  if kill -0 "$WATCHER_PID" 2>/dev/null; then
+    kill "$WATCHER_PID" 2>/dev/null || true
+    wait "$WATCHER_PID" 2>/dev/null || true
+  fi
+  if ! bash "$PROJ/scripts/snapshot_watcher_v3.sh" \
+    oneshot "$FULL_CKPT_DIR" "$SNAP_DIR" >> "$WATCHER_LOG" 2>&1; then
+    [ "$require_success" -eq 0 ] || return 1
+  fi
+}
+
+cleanup() {
+  status=$?
+  trap - EXIT TERM INT HUP
+  stop_watcher 0 || true
+  exit "$status"
+}
+trap cleanup EXIT TERM INT HUP
+
+# External rotation is authoritative because verl's in-process retention state
+# did not include checkpoints from the preceding PBS job.
+set -x
+cd "$VERL_SRC"
+
+ACTOR_TP=2 \
+ACTOR_PP=2 \
+ACTOR_VPP=1 \
+ACTOR_EP=2 \
+REF_TP=2 \
+REF_PP=2 \
+REF_VPP=1 \
+REF_EP=2 \
+ROLLOUT_TP=4 \
+GEN_MOE_TP=1 \
+GEN_MOE_EP=4 \
+INFER_BACKEND=vllm \
+MODEL_PATH="$MODEL_PATH" \
+TRAIN_FILES="$TRAIN_FILES" \
+VAL_FILES="$VAL_FILES" \
+NGPUS_PER_NODE=8 \
+NNODES=1 \
+TRAIN_BATCH_SIZE=4 \
+PPO_MINI_BATCH_SIZE=4 \
+ROLLOUT_N=2 \
+MAX_PROMPT_LENGTH=2048 \
+MAX_RESPONSE_LENGTH=512 \
+PPO_MAX_TOKEN_LEN_PER_GPU=4096 \
+REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=4096 \
+ROLLOUT_MAX_MODEL_LEN=3072 \
+ROLLOUT_MAX_NUM_BATCHED_TOKENS=4096 \
+ACTOR_LR=1e-6 \
+SAVE_FREQ="$SAVE_FREQ" \
+PROJECT_NAME=qwen3_rlvr_ckpt_verify \
+EXPERIMENT_NAME="$EXPERIMENT_NAME" \
+bash "$LAUNCHER" \
+  trainer.logger='["console"]' \
+  trainer.total_epochs=1000 \
+  trainer.total_training_steps="$TARGET_STEPS" \
+  trainer.test_freq=-1 \
+  trainer.val_before_train=False \
+  trainer.default_local_dir="$FULL_CKPT_DIR" \
+  trainer.save_freq="$SAVE_FREQ" \
+  trainer.max_actor_ckpt_to_keep=null \
+  trainer.resume_mode=auto \
+  data.seed=42 \
+  +data.apply_chat_template_kwargs.enable_thinking=False \
+  actor_rollout_ref.actor.ppo_epochs=1 \
+  actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=null \
+  actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=null \
+  reward_model.reward_kwargs.overlong_buffer_cfg.enable=False \
+  reward.custom_reward_function.path="$REWARD_FILE" \
+  reward.custom_reward_function.name=compute_score \
+  'actor_rollout_ref.actor.checkpoint.save_contents=[model,hf_model,optimizer,extra]'
+
+trap - EXIT TERM INT HUP
+stop_watcher 1
+set +x
+
+if [ "$PHASE" = save10 ]; then
+  actual_tracker=$(tr -d '[:space:]' < "$tracker" 2>/dev/null || true)
+  [ "$actual_tracker" = 10 ] || {
+    echo "[FAIL] expected tracker=10 after save10, got: ${actual_tracker:-missing}" >&2
+    exit 5
+  }
+  for step in 5 10; do
+    [ -d "$FULL_CKPT_DIR/global_step_$step" ] || {
+      echo "[FAIL] missing full checkpoint global_step_$step" >&2
+      exit 5
+    }
+    [ -f "$SNAP_DIR/global_step_$step/.complete" ] || {
+      echo "[FAIL] group snapshot global_step_$step is not complete" >&2
+      exit 5
+    }
+  done
+else
+  actual_tracker=$(tr -d '[:space:]' < "$tracker" 2>/dev/null || true)
+  [ "$actual_tracker" = 15 ] || {
+    echo "[FAIL] expected tracker=15 after resume15, got: ${actual_tracker:-missing}" >&2
+    exit 5
+  }
+  [ ! -d "$FULL_CKPT_DIR/global_step_5" ] || {
+    echo "[FAIL] checkpoint rotation failed: global_step_5 still exists in home" >&2
+    exit 5
+  }
+  for step in 10 15; do
+    [ -d "$FULL_CKPT_DIR/global_step_$step" ] || {
+      echo "[FAIL] missing retained full checkpoint global_step_$step" >&2
+      exit 5
+    }
+  done
+  for step in 5 10 15; do
+    [ -f "$SNAP_DIR/global_step_$step/.complete" ] || {
+      echo "[FAIL] group snapshot global_step_$step is not complete" >&2
+      exit 5
+    }
+  done
+  printf 'job=%s completed=%s source_checkpoint=global_step_10 target_step=15\n' \
+    "${PBS_JOBID:-manual}" "$(date --iso-8601=seconds)" \
+    > "$FULL_CKPT_DIR/resume_to_step_15.PASS"
+fi
+
+echo "================ CHECKPOINT REHEARSAL ================"
+echo "phase           : $PHASE"
+echo "target steps    : $TARGET_STEPS"
+echo "save frequency  : $SAVE_FREQ"
+echo "tracker         : $(cat "$tracker" 2>/dev/null || echo none)"
+echo "full ckpt dir   : $FULL_CKPT_DIR"
+echo "home checkpoints:"
+find "$FULL_CKPT_DIR" -maxdepth 1 -type d -name 'global_step_*' \
+  -printf '  %f\n' | sort -V
+echo "group snapshots:"
+find "$SNAP_DIR" -maxdepth 2 -name .complete \
+  -printf '  %h\n' | sort -V
+echo "watcher log     : $WATCHER_LOG"
+echo "======================================================="

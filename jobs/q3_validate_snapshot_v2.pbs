@@ -1,0 +1,38 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=01:00:00
+#PBS -N q3_snap_v2
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/q3_snapshot_v2_${PBS_JOBID}.log
+
+# Usage:
+#   qsub -v SNAPSHOT_DIR=/groups/.../global_step_20 jobs/q3_validate_snapshot_v2.pbs
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+SNAPSHOT_DIR=${SNAPSHOT_DIR:?qsub must set the absolute SNAPSHOT_DIR}
+
+case "$SNAPSHOT_DIR" in
+  "$PROJ"/ckpts/model_snapshots/*/global_step_*) ;;
+  *) echo "[FAIL] unexpected snapshot path: $SNAPSHOT_DIR" >&2; exit 2 ;;
+esac
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export CUDA_VISIBLE_DEVICES=0
+
+python "$PROJ/scripts/validate_hf_snapshot_vllm.py" \
+  "$SNAPSHOT_DIR" \
+  --system-prompt-file "$PROJ/config/unicode_system_prompt.txt" \
+  --tp 1 \
+  --max-tokens 512

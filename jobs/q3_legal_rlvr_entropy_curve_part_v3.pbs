@@ -1,0 +1,133 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=16:00:00
+#PBS -N 0390_lent
+#PBS -j oe
+
+set -euo pipefail
+
+WORK=${WORK:-/groups/gcg51557/experiments/0390_rlsd}
+PROJ=${PROJ:-$WORK/RLVR/verl_qwen3_30b_a3b_rlvr}
+
+PART_ID=${PART_ID:?qsub must set PART_ID to A or B}
+STEP_LIST=${STEP_LIST:?qsub must set STEP_LIST}
+SNAPSHOT_ROOT=${SNAPSHOT_ROOT:?qsub must set SNAPSHOT_ROOT}
+PROBE=${PROBE:?qsub must set PROBE}
+OUT_ROOT=${OUT_ROOT:?qsub must set OUT_ROOT}
+BASE_MODEL=${BASE_MODEL:-$WORK/models/Qwen3-30B-A3B-Instruct-2507}
+SEED=${SEED:-1}
+HINT_LEVELS=${HINT_LEVELS:-none}
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-4096}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-32000}
+TEMPERATURE=${TEMPERATURE:-1.0}
+TOP_P=${TOP_P:-1.0}
+TOP_K=${TOP_K:--1}
+TP=${TP:-8}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.85}
+GEN_BATCH_SIZE=${GEN_BATCH_SIZE:-32}
+SCORE_BATCH_SIZE=${SCORE_BATCH_SIZE:-1}
+ENTROPY_CHUNK_TOKENS=${ENTROPY_CHUNK_TOKENS:-128}
+SCORER_MAX_MEMORY_GIB_PER_GPU=${SCORER_MAX_MEMORY_GIB_PER_GPU:-16}
+OVERWRITE=${OVERWRITE:-0}
+
+case "$PART_ID" in
+  A|B) ;;
+  *) echo "[FAIL] PART_ID must be A or B" >&2; exit 2 ;;
+esac
+if [ "$HINT_LEVELS" != none ]; then
+  echo "[FAIL] this curve is intentionally restricted to HINT_LEVELS=none" >&2
+  exit 2
+fi
+
+STEP_WORDS=$(printf '%s' "$STEP_LIST" | tr ':,' '  ')
+test -n "${STEP_WORDS//[[:space:]]/}" || {
+  echo "[FAIL] STEP_LIST is empty" >&2
+  exit 2
+}
+
+test -d "$BASE_MODEL" || { echo "[FAIL] BASE_MODEL missing: $BASE_MODEL" >&2; exit 3; }
+test -s "$PROBE" || { echo "[FAIL] frozen probe missing: $PROBE" >&2; exit 3; }
+test -d "$SNAPSHOT_ROOT" || {
+  echo "[FAIL] SNAPSHOT_ROOT missing: $SNAPSHOT_ROOT" >&2
+  exit 3
+}
+
+for step in $STEP_WORDS; do
+  case "$step" in
+    ''|*[!0-9]*) echo "[FAIL] invalid step in STEP_LIST: $step" >&2; exit 2 ;;
+  esac
+  if [ "$step" -gt 0 ]; then
+    snapshot=$SNAPSHOT_ROOT/global_step_$step
+    test -f "$snapshot/.complete" || {
+      echo "[FAIL] incomplete or missing snapshot: $snapshot" >&2
+      exit 3
+    }
+  fi
+done
+
+mkdir -p "$OUT_ROOT" "$PROJ/logs"
+PART_LOG=$PROJ/logs/legal_entropy_part${PART_ID}_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$PART_LOG") 2>&1
+
+on_term() {
+  signal_name=$1
+  exit_code=$2
+  echo "[STOP] part $PART_ID received $signal_name at $(date -Is)"
+  exit "$exit_code"
+}
+trap 'on_term TERM 143' TERM
+trap 'on_term INT 130' INT
+trap 'on_term HUP 129' HUP
+
+echo "[part] experiment=0390 part=$PART_ID job_id=${PBS_JOBID:-manual}"
+echo "[part] steps=$STEP_WORDS"
+echo "[part] probe=$PROBE"
+echo "[part] out=$OUT_ROOT"
+echo "[part] hint=none seed=$SEED walltime=16:00:00"
+
+STEP_RUNNER=$PROJ/scripts/run_legal_rlvr_entropy_step_v2.sh
+test -x "$STEP_RUNNER" || {
+  echo "[FAIL] missing or non-executable step runner: $STEP_RUNNER" >&2
+  exit 3
+}
+
+rm -f -- "$OUT_ROOT/.part_${PART_ID}_complete"
+
+for step in $STEP_WORDS; do
+  step_padded=$(printf '%03d' "$step")
+  echo "[part] ===== part $PART_ID step $step begin $(date -Is) ====="
+
+  PART_ID="$PART_ID" \
+  STEP="$step" \
+  SNAPSHOT_ROOT="$SNAPSHOT_ROOT" \
+  PROBE="$PROBE" \
+  OUT_ROOT="$OUT_ROOT" \
+  BASE_MODEL="$BASE_MODEL" \
+  SEED="$SEED" \
+  HINT_LEVELS=none \
+  MAX_NEW_TOKENS="$MAX_NEW_TOKENS" \
+  MAX_MODEL_LEN="$MAX_MODEL_LEN" \
+  TEMPERATURE="$TEMPERATURE" \
+  TOP_P="$TOP_P" \
+  TOP_K="$TOP_K" \
+  TP="$TP" \
+  GPU_MEMORY_UTILIZATION="$GPU_MEMORY_UTILIZATION" \
+  GEN_BATCH_SIZE="$GEN_BATCH_SIZE" \
+  SCORE_BATCH_SIZE="$SCORE_BATCH_SIZE" \
+  ENTROPY_CHUNK_TOKENS="$ENTROPY_CHUNK_TOKENS" \
+  SCORER_MAX_MEMORY_GIB_PER_GPU="$SCORER_MAX_MEMORY_GIB_PER_GPU" \
+  OVERWRITE="$OVERWRITE" \
+    bash "$STEP_RUNNER"
+
+  test -f "$OUT_ROOT/step_$step_padded/seed_$SEED/.complete" || {
+    echo "[FAIL] part $PART_ID step $step returned without .complete" >&2
+    exit 6
+  }
+  echo "[part] ===== part $PART_ID step $step complete $(date -Is) ====="
+done
+
+touch "$OUT_ROOT/.part_${PART_ID}_complete"
+echo "[PASS] experiment 0390 part $PART_ID complete: $OUT_ROOT"

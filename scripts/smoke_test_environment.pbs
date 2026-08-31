@@ -1,0 +1,83 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N repair_te_offline
+#PBS -j oe
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+export VERL_SRC=$PROJ/src/verl
+export TE_SRC=$PROJ/src/TransformerEngine
+
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+
+mkdir -p $PROJ/logs
+LOG=$PROJ/logs/smoke_test_environment_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+
+echo "===== Job info ====="
+date
+hostname
+module list
+which python
+python --version
+which nvcc
+nvcc --version
+nvidia-smi
+
+echo "===== Explicit GPU visibility ====="
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+
+echo "===== Check local TransformerEngine source ====="
+test -d "$TE_SRC/.git"
+cd "$TE_SRC"
+git rev-parse HEAD
+git submodule status --recursive | head -50
+
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("gpu0:", torch.cuda.get_device_name(0))
+
+import transformers
+print("transformers:", transformers.__version__)
+
+try:
+    import vllm
+    print("vllm:", vllm.__version__)
+except Exception as e:
+    print("vllm import failed:", repr(e))
+
+try:
+    import megatron.core
+    print("megatron.core: OK")
+except Exception as e:
+    print("megatron.core import failed:", repr(e))
+
+try:
+    import transformer_engine
+    print("transformer_engine: OK")
+except Exception as e:
+    print("transformer_engine import failed:", repr(e))
+
+try:
+    import flash_attn
+    print("flash_attn:", flash_attn.__version__)
+except Exception as e:
+    print("flash_attn import failed:", repr(e))
+PY
+
+echo "Log saved to: $LOG"

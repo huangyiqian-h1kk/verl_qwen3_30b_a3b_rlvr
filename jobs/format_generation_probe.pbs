@@ -1,0 +1,41 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=02:00:00
+#PBS -N q3_fmt_probe
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/q3_tok_template_${PBS_JOBID}.log
+
+set -euo pipefail
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+mkdir -p $PROJ/logs $PROJ/outputs/format_probe
+LOG=$PROJ/logs/format_probe_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+MODEL_KEY=${MODEL_KEY:-inst}
+if [ "$MODEL_KEY" = "a3b" ]; then
+  MODEL_PATH=${MODEL_PATH:-$WORK/models/Qwen3-30B-A3B}
+elif [ "$MODEL_KEY" = "inst" ]; then
+  MODEL_PATH=${MODEL_PATH:-$WORK/models/Qwen3-30B-A3B-Instruct-2507}
+else
+  : ${MODEL_PATH:?Set MODEL_PATH if MODEL_KEY is not a3b or inst}
+fi
+TP=${TP:-4}
+N=${N:-8}
+MAX_TOKENS=${MAX_TOKENS:-256}
+ENABLE_THINKING=${ENABLE_THINKING:-none}
+OUT=$PROJ/outputs/format_probe/${MODEL_KEY}_tp${TP}_n${N}_${PBS_JOBID:-manual}.jsonl
+python $PROJ/scripts/probe_format_generation_vllm.py \
+  --local-files-only \
+  --model "$MODEL_PATH" \
+  --tp "$TP" \
+  --n "$N" \
+  --max-tokens "$MAX_TOKENS" \
+  --enable-thinking "$ENABLE_THINKING" \
+  --out "$OUT"

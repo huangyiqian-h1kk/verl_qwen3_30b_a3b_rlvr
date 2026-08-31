@@ -1,0 +1,61 @@
+# ===== Large training artifacts =====
+ckpts/
+models/
+data/
+hf_home/
+
+# ===== External source/dependency checkouts =====
+src/
+vendor/
+
+# ===== Runtime/generated outputs =====
+outputs/
+logs/
+wandb/
+tmp/
+
+# ===== Scheduler outputs =====
+*.o[0-9]*
+*.e[0-9]*
+*.pbs.log
+*.log
+
+# ===== Python caches =====
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ===== Large/binary artifacts =====
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.whl
+*.sif
+*.sqsh
+*.img
+
+# ===== Archives =====
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# ===== Local backups =====
+*.bak
+*.bak.*
+*~
+
+# ===== Environments / secrets =====
+.env
+.env.*
+.venv/
+venv/
+
+# ===== OS/editor =====
+.DS_Store
+*.swp

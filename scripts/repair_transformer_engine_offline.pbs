@@ -1,0 +1,207 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N repair_te_offline
+#PBS -j oe
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+export VERL_SRC=$PROJ/src/verl
+export TE_SRC=$PROJ/src/TransformerEngine
+
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+
+mkdir -p $PROJ/logs
+LOG=$PROJ/logs/repair_transformer_engine_offline_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+
+echo "===== Job info ====="
+date
+hostname
+module list
+which python
+python --version
+which nvcc
+nvcc --version
+nvidia-smi
+
+echo "===== Explicit GPU visibility ====="
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+
+echo "===== Check local TransformerEngine source ====="
+test -d "$TE_SRC/.git"
+cd "$TE_SRC"
+git rev-parse HEAD
+git submodule status --recursive | head -50
+
+echo "===== Current torch/cuda state ====="
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("gpu0:", torch.cuda.get_device_name(0))
+PY
+
+echo "===== Locate cuDNN root ====="
+read CUDNN_PATH CUDNN_INCLUDE_DIR CUDNN_LIBRARY_DIR CUDNN_LIBRARY <<< "$(python - <<'PY'
+import site
+from pathlib import Path
+
+roots = []
+
+# Prefer pip-installed cudnn that matches torch cu128 env.
+for sp in site.getsitepackages():
+    p = Path(sp) / "nvidia" / "cudnn"
+    if (p / "include" / "cudnn.h").exists():
+        roots.append(p)
+
+# Fallback to ABCI module path.
+for p in [
+    Path("/apps/cudnn/9.10.2/cuda12.8"),
+    Path("/apps/cudnn/9.10.2"),
+]:
+    if (p / "include" / "cudnn.h").exists():
+        roots.append(p)
+
+if not roots:
+    raise SystemExit("Could not find cuDNN root with include/cudnn.h")
+
+root = roots[0]
+include_dir = root / "include"
+
+lib_candidates = []
+for sub in ["lib", "lib64"]:
+    lib_candidates += list((root / sub).glob("libcudnn.so*"))
+
+if not lib_candidates:
+    raise SystemExit(f"Could not find libcudnn.so under {root}")
+
+# Prefer unversioned libcudnn.so if available, otherwise libcudnn.so.9.
+lib_candidates = sorted(lib_candidates, key=lambda x: (x.name != "libcudnn.so", len(x.name)))
+lib = lib_candidates[0]
+
+print(root, include_dir, lib.parent, lib)
+PY
+)"
+
+echo "CUDNN_PATH=$CUDNN_PATH"
+echo "CUDNN_INCLUDE_DIR=$CUDNN_INCLUDE_DIR"
+echo "CUDNN_LIBRARY_DIR=$CUDNN_LIBRARY_DIR"
+echo "CUDNN_LIBRARY=$CUDNN_LIBRARY"
+
+test -f "$CUDNN_INCLUDE_DIR/cudnn.h"
+test -e "$CUDNN_LIBRARY"
+
+echo "===== Export cuDNN variables for cudnn-frontend CMake ====="
+export CUDNN_PATH
+export CUDNN_ROOT=$CUDNN_PATH
+export CUDNN_DIR=$CUDNN_PATH
+export CUDNN_HOME=$CUDNN_PATH
+export CUDNN_INCLUDE_DIR
+export CUDNN_LIBRARY_DIR
+export CUDNN_LIBRARY
+
+export CPATH=$CUDNN_INCLUDE_DIR:${CPATH:-}
+export LIBRARY_PATH=$CUDNN_LIBRARY_DIR:${LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$CUDNN_LIBRARY_DIR:${LD_LIBRARY_PATH:-}
+
+export NVTE_FRAMEWORK=pytorch
+export CMAKE_CUDA_ARCHITECTURES=90
+export MAX_JOBS=${MAX_JOBS:-8}
+
+echo "===== Patch cuDNN.cmake if needed ====="
+CUDNN_CMAKE=$TE_SRC/3rdparty/cudnn-frontend/cmake/cuDNN.cmake
+test -f "$CUDNN_CMAKE"
+
+cp "$CUDNN_CMAKE" "$CUDNN_CMAKE.bak.$(date +%F_%H%M%S)"
+
+python - <<'PY'
+from pathlib import Path
+import os
+
+path = Path(os.environ["TE_SRC"]) / "3rdparty/cudnn-frontend/cmake/cuDNN.cmake"
+text = path.read_text()
+
+patch = r'''
+# ---- ABCI local patch: force cuDNN path from environment ----
+if(DEFINED ENV{CUDNN_PATH})
+  set(CUDNN_INCLUDE_DIR "$ENV{CUDNN_PATH}/include" CACHE PATH "cuDNN include directory" FORCE)
+  if(EXISTS "$ENV{CUDNN_PATH}/lib/libcudnn.so")
+    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib/libcudnn.so" CACHE FILEPATH "cuDNN library" FORCE)
+  elseif(EXISTS "$ENV{CUDNN_PATH}/lib/libcudnn.so.9")
+    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib/libcudnn.so.9" CACHE FILEPATH "cuDNN library" FORCE)
+  elseif(EXISTS "$ENV{CUDNN_PATH}/lib64/libcudnn.so")
+    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib64/libcudnn.so" CACHE FILEPATH "cuDNN library" FORCE)
+  elseif(EXISTS "$ENV{CUDNN_PATH}/lib64/libcudnn.so.9")
+    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib64/libcudnn.so.9" CACHE FILEPATH "cuDNN library" FORCE)
+  endif()
+endif()
+# ---- end ABCI local patch ----
+
+'''
+
+if "ABCI local patch: force cuDNN path" not in text:
+    path.write_text(patch + text)
+    print("patched", path)
+else:
+    print("already patched", path)
+PY
+
+echo "===== Show cuDNN.cmake head ====="
+head -60 "$CUDNN_CMAKE"
+
+echo "===== Clean TE build artifacts ====="
+cd "$TE_SRC"
+rm -rf build dist *.egg-info
+find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+
+echo "===== Offline install TransformerEngine from local source ====="
+python -m pip uninstall -y transformer_engine transformer-engine transformer_engine_torch transformer-engine-torch || true
+
+python -m pip install -v \
+  --no-index \
+  --no-deps \
+  --no-build-isolation \
+  "$TE_SRC"
+
+echo "===== Final import checks ====="
+python - <<'PY'
+import torch
+print("torch:", torch.__version__, torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+
+import transformer_engine
+print("transformer_engine:", transformer_engine.__file__)
+
+import transformer_engine.pytorch as te
+print("transformer_engine.pytorch: OK")
+
+import megatron.core
+print("megatron.core: OK")
+
+import vllm
+print("vllm:", vllm.__version__)
+
+import verl
+print("verl: OK")
+PY
+
+echo "===== pip check ====="
+python -m pip check || true
+
+echo "===== Done ====="
+date
+echo "Log saved to: $LOG"

@@ -1,0 +1,60 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N q3_inst_gsm8k_dapo_eval
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/q3_inst_gsm8k_dapo_eval.out
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+
+mkdir -p $PROJ/logs $PROJ/outputs/baseline_eval
+LOG=$PROJ/logs/baseline_eval_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+
+# ===== Experiment config: edit here, not through qsub -v =====
+MODEL_KEY=inst
+MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+DATA_PATH=$PROJ/data/gsm8k_train-00000-of-00001.parquet
+PROMPT_STYLE=dapo
+TP=4
+N=8
+MAX_SAMPLES=256
+MAX_TOKENS=6000
+TEMPERATURE=0.7
+TOP_P=0.95
+SEED=0
+TAG=${MODEL_KEY}_${PROMPT_STYLE}_gsm8k_n${N}_m${MAX_SAMPLES}_tok${MAX_TOKENS}_seed${SEED}
+OUT=$PROJ/outputs/baseline_eval/${TAG}_${PBS_JOBID:-manual}.jsonl
+
+# Basic provenance
+which python
+python --version
+hostname
+date
+
+test -d "$MODEL_PATH"
+test -f "$DATA_PATH"
+
+python $PROJ/scripts/baseline_math_eval_vllm_v2.py \
+  --model "$MODEL_KEY" \
+  --model-path "$MODEL_PATH" \
+  --data "$DATA_PATH" \
+  --prompt-style "$PROMPT_STYLE" \
+  --tp "$TP" \
+  --n "$N" \
+  --max-samples "$MAX_SAMPLES" \
+  --max-tokens "$MAX_TOKENS" \
+  --temperature "$TEMPERATURE" \
+  --top-p "$TOP_P" \
+  --seed "$SEED" \
+  --out "$OUT"

@@ -1,0 +1,107 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N q3_nemo_math_base
+#PBS -j oe
+
+# Offline K=8 baseline for Qwen3-30B-A3B-Instruct-2507 on a prepared,
+# reproducibly sampled Nemotron-Math-v2 problem-level parquet.
+
+set -Eeuo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+export MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+
+DATA_FILE=${DATA_FILE:-$PROJ/data/nemotron_math_v2/nemotron_math_v2_baseline_n256_seed20260727.parquet}
+SYSTEM_PROMPT_FILE=${SYSTEM_PROMPT_FILE:-$PROJ/config/unicode_system_prompt.txt}
+REWARD_FILE=${REWARD_FILE:-$PROJ/rewards/unicode_math_reward_v4.py}
+N_SAMPLES=${N_SAMPLES:-8}
+MAX_SAMPLES=${MAX_SAMPLES:-256}
+MAX_PROMPT_TOKENS=${MAX_PROMPT_TOKENS:-3072}
+MAX_RESPONSE_TOKENS=${MAX_RESPONSE_TOKENS:-8192}
+TP_SIZE=${TP_SIZE:-4}
+SAMPLING_SEED=${SAMPLING_SEED:-42}
+
+mkdir -p \
+  "$PROJ/logs" \
+  "$PROJ/outputs/baseline_eval/nemotron_math_v2"
+
+RUN_ID=${PBS_JOBID:-manual}_$(date +%F_%H%M%S)
+LOG=$PROJ/logs/baseline_nemotron_math_v2_${RUN_ID}.log
+exec > >(tee -a "$LOG") 2>&1
+
+for required in \
+  "$DATA_FILE" \
+  "$SYSTEM_PROMPT_FILE" \
+  "$REWARD_FILE" \
+  "$PROJ/scripts/eval_nemotron_math_v2_baseline.py" \
+  "$PROJ/scripts/abci_verl_env.sh"
+do
+  if [ ! -f "$required" ]; then
+    echo "[FAIL] required file not found: $required" >&2
+    exit 2
+  fi
+done
+
+exec 9>"$PROJ/outputs/baseline_eval/nemotron_math_v2/.baseline.lock"
+if ! flock -n 9; then
+  echo "[FAIL] another Nemotron-Math-v2 baseline job is already running" >&2
+  exit 3
+fi
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export WANDB_MODE=offline
+export PYTHONPATH="$PROJ/compat${PYTHONPATH:+:$PYTHONPATH}"
+export ACC_WEIGHT=1.0
+export FORMAT_WEIGHT=0.2
+export REQUIRE_VERL_MATH_DAPO=1
+export REWARD_DEBUG_RATE=0
+
+OUT=$PROJ/outputs/baseline_eval/nemotron_math_v2/inst2507_n8_m256_${RUN_ID}.jsonl
+
+echo "[config] model=$MODEL_PATH"
+echo "[config] data=$DATA_FILE"
+echo "[config] reward=$REWARD_FILE"
+echo "[config] N=$MAX_SAMPLES K=$N_SAMPLES"
+echo "[config] temperature=1.0 top_p=1.0 top_k=-1"
+echo "[config] max_prompt=$MAX_PROMPT_TOKENS max_response=$MAX_RESPONSE_TOKENS"
+sha256sum "$DATA_FILE" "$SYSTEM_PROMPT_FILE" "$REWARD_FILE"
+
+python "$REWARD_FILE"
+
+python "$PROJ/scripts/eval_nemotron_math_v2_baseline.py" \
+  --model "$MODEL_PATH" \
+  --data "$DATA_FILE" \
+  --out "$OUT" \
+  --reward-file "$REWARD_FILE" \
+  --system-prompt-file "$SYSTEM_PROMPT_FILE" \
+  --n "$N_SAMPLES" \
+  --tp "$TP_SIZE" \
+  --max-samples "$MAX_SAMPLES" \
+  --max-prompt-tokens "$MAX_PROMPT_TOKENS" \
+  --max-tokens "$MAX_RESPONSE_TOKENS" \
+  --max-model-len 11264 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --top-k -1 \
+  --seed "$SAMPLING_SEED" \
+  --dtype bfloat16 \
+  --gpu-memory-utilization 0.90 \
+  --max-num-seqs 64
+
+echo "[PASS] Nemotron-Math-v2 baseline completed"
+echo "[result] $OUT"
+echo "[summary] ${OUT%.jsonl}.summary.json"
+echo "[groups] ${OUT%.jsonl}.groups.parquet"

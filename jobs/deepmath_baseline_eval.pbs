@@ -1,0 +1,54 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N deepmath_baseline
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/deepmath_baseline.pbs.log
+
+# ============================================================
+# Baseline pass@k of untrained Qwen3-30B-A3B-Instruct-2507 on the
+# DeepMath-103K difficulty-stratified probe (unicode format).
+#
+# PREREQUISITES (login node, once):
+#   export HF_HOME=$PROJ/hf_home
+#   huggingface-cli download zwhe99/DeepMath-103K --repo-type dataset \
+#       --local-dir $PROJ/data/raw_deepmath
+#   python $PROJ/scripts/prepare_deepmath_probe.py \
+#       --input $PROJ/data/raw_deepmath \
+#       --out   $PROJ/data/deepmath_probe/deepmath_probe.parquet \
+#       --per-level 120 --seed 42
+#   pip install math-verify   # into the verl conda env
+# ============================================================
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+
+mkdir -p $PROJ/logs $PROJ/outputs/deepmath_baseline
+LOG=$PROJ/logs/deepmath_baseline_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+
+MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+
+python -c "import math_verify" || { echo "math-verify missing: pip install math-verify"; exit 1; }
+
+python $PROJ/scripts/deepmath_baseline_passk.py \
+  --model "$MODEL_PATH" \
+  --probe $PROJ/data/deepmath_probe/deepmath_probe.parquet \
+  --out   $PROJ/outputs/deepmath_baseline/inst2507_${PBS_JOBID:-manual} \
+  --n 8 \
+  --max-tokens 8192 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --tp 8
+
+echo "DeepMath baseline eval finished."

@@ -1,0 +1,129 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N q3_inst_unicode_openr1_smoke
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/q3_inst_unicode_openr1_smoke_DAPO_${PBS_JOBID}.log
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+
+mkdir -p \
+  $PROJ/logs \
+  $PROJ/outputs/openr1_smoke \
+  $PROJ/outputs/reward_debug \
+  $PROJ/ckpts/openr1_smoke
+
+LOG=$PROJ/logs/openr1_smoke_DAPO_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+
+# ============================================================
+# Experiment config: edit here, do not pass through qsub -v
+# ============================================================
+
+MODEL_KEY=inst
+MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+
+# Choose one:
+#   dapo
+#   acereason
+DATASET_TAG=dapo
+
+if [ "$DATASET_TAG" = "dapo" ]; then
+  TRAIN_FILES=$PROJ/data/smoke/dapo_unicode_openr1_train_12.parquet
+  VAL_FILES=$PROJ/data/smoke/dapo_unicode_openr1_val_4.parquet
+elif [ "$DATASET_TAG" = "acereason" ]; then
+  TRAIN_FILES=$PROJ/data/smoke/acereason_unicode_openr1_train_12.parquet
+  VAL_FILES=$PROJ/data/smoke/acereason_unicode_openr1_val_4.parquet
+else
+  echo "Unknown DATASET_TAG=$DATASET_TAG"
+  exit 1
+fi
+
+INFER_BACKEND=vllm
+
+# Tiny GRPO smoke settings
+NGPUS_PER_NODE=8
+NNODES=1
+TRAIN_BATCH_SIZE=2
+PPO_MINI_BATCH_SIZE=4
+ROLLOUT_N=2
+MAX_PROMPT_LENGTH=4000
+MAX_RESPONSE_LENGTH=8000
+PPO_MAX_TOKEN_LEN_PER_GPU=4096
+REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=4096
+ACTOR_TP=2
+ACTOR_PP=2
+ACTOR_EP=2
+
+REF_TP=2
+REF_PP=2
+REF_EP=2
+
+# rollout 可以先保持 4；如果后面 vLLM/rollout 侧报错，再降到 2
+ROLLOUT_TP=4
+GEN_MOE_TP=1
+GEN_MOE_EP=4
+
+
+# Reward config
+export REASONING_FORMAT_MODE=unicode
+export ACC_WEIGHT=1.0
+export FORMAT_WEIGHT=0.2
+export TAG_WEIGHT=0.2
+export REWARD_DEBUG_LOG=$PROJ/outputs/reward_debug/openr1_${DATASET_TAG}_${MODEL_KEY}_${PBS_JOBID:-manual}.jsonl
+
+PROJECT_NAME=qwen3_rlvr_openr1_smoke
+EXPERIMENT_NAME=${MODEL_KEY}_${DATASET_TAG}_unicode_openr1_smoke_${PBS_JOBID:-manual}
+
+cd "$VERL_SRC"
+
+ACTOR_TP=$ACTOR_TP \
+ACTOR_PP=$ACTOR_PP \
+ACTOR_EP=$ACTOR_EP \
+REF_TP=$REF_TP \
+REF_PP=$REF_PP \
+REF_EP=$REF_EP \
+ROLLOUT_TP=$ROLLOUT_TP \
+GEN_MOE_TP=$GEN_MOE_TP \
+GEN_MOE_EP=$GEN_MOE_EP \
+INFER_BACKEND=$INFER_BACKEND \
+MODEL_PATH=$MODEL_PATH \
+TRAIN_FILES=$TRAIN_FILES \
+VAL_FILES=$VAL_FILES \
+NGPUS_PER_NODE=$NGPUS_PER_NODE \
+NNODES=$NNODES \
+TRAIN_BATCH_SIZE=$TRAIN_BATCH_SIZE \
+PPO_MINI_BATCH_SIZE=$PPO_MINI_BATCH_SIZE \
+ROLLOUT_N=$ROLLOUT_N \
+MAX_PROMPT_LENGTH=$MAX_PROMPT_LENGTH \
+MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH \
+PPO_MAX_TOKEN_LEN_PER_GPU=$PPO_MAX_TOKEN_LEN_PER_GPU \
+REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=$REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU \
+PROJECT_NAME=$PROJECT_NAME \
+EXPERIMENT_NAME=$EXPERIMENT_NAME \
+bash /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/jobs/run_qwen3_30b_a3b_megatron.sh \
+  trainer.logger='["console"]' \
+  trainer.total_epochs=1 \
+  trainer.save_freq=-1 \
+  trainer.test_freq=-1 \
+  trainer.val_before_train=False \
+  trainer.default_local_dir=$PROJ/ckpts/openr1_smoke/$EXPERIMENT_NAME \
+  reward_model.reward_kwargs.overlong_buffer_cfg.enable=False \
+  reward.custom_reward_function.path=$PROJ/rewards/openr1_style_verl_reward.py \
+  reward.custom_reward_function.name=compute_score \
+  actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=null \
+  actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=null
+
+echo "Smoke finished."
+echo "Reward debug log: $REWARD_DEBUG_LOG"

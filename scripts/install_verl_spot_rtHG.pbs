@@ -1,0 +1,136 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q rt_HF
+#PBS -l select=1
+#PBS -l walltime=01:00:00
+#PBS -N install_verl_qwen3
+#PBS -j oe
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+
+mkdir -p $PROJ/logs
+LOG=$PROJ/logs/install_verl_spot_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+
+exec > >(tee -a "$LOG") 2>&1
+set -x
+
+echo "===== Job info ====="
+date
+hostname
+pwd
+echo "PBS_JOBID=${PBS_JOBID:-NA}"
+echo "PBS_O_WORKDIR=${PBS_O_WORKDIR:-NA}"
+
+echo "===== Module info ====="
+module list
+which nvcc || true
+nvcc --version || true
+nvidia-smi || true
+
+echo "===== Activate conda env ====="
+conda activate $ENV_PREFIX
+which python
+python --version
+python -m pip --version
+
+echo "===== Prevent concurrent installation into the same env ====="
+LOCKFILE=$PROJ/.install_verl.lock
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+  echo "Another install job is using this environment. Exit."
+  exit 1
+fi
+
+echo "===== Basic Python build tools ====="
+python -m pip install -U pip setuptools wheel packaging ninja cmake
+
+echo "===== Prepare verl source ====="
+mkdir -p $PROJ/src
+cd $PROJ/src
+
+if [ ! -d "$VERL_SRC/.git" ]; then
+  git clone https://github.com/verl-project/verl.git "$VERL_SRC"
+fi
+
+cd "$VERL_SRC"
+
+# 默认跟随 main。为了可复现，也可以之后改成固定 commit。
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+
+echo "===== Record verl commit ====="
+git rev-parse HEAD | tee $PROJ/VERL_COMMIT.txt
+git status --short
+
+echo "===== Install verl dependencies: vLLM + SGLang + Megatron Core ====="
+# 官方推荐 Megatron 路线用这个脚本。
+bash scripts/install_vllm_sglang_mcore.sh
+
+echo "===== Install verl itself ====="
+python -m pip install --no-deps -e .
+
+echo "===== Post-install record ====="
+python -m pip freeze | tee $PROJ/logs/pip_freeze_after_install_${PBS_JOBID:-manual}.txt
+conda list | tee $PROJ/logs/conda_list_after_install_${PBS_JOBID:-manual}.txt
+
+echo "===== Import checks ====="
+python - <<'PY'
+import os
+import torch
+
+print("python OK")
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("gpu0:", torch.cuda.get_device_name(0))
+
+import transformers
+print("transformers:", transformers.__version__)
+
+try:
+    import vllm
+    print("vllm:", vllm.__version__)
+except Exception as e:
+    print("vllm import failed:", repr(e))
+    raise
+
+try:
+    import megatron.core
+    print("megatron.core: OK")
+except Exception as e:
+    print("megatron.core import failed:", repr(e))
+    raise
+
+try:
+    import transformer_engine
+    print("transformer_engine: OK")
+except Exception as e:
+    print("transformer_engine import failed:", repr(e))
+    raise
+
+try:
+    import flash_attn
+    print("flash_attn:", flash_attn.__version__)
+except Exception as e:
+    print("flash_attn import failed:", repr(e))
+    raise
+
+import verl
+print("verl import: OK")
+PY
+
+echo "===== pip check ====="
+python -m pip check || true
+
+echo "===== Done ====="
+date
+echo "Log saved to: $LOG"

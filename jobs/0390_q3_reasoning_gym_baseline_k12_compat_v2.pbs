@@ -1,0 +1,103 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N 0390_q3_rg_base12
+#PBS -j oe
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+export MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+export RG_PY=$PROJ/vendor/reasoning_gym_compat_py
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export PYTHONNOUSERSITE=1
+
+CONFIG=$PROJ/config/reasoning_gym_calibration_v1.yaml
+DATA=$PROJ/data/reasoning_gym_v1/reasoning_gym_calibration_v1.parquet
+OUT_DIR=$PROJ/outputs/reasoning_gym_baseline
+OUT=$OUT_DIR/qwen3_30b_a3b_inst2507_rg_calibration_k12_${PBS_JOBID:-manual}.jsonl
+SYSTEM_PROMPT=$PROJ/config/unicode_system_prompt.txt
+LOG=$PROJ/logs/0390_q3_rg_base12_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+
+mkdir -p "$PROJ/logs" "$OUT_DIR" "$(dirname "$DATA")" "/tmp/0390_mpl_${PBS_JOBID:-manual}"
+exec > >(tee -a "$LOG") 2>&1
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+
+if [[ ! -d "$RG_PY" ]]; then
+  echo "[FAIL] compatible Reasoning Gym overlay is absent: $RG_PY" >&2
+  echo "Run: bash scripts/prepare_reasoning_gym_compat_v2.sh install" >&2
+  exit 2
+fi
+
+export PYTHONPATH="$RG_PY:$PROJ/compat${PYTHONPATH:+:$PYTHONPATH}"
+export MPLCONFIGDIR="/tmp/0390_mpl_${PBS_JOBID:-manual}"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+
+RG_TARGET="$RG_PY" RG_OLD_TARGET="$PROJ/vendor/reasoning_gym_py" python - <<'PY'
+from importlib import metadata
+from pathlib import Path
+from packaging.version import Version
+import importlib
+import json
+import os
+
+target = Path(os.environ["RG_TARGET"]).resolve()
+old_target = Path(os.environ["RG_OLD_TARGET"]).resolve()
+base = {}
+for name in ("numpy", "packaging", "sympy", "matplotlib"):
+    module = importlib.import_module(name)
+    path = Path(module.__file__).resolve()
+    if path == target or target in path.parents:
+        raise RuntimeError(f"{name} is shadowed by Reasoning Gym overlay: {path}")
+    if path == old_target or old_target in path.parents:
+        raise RuntimeError(f"{name} is shadowed by unsafe old Reasoning Gym overlay: {path}")
+    base[name] = {"version": module.__version__, "path": str(path)}
+if Version(base["numpy"]["version"]) >= Version("2.3"):
+    raise RuntimeError(f"unexpected numpy (must preserve the working <2.3 stack): {base['numpy']}")
+if Version(base["packaging"]["version"]) >= Version("26"):
+    raise RuntimeError(f"pyvers-incompatible packaging: {base['packaging']}")
+for name in ("torch", "transformers", "vllm", "verl", "megatron.core", "reasoning_gym"):
+    importlib.import_module(name)
+if metadata.version("reasoning-gym") != "0.1.25":
+    raise RuntimeError(f"unexpected reasoning-gym version: {metadata.version('reasoning-gym')}")
+print(json.dumps({"reasoning_gym": metadata.version("reasoning-gym"), "base_modules": base}, indent=2))
+print("[PASS] dependency compatibility preflight")
+PY
+
+python "$PROJ/rewards/unicode_reasoning_gym_reward_v1.py"
+
+python "$PROJ/scripts/build_reasoning_gym_parquet.py" \
+  --config "$CONFIG" \
+  --system-prompt-file "$SYSTEM_PROMPT" \
+  --output "$DATA" \
+  --split calibration
+
+python "$PROJ/scripts/baseline_reasoning_gym_vllm.py" \
+  --model "$MODEL_PATH" \
+  --data "$DATA" \
+  --out "$OUT" \
+  --max-samples 384 \
+  --n 12 \
+  --compare-k 8 \
+  --tp 8 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --max-tokens 30000 \
+  --max-model-len 26000 \
+  --gpu-memory-utilization 0.90 \
+  --seed 42
+
+echo "[PASS] records: $OUT"
+echo "[PASS] summary: ${OUT%.jsonl}.summary.json"
+echo "[PASS] per-stratum table: ${OUT%.jsonl}.by_stratum.csv"
+echo "[PASS] log: $LOG"

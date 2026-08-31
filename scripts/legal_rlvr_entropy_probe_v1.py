@@ -1,0 +1,940 @@
+#!/usr/bin/env python3
+"""Legal reasoning performance and full-vocabulary policy-entropy probe.
+
+This is an RLVR-checkpoint adapter for the user's existing
+``legal_reasoning_probe_vllm_two_stage_entropy_noChunk.py`` workflow.
+
+Stage ``generate``:
+  * loads one frozen legal JSONL probe;
+  * keeps the RLVR Unicode output contract fixed across conditions;
+  * inserts the none/weak/strong legal hint into the user message;
+  * generates with vLLM;
+  * evaluates with the original legal evaluator;
+  * saves exact prompt and generated token IDs.
+
+Stage ``score``:
+  * loads the same model-only HF snapshot;
+  * teacher-forces the saved trajectories;
+  * computes full-vocabulary Shannon entropy for every generated token;
+  * separates <think> and Unicode reasoning/answer regions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import hashlib
+import json
+import math
+import os
+import pickle
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Iterable
+
+import torch
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+try:
+    from legal_reasoning_probe_vllm_two_stage_entropy_noChunk import (
+        build_law_prompt,
+        eval_one,
+    )
+except Exception as exc:
+    raise RuntimeError(
+        "Cannot import the original legal probe. Put "
+        "legal_reasoning_probe_vllm_two_stage_entropy_noChunk.py in the same "
+        "scripts/ directory."
+    ) from exc
+
+
+FORMAT_SYSTEM_PROMPT = (
+    "You are a reasoning assistant. Respond exactly in this format:\n"
+    "《reasoning》\n"
+    "reasoning\n"
+    "《/reasoning》\n"
+    "《answer》\n"
+    "final answer only\n"
+    "《/answer》"
+)
+
+# Keep the output protocol identical across hint conditions.  The legal hint
+# itself is inserted into the user message so that hint effects are not
+# confounded with a different system-level output contract.
+SYSTEM_PROMPTS = {
+    "none": FORMAT_SYSTEM_PROMPT,
+    "weak": FORMAT_SYSTEM_PROMPT,
+    "strong": FORMAT_SYSTEM_PROMPT,
+}
+
+LEGAL_HINTS = {
+    "none": "",
+    "weak": (
+        "任务提示：请注意案件中各个事实发生的时间点，以及法律的时间效力和溯及力问题。"
+    ),
+    "strong": (
+        "任务提示：请注意案件中各个事实发生的时间点及法律的时间效力。"
+        "民事法律时间效力的基本原则是法不溯及既往，因此应判断案件事实应当适用旧法还是新法；"
+        "同时还应考虑有利溯及、新增溯及，以及新增具体规定可用于裁判说理等例外情况。"
+    ),
+}
+
+UNICODE_REASONING_OPEN = "《reasoning》"
+UNICODE_REASONING_CLOSE = "《/reasoning》"
+UNICODE_ANSWER_OPEN = "《answer》"
+UNICODE_ANSWER_CLOSE = "《/answer》"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_if_file(path: Path) -> str | None:
+    return sha256_file(path) if path.is_file() else None
+
+
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{line_number}: expected a JSON object")
+            rows.append(row)
+    return rows
+
+
+def atomic_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, default=str)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_pickle(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            pickle.dump(value, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def chunks(values: list[Any], size: int) -> Iterable[list[Any]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
+def parse_hint_levels(value: str) -> list[str]:
+    parts = [item.strip() for item in re.split(r"[:,]", value) if item.strip()]
+    if not parts:
+        raise ValueError("at least one hint level is required")
+    invalid = [item for item in parts if item not in SYSTEM_PROMPTS]
+    if invalid:
+        raise ValueError(f"unknown hint levels: {invalid}")
+    if len(parts) != len(set(parts)):
+        raise ValueError("duplicate hint levels are not allowed")
+    return parts
+
+
+def remove_original_incident_prefix(text: str) -> str:
+    # Preserve the existing probe's exact behavior for comparability.
+    return text.strip("经审理查明：").replace("本院", "法院")
+
+
+def build_messages(system_prompt: str, user_prompt: str) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_prompt})
+    return messages
+
+
+def apply_chat_template_exact(
+    tokenizer: Any,
+    messages: list[dict[str, str]],
+    enable_thinking: bool,
+) -> str:
+    """Pass Qwen's enable_thinking variable across Transformers versions."""
+    common = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+    }
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            enable_thinking=enable_thinking,
+            **common,
+        )
+    except TypeError:
+        try:
+            return tokenizer.apply_chat_template(
+                messages,
+                chat_template_kwargs={"enable_thinking": enable_thinking},
+                **common,
+            )
+        except TypeError:
+            return tokenizer.apply_chat_template(messages, **common)
+
+
+def extract_final_answer(text: str) -> tuple[str, str]:
+    """Prefer the RLVR Unicode answer block, then the existing think protocol."""
+    if not text:
+        return "", "empty"
+
+    matches = list(
+        re.finditer(
+            re.escape(UNICODE_ANSWER_OPEN)
+            + r"\s*(.*?)\s*"
+            + re.escape(UNICODE_ANSWER_CLOSE),
+            text,
+            flags=re.S,
+        )
+    )
+    if matches:
+        return matches[-1].group(1).strip(), "unicode_answer"
+
+    close = re.search(r"</think>", text, flags=re.I)
+    if close:
+        return text[close.end() :].strip(), "think_answer"
+
+    opened = re.search(r"<think>", text, flags=re.I)
+    if opened:
+        return "", "unclosed_think"
+
+    return text.strip(), "whole_response"
+
+
+def response_region_spans(text: str) -> dict[str, list[tuple[int, int]]]:
+    """Return non-overlapping semantic/control character spans."""
+    spans: dict[str, list[tuple[int, int]]] = {
+        "reasoning": [],
+        "answer": [],
+        "control": [],
+    }
+    if not text:
+        return spans
+
+    tags = [
+        UNICODE_REASONING_OPEN,
+        UNICODE_REASONING_CLOSE,
+        UNICODE_ANSWER_OPEN,
+        UNICODE_ANSWER_CLOSE,
+        "<think>",
+        "</think>",
+    ]
+    for tag in tags:
+        for match in re.finditer(re.escape(tag), text, flags=re.I):
+            spans["control"].append((match.start(), match.end()))
+
+    ro = text.find(UNICODE_REASONING_OPEN)
+    rc = text.find(UNICODE_REASONING_CLOSE, ro + len(UNICODE_REASONING_OPEN))
+    if ro >= 0:
+        start = ro + len(UNICODE_REASONING_OPEN)
+        end = rc if rc >= 0 else len(text)
+        if end > start:
+            spans["reasoning"].append((start, end))
+
+    ao = text.rfind(UNICODE_ANSWER_OPEN)
+    ac = text.find(UNICODE_ANSWER_CLOSE, ao + len(UNICODE_ANSWER_OPEN))
+    if ao >= 0:
+        start = ao + len(UNICODE_ANSWER_OPEN)
+        end = ac if ac >= 0 else len(text)
+        if end > start:
+            spans["answer"].append((start, end))
+
+    if not spans["reasoning"]:
+        think_open = re.search(r"<think>", text, flags=re.I)
+        think_close = re.search(r"</think>", text, flags=re.I)
+        if think_open and think_close and think_open.end() <= think_close.start():
+            spans["reasoning"].append((think_open.end(), think_close.start()))
+        elif think_close and not think_open:
+            spans["reasoning"].append((0, think_close.start()))
+        elif think_open and not think_close:
+            spans["reasoning"].append((think_open.end(), len(text)))
+
+    if not spans["answer"]:
+        think_close = re.search(r"</think>", text, flags=re.I)
+        if think_close and think_close.end() < len(text):
+            spans["answer"].append((think_close.end(), len(text)))
+
+    return spans
+
+
+def overlap(first: tuple[int, int], second: tuple[int, int]) -> int:
+    return max(0, min(first[1], second[1]) - max(first[0], second[0]))
+
+
+def region_for_token(
+    token_span: tuple[int, int], spans: dict[str, list[tuple[int, int]]]
+) -> str:
+    for region in ("control", "reasoning", "answer"):
+        if any(overlap(token_span, span) > 0 for span in spans[region]):
+            return region
+    return "other"
+
+
+def decode_token_spans(
+    tokenizer: Any, token_ids: list[int]
+) -> tuple[str, list[tuple[int, int]], list[str], list[str]]:
+    """Decode exact generated IDs and obtain character spans.
+
+    The fast-tokenizer route is linear. If its re-encoding does not reproduce
+    the exact IDs, fall back to the original prefix-decoding method.
+    """
+    decoded = tokenizer.decode(
+        token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False
+    )
+    token_strings = tokenizer.convert_ids_to_tokens(token_ids)
+
+    try:
+        encoded = tokenizer(
+            decoded,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        encoded_ids = list(encoded["input_ids"])
+        offsets = [(int(a), int(b)) for a, b in encoded["offset_mapping"]]
+        if encoded_ids == token_ids and len(offsets) == len(token_ids):
+            pieces = [decoded[start:end] for start, end in offsets]
+            return decoded, offsets, pieces, token_strings
+    except Exception:
+        pass
+
+    prefix: list[int] = []
+    previous = ""
+    offsets: list[tuple[int, int]] = []
+    pieces: list[str] = []
+    for token_id in token_ids:
+        prefix.append(token_id)
+        new_text = tokenizer.decode(
+            prefix, skip_special_tokens=False, clean_up_tokenization_spaces=False
+        )
+        start = len(previous)
+        offsets.append((start, len(new_text)))
+        pieces.append(new_text[start:])
+        previous = new_text
+    return previous, offsets, pieces, token_strings
+
+
+def mean_or_none(values: list[float]) -> float | None:
+    return float(sum(values) / len(values)) if values else None
+
+
+class FullVocabularyEntropyScorer:
+    def __init__(
+        self,
+        model_path: str,
+        dtype: str,
+        trust_remote_code: bool,
+        entropy_chunk_tokens: int,
+        max_memory_gib_per_gpu: int,
+    ) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code, use_fast=True
+        )
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        model_kwargs: dict[str, Any] = {
+            "trust_remote_code": trust_remote_code,
+            "device_map": "auto",
+            "low_cpu_mem_usage": True,
+        }
+        if dtype != "auto":
+            model_kwargs["torch_dtype"] = dtype_map[dtype]
+        else:
+            model_kwargs["torch_dtype"] = "auto"
+        if max_memory_gib_per_gpu > 0 and torch.cuda.is_available():
+            model_kwargs["max_memory"] = {
+                index: f"{max_memory_gib_per_gpu}GiB"
+                for index in range(torch.cuda.device_count())
+            }
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_path, **model_kwargs
+        ).eval()
+        self.input_device = self.model.get_input_embeddings().weight.device
+        self.entropy_chunk_tokens = entropy_chunk_tokens
+
+    @torch.inference_mode()
+    def score_batch(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for row in rows:
+            prompt_ids = [int(value) for value in row["prompt_token_ids"]]
+            response_ids = [int(value) for value in row["generated_token_ids"]]
+            prepared.append(
+                {
+                    "row": row,
+                    "prompt_ids": prompt_ids,
+                    "response_ids": response_ids,
+                    "full_ids": prompt_ids + response_ids,
+                }
+            )
+
+        max_length = max(len(item["full_ids"]) for item in prepared)
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id
+        if pad_id is None:
+            pad_id = 0
+
+        input_ids: list[list[int]] = []
+        attention_masks: list[list[int]] = []
+        for item in prepared:
+            pad_count = max_length - len(item["full_ids"])
+            input_ids.append(item["full_ids"] + [pad_id] * pad_count)
+            attention_masks.append([1] * len(item["full_ids"]) + [0] * pad_count)
+
+        input_tensor = torch.tensor(
+            input_ids, dtype=torch.long, device=self.input_device
+        )
+        attention_tensor = torch.tensor(
+            attention_masks, dtype=torch.long, device=self.input_device
+        )
+        outputs = self.model(
+            input_ids=input_tensor,
+            attention_mask=attention_tensor,
+            use_cache=False,
+        )
+        all_logits = outputs.logits
+
+        results: list[dict[str, Any]] = []
+        for batch_index, item in enumerate(prepared):
+            row = item["row"]
+            prompt_length = len(item["prompt_ids"])
+            response_ids = item["response_ids"]
+            response_length = len(response_ids)
+            if response_length == 0:
+                results.append(
+                    {
+                        "trajectory": empty_trajectory_entropy(row),
+                        "tokens": [],
+                    }
+                )
+                continue
+
+            start = prompt_length - 1
+            end = start + response_length
+            token_entropies: list[float] = []
+            for chunk_start in range(start, end, self.entropy_chunk_tokens):
+                chunk_end = min(end, chunk_start + self.entropy_chunk_tokens)
+                logits = all_logits[
+                    batch_index, chunk_start:chunk_end, :
+                ].float()
+                log_probs = F.log_softmax(logits, dim=-1)
+                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+                token_entropies.extend(
+                    float(value)
+                    for value in entropy.detach().cpu().tolist()
+                )
+                del logits, log_probs, entropy
+
+            decoded, offsets, pieces, token_strings = decode_token_spans(
+                self.tokenizer, response_ids
+            )
+            spans = response_region_spans(decoded)
+            regions = [region_for_token(span, spans) for span in offsets]
+
+            token_rows: list[dict[str, Any]] = []
+            region_values: dict[str, list[float]] = {
+                "reasoning": [],
+                "answer": [],
+                "control": [],
+                "other": [],
+            }
+            for token_index, (
+                token_id,
+                token_string,
+                text_piece,
+                entropy_value,
+                char_span,
+                region,
+            ) in enumerate(
+                zip(
+                    response_ids,
+                    token_strings,
+                    pieces,
+                    token_entropies,
+                    offsets,
+                    regions,
+                )
+            ):
+                region_values[region].append(entropy_value)
+                token_rows.append(
+                    {
+                        "checkpoint_step": row["checkpoint_step"],
+                        "seed": row["seed"],
+                        "hint_level": row["hint_level"],
+                        "case_index": row["case_index"],
+                        "probe_case_index": row["probe_case_index"],
+                        "case_id": row["case_id"],
+                        "source_folder": row.get("source_folder"),
+                        "token_index": token_index,
+                        "token_id": token_id,
+                        "token": token_string,
+                        "text_piece": text_piece,
+                        "entropy": entropy_value,
+                        "char_start": int(char_span[0]),
+                        "char_end": int(char_span[1]),
+                        "region": region,
+                    }
+                )
+
+            reasoning_values = region_values["reasoning"]
+            answer_values = region_values["answer"]
+            trajectory = {
+                "checkpoint_step": row["checkpoint_step"],
+                "seed": row["seed"],
+                "hint_level": row["hint_level"],
+                "case_index": row["case_index"],
+                "probe_case_index": row["probe_case_index"],
+                "case_id": row["case_id"],
+                "source_folder": row.get("source_folder"),
+                "raw_text": row.get("raw_text", ""),
+                "clean_answer": row.get("clean_answer", ""),
+                "decoded_response_text": decoded,
+                "finish_reason": row.get("finish_reason"),
+                "stop_reason": row.get("stop_reason"),
+                "truncated": row.get("finish_reason") == "length",
+                "full_entropy_mean": mean_or_none(token_entropies),
+                "full_entropy_sum": float(sum(token_entropies)),
+                "full_token_count": len(token_entropies),
+                "reasoning_entropy_mean": mean_or_none(reasoning_values),
+                "reasoning_entropy_sum": float(sum(reasoning_values)),
+                "reasoning_token_count": len(reasoning_values),
+                "answer_entropy_mean": mean_or_none(answer_values),
+                "answer_entropy_sum": float(sum(answer_values)),
+                "answer_token_count": len(answer_values),
+                # Compatibility aliases for the existing notebook.
+                "cot_entropy_mean": mean_or_none(reasoning_values),
+                "cot_entropy_sum": float(sum(reasoning_values)),
+                "cot_token_count": len(reasoning_values),
+                "control_token_count": len(region_values["control"]),
+                "other_token_count": len(region_values["other"]),
+            }
+            results.append({"trajectory": trajectory, "tokens": token_rows})
+
+        del outputs, all_logits, input_tensor, attention_tensor
+        return results
+
+
+def empty_trajectory_entropy(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "checkpoint_step": row["checkpoint_step"],
+        "seed": row["seed"],
+        "hint_level": row["hint_level"],
+        "case_index": row["case_index"],
+        "probe_case_index": row["probe_case_index"],
+        "case_id": row["case_id"],
+        "source_folder": row.get("source_folder"),
+        "raw_text": row.get("raw_text", ""),
+        "clean_answer": row.get("clean_answer", ""),
+        "decoded_response_text": "",
+        "finish_reason": row.get("finish_reason"),
+        "stop_reason": row.get("stop_reason"),
+        "truncated": False,
+        "full_entropy_mean": None,
+        "full_entropy_sum": 0.0,
+        "full_token_count": 0,
+        "reasoning_entropy_mean": None,
+        "reasoning_entropy_sum": 0.0,
+        "reasoning_token_count": 0,
+        "answer_entropy_mean": None,
+        "answer_entropy_sum": 0.0,
+        "answer_token_count": 0,
+        "cot_entropy_mean": None,
+        "cot_entropy_sum": 0.0,
+        "cot_token_count": 0,
+        "control_token_count": 0,
+        "other_token_count": 0,
+    }
+
+
+def validate_probe_rows(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        raise ValueError("probe is empty")
+    required = {"incident", "argue", "_entropy_probe_index", "_entropy_probe_case_id"}
+    for index, row in enumerate(rows):
+        missing = required - row.keys()
+        if missing:
+            raise ValueError(f"probe row {index} missing fields: {sorted(missing)}")
+
+
+def run_generate(args: argparse.Namespace) -> None:
+    from vllm import LLM, SamplingParams
+
+    probe_path = Path(args.probe).resolve()
+    run_dir = Path(args.run_dir).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    case_tests_path = run_dir / "case_tests.jsonl"
+    case_evals_path = run_dir / "case_evals.jsonl"
+    if (case_tests_path.exists() or case_evals_path.exists()) and not args.overwrite:
+        raise FileExistsError(
+            f"generation output already exists under {run_dir}; use --overwrite"
+        )
+
+    probe_rows = load_jsonl(probe_path)
+    validate_probe_rows(probe_rows)
+    hint_levels = parse_hint_levels(args.hint_levels)
+
+    llm_kwargs: dict[str, Any] = {
+        "model": args.model,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "max_model_len": args.max_model_len,
+        "trust_remote_code": args.trust_remote_code,
+        "dtype": args.dtype,
+        "enforce_eager": args.enforce_eager,
+        "disable_custom_all_reduce": args.disable_custom_all_reduce,
+        "seed": args.seed,
+    }
+    if "qwen3-next" in args.model.lower():
+        llm_kwargs["gdn_prefill_backend"] = "triton"
+    try:
+        llm = LLM(**llm_kwargs)
+    except TypeError as exc:
+        if "seed" not in str(exc):
+            raise
+        llm_kwargs.pop("seed")
+        llm = LLM(**llm_kwargs)
+
+    try:
+        tokenizer = llm.get_tokenizer()
+    except Exception:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model, trust_remote_code=args.trust_remote_code
+        )
+
+    chat_template_kwargs = {"enable_thinking": bool(args.enable_thinking)}
+    requests: list[dict[str, Any]] = []
+    for probe_case_index, record in enumerate(probe_rows):
+        incident = remove_original_incident_prefix(record["incident"])
+        argue = record["argue"].replace("本院", "法院")
+        base_user_prompt = build_law_prompt(incident, argue)
+        for hint_index, hint_level in enumerate(hint_levels):
+            hint_text = LEGAL_HINTS[hint_level]
+            if hint_text:
+                user_prompt = f"{hint_text}\n\n{base_user_prompt}"
+            else:
+                user_prompt = base_user_prompt
+            messages = build_messages(
+                SYSTEM_PROMPTS[hint_level],
+                user_prompt,
+            )
+            prompt_text = apply_chat_template_exact(
+                tokenizer,
+                messages,
+                enable_thinking=bool(args.enable_thinking),
+            )
+            prompt_token_ids = list(
+                tokenizer(prompt_text, add_special_tokens=False).input_ids
+            )
+            requests.append(
+                {
+                    "case_index": probe_case_index * len(hint_levels) + hint_index,
+                    "probe_case_index": probe_case_index,
+                    "case_id": record["_entropy_probe_case_id"],
+                    "hint_level": hint_level,
+                    "source_folder": record.get("source_folder"),
+                    "gold_record": record,
+                    "messages": messages,
+                    "prompt_text": prompt_text,
+                    "prompt_token_ids": prompt_token_ids,
+                }
+            )
+
+    sampling = SamplingParams(
+        n=1,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        max_tokens=args.max_new_tokens,
+    )
+
+    generated_rows: list[dict[str, Any]] = []
+    eval_rows: list[dict[str, Any]] = []
+    for request_batch in chunks(requests, args.batch_size):
+        prompts = [row["prompt_text"] for row in request_batch]
+        outputs = llm.generate(prompts, sampling_params=sampling, use_tqdm=False)
+        for request, output in zip(request_batch, outputs):
+            first = output.outputs[0]
+            raw_text = first.text
+            clean_answer, extraction = extract_final_answer(raw_text)
+            generated = {
+                "checkpoint_step": args.checkpoint_step,
+                "seed": args.seed,
+                "hint_level": request["hint_level"],
+                "case_index": request["case_index"],
+                "probe_case_index": request["probe_case_index"],
+                "case_id": request["case_id"],
+                "source_folder": request.get("source_folder"),
+                "messages": request["messages"],
+                "prompt_text": request["prompt_text"],
+                "prompt_token_ids": request["prompt_token_ids"],
+                "generated_token_ids": [
+                    int(value) for value in (getattr(first, "token_ids", []) or [])
+                ],
+                "raw_text": raw_text,
+                "clean_answer": clean_answer,
+                "clean_answer_extraction": extraction,
+                "finish_reason": getattr(first, "finish_reason", None),
+                "stop_reason": getattr(first, "stop_reason", None),
+                "model_path": str(Path(args.model).resolve()),
+                "chat_template_kwargs": chat_template_kwargs,
+            }
+            legal_eval = eval_one(request["gold_record"], clean_answer)
+            evaluation = {
+                "checkpoint_step": args.checkpoint_step,
+                "seed": args.seed,
+                "hint_level": request["hint_level"],
+                "case_index": request["case_index"],
+                "probe_case_index": request["probe_case_index"],
+                "case_id": request["case_id"],
+                "source_folder": request.get("source_folder"),
+                "effective_answer": bool(clean_answer),
+                "finish_reason": generated["finish_reason"],
+                "truncated": generated["finish_reason"] == "length",
+                **legal_eval,
+            }
+            generated_rows.append(generated)
+            eval_rows.append(evaluation)
+
+    atomic_jsonl(case_tests_path, generated_rows)
+    atomic_jsonl(case_evals_path, eval_rows)
+    atomic_pickle(run_dir / "case_tests.pkl", generated_rows)
+    atomic_pickle(run_dir / "case_evals.pkl", eval_rows)
+    metadata = {
+        "schema_version": 1,
+        "stage": "generate",
+        "checkpoint_step": args.checkpoint_step,
+        "model_path": str(Path(args.model).resolve()),
+        "model_config_sha256": sha256_if_file(Path(args.model) / "config.json"),
+        "probe": str(probe_path),
+        "probe_sha256": sha256_file(probe_path),
+        "num_probe_cases": len(probe_rows),
+        "num_trajectories": len(generated_rows),
+        "hint_levels": hint_levels,
+        "format_system_prompt": FORMAT_SYSTEM_PROMPT,
+        "legal_hints": {level: LEGAL_HINTS[level] for level in hint_levels},
+        "seed": args.seed,
+        "sampling": {
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "max_new_tokens": args.max_new_tokens,
+            "enable_thinking": args.enable_thinking,
+        },
+    }
+    atomic_json(run_dir / "generation_metadata.json", metadata)
+    print(
+        f"[PASS] generated {len(generated_rows)} legal trajectories -> {case_tests_path}"
+    )
+
+    del llm
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def run_score(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir).resolve()
+    generated_path = run_dir / "case_tests.jsonl"
+    if not generated_path.is_file():
+        raise FileNotFoundError(f"missing generation output: {generated_path}")
+
+    trajectory_path = run_dir / "trajectory_entropy.jsonl"
+    token_path = run_dir / "token_entropy.jsonl"
+    if (trajectory_path.exists() or token_path.exists()) and not args.overwrite:
+        raise FileExistsError(
+            f"entropy output already exists under {run_dir}; use --overwrite"
+        )
+
+    rows = load_jsonl(generated_path)
+    if not rows:
+        raise ValueError("case_tests.jsonl is empty")
+    for row in rows:
+        if int(row["checkpoint_step"]) != args.checkpoint_step:
+            raise ValueError(
+                "checkpoint step mismatch between CLI and generated trajectories"
+            )
+
+    scorer = FullVocabularyEntropyScorer(
+        model_path=args.model,
+        dtype=args.scorer_dtype,
+        trust_remote_code=args.trust_remote_code,
+        entropy_chunk_tokens=args.entropy_chunk_tokens,
+        max_memory_gib_per_gpu=args.scorer_max_memory_gib_per_gpu,
+    )
+
+    trajectory_rows: list[dict[str, Any]] = []
+    token_rows: list[dict[str, Any]] = []
+    total_batches = math.ceil(len(rows) / args.score_batch_size)
+    for batch_number, row_batch in enumerate(
+        chunks(rows, args.score_batch_size), start=1
+    ):
+        scored = scorer.score_batch(row_batch)
+        for item in scored:
+            trajectory_rows.append(item["trajectory"])
+            token_rows.extend(item["tokens"])
+        if batch_number == 1 or batch_number % 10 == 0 or batch_number == total_batches:
+            print(
+                f"[score] batch={batch_number}/{total_batches} "
+                f"trajectories={len(trajectory_rows)} tokens={len(token_rows)}",
+                flush=True,
+            )
+        if torch.cuda.is_available() and batch_number % 25 == 0:
+            torch.cuda.empty_cache()
+
+    atomic_jsonl(trajectory_path, trajectory_rows)
+    atomic_jsonl(token_path, token_rows)
+    atomic_pickle(run_dir / "trajectory_entropy.pkl", trajectory_rows)
+    metadata = {
+        "schema_version": 1,
+        "stage": "score",
+        "checkpoint_step": args.checkpoint_step,
+        "model_path": str(Path(args.model).resolve()),
+        "model_config_sha256": sha256_if_file(Path(args.model) / "config.json"),
+        "generated_path": str(generated_path),
+        "generated_sha256": sha256_file(generated_path),
+        "num_trajectories": len(trajectory_rows),
+        "num_token_records": len(token_rows),
+        "entropy_definition": (
+            "full-vocabulary Shannon entropy in natural-log units (nats), "
+            "computed from untempered model logits at each generated token"
+        ),
+        "scorer_dtype": args.scorer_dtype,
+        "score_batch_size": args.score_batch_size,
+        "entropy_chunk_tokens": args.entropy_chunk_tokens,
+        "scorer_max_memory_gib_per_gpu": args.scorer_max_memory_gib_per_gpu,
+    }
+    atomic_json(run_dir / "entropy_metadata.json", metadata)
+    print(
+        f"[PASS] scored {len(trajectory_rows)} trajectories and "
+        f"{len(token_rows)} tokens -> {run_dir}"
+    )
+
+
+def add_common_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--checkpoint-step", type=int, required=True)
+    parser.add_argument("--trust-remote-code", action="store_true", default=True)
+    parser.add_argument("--overwrite", action="store_true")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="stage", required=True)
+
+    generate = subparsers.add_parser("generate")
+    add_common_arguments(generate)
+    generate.add_argument("--probe", required=True)
+    generate.add_argument("--hint-levels", default="none:weak:strong")
+    generate.add_argument("--seed", type=int, default=1)
+    generate.add_argument("--batch-size", type=int, default=32)
+    generate.add_argument("--max-new-tokens", type=int, default=4096)
+    generate.add_argument("--temperature", type=float, default=1.0)
+    generate.add_argument("--top-p", type=float, default=1.0)
+    generate.add_argument("--top-k", type=int, default=-1)
+    generate.add_argument("--tensor-parallel-size", type=int, default=8)
+    generate.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    generate.add_argument("--max-model-len", type=int, default=32000)
+    generate.add_argument("--dtype", default="bfloat16")
+    generate.add_argument("--enable-thinking", action="store_true")
+    generate.add_argument("--enforce-eager", action="store_true")
+    generate.add_argument(
+        "--disable-custom-all-reduce",
+        action="store_true",
+        default=True,
+        help=(
+            "Disable vLLM's custom CUDA all-reduce and use NCCL instead. "
+            "Required for the ABCI 8-GPU rt_HF topology used by this probe."
+        ),
+    )
+
+    score = subparsers.add_parser("score")
+    add_common_arguments(score)
+    score.add_argument("--score-batch-size", type=int, default=1)
+    score.add_argument(
+        "--scorer-dtype",
+        choices=["auto", "bfloat16", "float16", "float32"],
+        default="bfloat16",
+    )
+    score.add_argument("--entropy-chunk-tokens", type=int, default=128)
+    score.add_argument(
+        "--scorer-max-memory-gib-per-gpu",
+        type=int,
+        default=16,
+        help="Accelerate device-map cap; keeps the 30B model from filling one GPU",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.checkpoint_step < 0:
+        raise SystemExit("--checkpoint-step must be non-negative")
+    if args.stage == "generate":
+        run_generate(args)
+    elif args.stage == "score":
+        run_score(args)
+    else:
+        raise AssertionError(args.stage)
+
+
+if __name__ == "__main__":
+    main()

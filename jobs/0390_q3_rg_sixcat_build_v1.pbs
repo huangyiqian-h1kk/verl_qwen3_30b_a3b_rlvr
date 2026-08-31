@@ -1,0 +1,76 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HC
+#PBS -l select=1
+#PBS -l walltime=16:00:00
+#PBS -N 0390_q3_rg_build
+#PBS -j oe
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+export MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+export RG_PY=$PROJ/vendor/reasoning_gym_compat_py
+export PYTHONNOUSERSITE=1
+export PYTHONHASHSEED=0
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+CONFIG=$PROJ/config/reasoning_gym_sixcat_profiles_v1.yaml
+SYSTEM_PROMPT=$PROJ/config/unicode_system_prompt.txt
+BUILDER=$PROJ/scripts/build_reasoning_gym_sixcat_parquet.py
+OUTPUT_DIR=$PROJ/data/reasoning_gym_sixcat_v1
+WORKERS=${WORKERS:-8}
+LOG=$PROJ/logs/0390_q3_rg_build_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+
+mkdir -p "$PROJ/logs" "$OUTPUT_DIR"
+exec > >(tee -a "$LOG") 2>&1
+ulimit -n 131072 || true
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+
+[[ -d "$RG_PY" ]] || {
+  echo "[FAIL] Reasoning Gym thin overlay is absent: $RG_PY" >&2
+  echo "Run once: bash scripts/prepare_reasoning_gym_compat_v2.sh install" >&2
+  exit 2
+}
+export PYTHONPATH="$RG_PY:$PROJ/compat${PYTHONPATH:+:$PYTHONPATH}"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+
+python - <<'PY'
+from importlib import metadata
+from pathlib import Path
+import reasoning_gym
+import numpy, sympy, torch, transformers, yaml
+
+version = metadata.version("reasoning-gym")
+assert version == "0.1.25", version
+assert len(reasoning_gym.factory.DATASETS) >= 79
+print(f"[PASS] compatible imports; reasoning-gym={version}; registry={len(reasoning_gym.factory.DATASETS)}")
+print(f"[PASS] numpy loaded from {Path(numpy.__file__).resolve()}")
+PY
+
+echo "[WARN] CodeIO generation executes curated reference/input-generator snippets bundled with Reasoning Gym 0.1.25."
+echo "[WARN] This occurs only in this dedicated CPU build job; model completions are never executed."
+
+python "$BUILDER" \
+  --config "$CONFIG" \
+  --system-prompt-file "$SYSTEM_PROMPT" \
+  --tokenizer-path "$MODEL_PATH" \
+  --output-dir "$OUTPUT_DIR" \
+  --workers "$WORKERS" \
+  --resume \
+  --acknowledge-codeio-exec
+
+[[ -f "$OUTPUT_DIR/BUILD_COMPLETE" ]] || { echo "[FAIL] BUILD_COMPLETE missing" >&2; exit 3; }
+echo "[PASS] frozen Reasoning Gym data: $OUTPUT_DIR"
+echo "[PASS] audit: $OUTPUT_DIR/audit_report.json"
+echo "[PASS] log: $LOG"

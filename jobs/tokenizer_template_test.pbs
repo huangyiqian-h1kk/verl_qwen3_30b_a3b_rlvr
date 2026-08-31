@@ -1,0 +1,25 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=00:30:00
+#PBS -N q3_tok_template
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/q3_tok_template_${PBS_JOBID}.log
+set -euo pipefail
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+mkdir -p $PROJ/logs $PROJ/outputs/tokenizer_template
+LOG=$PROJ/logs/tokenizer_template_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+python $PROJ/scripts/probe_qwen3_tokenizer_template.py \
+  --local-files-only \
+  --out-dir $PROJ/outputs/tokenizer_template \
+  --models \
+    $WORK/models/Qwen3-30B-A3B \
+    $WORK/models/Qwen3-30B-A3B-Instruct-2507

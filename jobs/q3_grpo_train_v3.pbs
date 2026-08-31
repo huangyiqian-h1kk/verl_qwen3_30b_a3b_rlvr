@@ -1,0 +1,325 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=48:00:00
+#PBS -N q3_grpo_v3
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/q3_grpo_v3_${PBS_JOBID}.log
+
+# GRPO training launcher for the two explicitly allowed starting models.
+#
+# Required qsub variables:
+#   MODEL_KEY=qwen3|inst2507
+#   DATASET_TAG=dapo|acereason
+#   STAGE=pilot|full
+#   RUN_VERSION=<stable human-readable id>
+#   ACTOR_LR=<explicit value>
+#   TARGET_STEPS=<20 for pilot/burn-in; later 500 for the same full run>
+#   HOME_FREE_GIB_AT_SUBMIT=<current free GiB from login-node show_quota>
+# Optional, only for the designated merged checkpoint rehearsal:
+#   ALLOW_PILOT_RESUME_TO_30=1
+#
+# Do not submit two jobs with the same experiment identity concurrently.
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+EXPECTED_VERL_COMMIT=62ac6d6e9fccc09ab6af2171217cee6e290b799b
+
+MODEL_KEY=${MODEL_KEY:?qsub must set MODEL_KEY=qwen3 or inst2507}
+DATASET_TAG=${DATASET_TAG:?qsub must set DATASET_TAG=dapo or acereason}
+STAGE=${STAGE:?qsub must set STAGE=pilot or full}
+RUN_VERSION=${RUN_VERSION:?qsub must set a stable RUN_VERSION}
+ACTOR_LR=${ACTOR_LR:?qsub must set ACTOR_LR explicitly}
+TARGET_STEPS=${TARGET_STEPS:?qsub must set TARGET_STEPS explicitly}
+ALLOW_PILOT_RESUME_TO_30=${ALLOW_PILOT_RESUME_TO_30:-0}
+HOME_FREE_GIB_AT_SUBMIT=${HOME_FREE_GIB_AT_SUBMIT:-}
+
+case "$MODEL_KEY" in
+  qwen3) MODEL_PATH=$WORK/models/Qwen3-30B-A3B ;;
+  inst2507) MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507 ;;
+  *) echo "[FAIL] unsupported MODEL_KEY=$MODEL_KEY" >&2; exit 2 ;;
+esac
+
+DATA_DIR=$PROJ/data/full_v1
+case "$DATASET_TAG" in
+  dapo)
+    TRAIN_FILES=$DATA_DIR/dapo_unicode_train.parquet
+    VAL_FILES=$DATA_DIR/dapo_unicode_holdout.parquet
+    ;;
+  acereason)
+    TRAIN_FILES=$DATA_DIR/acereason_unicode_train.parquet
+    VAL_FILES=$DATA_DIR/acereason_unicode_holdout.parquet
+    ;;
+  *) echo "[FAIL] unsupported DATASET_TAG=$DATASET_TAG" >&2; exit 2 ;;
+esac
+
+case "$STAGE" in
+  pilot)
+    TRAIN_BATCH_SIZE=32
+    PPO_MINI_BATCH_SIZE=32
+    VAL_N=1
+    PROJECT_NAME=qwen3_rlvr_grpo_pilot
+    REWARD_DEBUG_RATE=1
+    ;;
+  full)
+    TRAIN_BATCH_SIZE=256
+    PPO_MINI_BATCH_SIZE=32
+    VAL_N=4
+    PROJECT_NAME=qwen3_rlvr_grpo_full
+    REWARD_DEBUG_RATE=0.002
+    ;;
+  *) echo "[FAIL] unsupported STAGE=$STAGE" >&2; exit 2 ;;
+esac
+
+case "$TARGET_STEPS" in
+  ''|*[!0-9]*) echo "[FAIL] TARGET_STEPS must be a positive integer" >&2; exit 2 ;;
+  0) echo "[FAIL] TARGET_STEPS must be greater than zero" >&2; exit 2 ;;
+esac
+if [ "$STAGE" = pilot ]; then
+  if [ "$TARGET_STEPS" -eq 20 ]; then
+    :
+  elif [ "$TARGET_STEPS" -eq 30 ] && [ "$ALLOW_PILOT_RESUME_TO_30" = 1 ]; then
+    :
+  else
+    echo "[FAIL] pilot accepts step 20; step 30 is allowed only with ALLOW_PILOT_RESUME_TO_30=1" >&2
+    exit 2
+  fi
+fi
+if [ "$STAGE" = full ] && [ "$TARGET_STEPS" -ne 20 ] && [ "$TARGET_STEPS" -ne 500 ]; then
+  echo "[FAIL] full accepts only TARGET_STEPS=20 (burn-in) or 500 (extension)" >&2
+  exit 2
+fi
+case "$RUN_VERSION" in
+  *[!A-Za-z0-9._-]*|'')
+    echo "[FAIL] RUN_VERSION may contain only letters, digits, dot, underscore, hyphen" >&2
+    exit 2
+    ;;
+esac
+
+EXPERIMENT_NAME=${MODEL_KEY}_${DATASET_TAG}_unicode_grpo_${STAGE}_${RUN_VERSION}
+FULL_CKPT_DIR=$HOME/ckpts/verl_full/$EXPERIMENT_NAME
+SNAP_DIR=$PROJ/ckpts/model_snapshots/$EXPERIMENT_NAME
+AUDIT_FILE=$DATA_DIR/audit_v2.json
+SYSTEM_PROMPT_FILE=$PROJ/config/unicode_system_prompt.txt
+REWARD_FILE=$PROJ/rewards/unicode_math_reward_v3.py
+LAUNCHER=$PROJ/jobs/run_qwen3_30b_a3b_megatron.sh
+
+mkdir -p \
+  "$PROJ/logs" \
+  "$PROJ/outputs/reward_debug" \
+  "$PROJ/wandb" \
+  "$FULL_CKPT_DIR" \
+  "$SNAP_DIR"
+
+command -v flock >/dev/null || { echo "[FAIL] flock is required" >&2; exit 2; }
+exec 9>"$FULL_CKPT_DIR/.training.lock"
+if ! flock -n 9; then
+  echo "[FAIL] another process holds the training lock for $EXPERIMENT_NAME" >&2
+  exit 3
+fi
+printf 'job=%s host=%s started=%s\n' \
+  "${PBS_JOBID:-manual}" "$(hostname)" "$(date --iso-8601=seconds)" >&9
+
+LOG=$PROJ/logs/${STAGE}_${EXPERIMENT_NAME}_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+
+export PYTHONPATH="$PROJ/compat${PYTHONPATH:+:$PYTHONPATH}"
+
+python - "$ACTOR_LR" <<'PY'
+import math
+import sys
+
+try:
+    value = float(sys.argv[1])
+except ValueError:
+    raise SystemExit("[FAIL] ACTOR_LR is not numeric")
+if not math.isfinite(value) or value <= 0 or value > 1e-3:
+    raise SystemExit(f"[FAIL] unreasonable ACTOR_LR={value}")
+print(f"[PASS] ACTOR_LR={value:g}")
+PY
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export WANDB_MODE=offline
+export WANDB_DIR=$PROJ/wandb
+export TOKENIZER_FALLBACK_DIR=$MODEL_PATH
+export ACC_WEIGHT=1.0
+export FORMAT_WEIGHT=0.2
+export REQUIRE_VERL_MATH_DAPO=1
+export REWARD_DEBUG_RATE
+export REWARD_DEBUG_LOG=$PROJ/outputs/reward_debug/${EXPERIMENT_NAME}_${PBS_JOBID:-manual}.jsonl
+export KEEP_FULL_CKPTS=2
+export FULL_CKPT_PRUNER=$PROJ/scripts/prune_full_checkpoints_v3.sh
+
+python "$REWARD_FILE"
+python "$PROJ/scripts/preflight_model_and_data.py" \
+  --project "$PROJ" \
+  --model-key "$MODEL_KEY" \
+  --model-path "$MODEL_PATH" \
+  --dataset-tag "$DATASET_TAG" \
+  --train-file "$TRAIN_FILES" \
+  --val-file "$VAL_FILES" \
+  --reward-file "$REWARD_FILE" \
+  --launcher "$LAUNCHER" \
+  --verl-src "$VERL_SRC" \
+  --expected-verl-commit "$EXPECTED_VERL_COMMIT" \
+  --dataset-audit "$AUDIT_FILE" \
+  --max-prompt-length 2048
+
+bash "$PROJ/scripts/checkpoint_preflight.sh" "$FULL_CKPT_DIR"
+HOME_FREE_GIB_AT_SUBMIT="$HOME_FREE_GIB_AT_SUBMIT" \
+  bash "$PROJ/scripts/check_home_quota_v3.sh" "$FULL_CKPT_DIR" 1500 600
+if [ "$STAGE" = pilot ] && [ "$TARGET_STEPS" -eq 30 ]; then
+  tracker_file=$FULL_CKPT_DIR/latest_checkpointed_iteration.txt
+  if [ ! -f "$tracker_file" ] || [ "$(tr -d '[:space:]' < "$tracker_file")" -lt 20 ]; then
+    echo "[FAIL] pilot step 30 requires the same experiment to have completed step 20" >&2
+    exit 4
+  fi
+fi
+VAL_BEFORE_TRAIN=True
+if [ -f "$FULL_CKPT_DIR/latest_checkpointed_iteration.txt" ]; then
+  VAL_BEFORE_TRAIN=False
+fi
+
+python "$PROJ/scripts/check_run_fingerprint.py" \
+  --checkpoint-dir "$FULL_CKPT_DIR" \
+  --item "model_key=$MODEL_KEY" \
+  --item "model_path=$MODEL_PATH" \
+  --item "dataset_tag=$DATASET_TAG" \
+  --item "stage=$STAGE" \
+  --item "train_batch_size=$TRAIN_BATCH_SIZE" \
+  --item "rollout_n=8" \
+  --item "ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE" \
+  --item "ppo_epochs=1" \
+  --item "actor_lr=$ACTOR_LR" \
+  --item "max_prompt_length=2048" \
+  --item "max_response_length=4096" \
+  --item "adv_estimator=grpo" \
+  --item "use_kl_in_reward=false" \
+  --item "use_kl_loss=false" \
+  --item "clip_low=0.2" \
+  --item "clip_high=0.28" \
+  --item "actor_tp_pp_ep=2,2,2" \
+  --item "ref_tp_pp_ep=2,2,2" \
+  --item "rollout_tp_gen_ep=4,4" \
+  --item "val_n=$VAL_N" \
+  --item "val_same_dataset_only=true" \
+  --item "enable_thinking=false" \
+  --item "seed=42" \
+  --item "save_freq=10" \
+  --item "test_freq=10" \
+  --item "verl_commit=$EXPECTED_VERL_COMMIT" \
+  --hash-file "train_data=$TRAIN_FILES" \
+  --hash-file "val_data=$VAL_FILES" \
+  --hash-file "reward=$REWARD_FILE" \
+  --hash-file "launcher=$LAUNCHER" \
+  --hash-file "system_prompt=$SYSTEM_PROMPT_FILE"
+
+python "$PROJ/scripts/write_baseline_metadata.py" \
+  --output-dir "$SNAP_DIR" \
+  --model-key "$MODEL_KEY" \
+  --model-path "$MODEL_PATH" \
+  --experiment-name "$EXPERIMENT_NAME" \
+  --system-prompt-file "$SYSTEM_PROMPT_FILE" \
+  --verl-src "$VERL_SRC"
+
+WATCHER_LOG=$PROJ/logs/snapshot_watcher_${EXPERIMENT_NAME}.log
+bash "$PROJ/scripts/snapshot_watcher_v3.sh" \
+  watch "$FULL_CKPT_DIR" "$SNAP_DIR" 30 >> "$WATCHER_LOG" 2>&1 &
+WATCHER_PID=$!
+
+stop_watcher() {
+  require_success=${1:-0}
+  if kill -0 "$WATCHER_PID" 2>/dev/null; then
+    kill "$WATCHER_PID" 2>/dev/null || true
+    wait "$WATCHER_PID" 2>/dev/null || true
+  fi
+  if ! bash "$PROJ/scripts/snapshot_watcher_v3.sh" \
+    oneshot "$FULL_CKPT_DIR" "$SNAP_DIR" >> "$WATCHER_LOG" 2>&1; then
+    [ "$require_success" -eq 0 ] || return 1
+  fi
+}
+cleanup() {
+  status=$?
+  trap - EXIT TERM INT HUP
+  stop_watcher 0 || true
+  exit "$status"
+}
+trap cleanup EXIT TERM INT HUP
+
+set -x
+cd "$VERL_SRC"
+
+ACTOR_TP=2 \
+ACTOR_PP=2 \
+ACTOR_VPP=1 \
+ACTOR_EP=2 \
+REF_TP=2 \
+REF_PP=2 \
+REF_VPP=1 \
+REF_EP=2 \
+ROLLOUT_TP=4 \
+GEN_MOE_TP=1 \
+GEN_MOE_EP=4 \
+INFER_BACKEND=vllm \
+MODEL_PATH="$MODEL_PATH" \
+TRAIN_FILES="$TRAIN_FILES" \
+VAL_FILES="$VAL_FILES" \
+NGPUS_PER_NODE=8 \
+NNODES=1 \
+TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
+PPO_MINI_BATCH_SIZE="$PPO_MINI_BATCH_SIZE" \
+ROLLOUT_N=8 \
+MAX_PROMPT_LENGTH=2048 \
+MAX_RESPONSE_LENGTH=4096 \
+ROLLOUT_MAX_MODEL_LEN=8192 \
+ROLLOUT_MAX_NUM_BATCHED_TOKENS=10240 \
+ACTOR_LR="$ACTOR_LR" \
+TEST_FREQ=10 \
+SAVE_FREQ=10 \
+VAL_N="$VAL_N" \
+VAL_TOP_P=1 \
+PROJECT_NAME="$PROJECT_NAME" \
+EXPERIMENT_NAME="$EXPERIMENT_NAME" \
+bash "$LAUNCHER" \
+  trainer.logger='["console","wandb"]' \
+  trainer.total_epochs=1000 \
+  trainer.total_training_steps="$TARGET_STEPS" \
+  trainer.val_before_train="$VAL_BEFORE_TRAIN" \
+  trainer.default_local_dir="$FULL_CKPT_DIR" \
+  trainer.resume_mode=auto \
+  trainer.max_actor_ckpt_to_keep=null \
+  trainer.log_val_generations=20 \
+  data.seed=42 \
+  +data.apply_chat_template_kwargs.enable_thinking=False \
+  actor_rollout_ref.actor.ppo_epochs=1 \
+  actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=null \
+  actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=null \
+  reward_model.reward_kwargs.overlong_buffer_cfg.enable=True \
+  reward_model.reward_kwargs.overlong_buffer_cfg.len=512 \
+  reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0 \
+  reward.custom_reward_function.path="$REWARD_FILE" \
+  reward.custom_reward_function.name=compute_score \
+  'actor_rollout_ref.actor.checkpoint.save_contents=[model,hf_model,optimizer,extra]'
+
+trap - EXIT TERM INT HUP
+stop_watcher 1
+set +x
+echo "==================== RUN REPORT ===================="
+echo "experiment     : $EXPERIMENT_NAME"
+echo "stage/target   : $STAGE / $TARGET_STEPS"
+echo "full ckpt dir  : $FULL_CKPT_DIR"
+echo "snapshot dir   : $SNAP_DIR"
+echo "tracker        : $(cat "$FULL_CKPT_DIR/latest_checkpointed_iteration.txt" 2>/dev/null || echo none)"
+echo "reward debug   : $REWARD_DEBUG_LOG"
+echo "===================================================="

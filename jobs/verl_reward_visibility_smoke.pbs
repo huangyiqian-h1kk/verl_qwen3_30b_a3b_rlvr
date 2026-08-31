@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -l select=1
+#PBS -l walltime=03:00:00
+#PBS -N q3_reward_vis
+#PBS -j oe
+set -euo pipefail
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+mkdir -p $PROJ/logs $PROJ/outputs/reward_visibility $PROJ/data/tiny_format
+LOG=$PROJ/logs/reward_visibility_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+FORMAT_MODE=${FORMAT_MODE:-native}
+python $PROJ/scripts/build_tiny_format_parquet.py --format "$FORMAT_MODE" --out-dir $PROJ/data/tiny_format/$FORMAT_MODE
+export DEBUG_REWARD_LOG=$PROJ/outputs/reward_visibility/debug_reward_${FORMAT_MODE}_${PBS_JOBID:-manual}.jsonl
+MODEL_KEY=${MODEL_KEY:-inst}
+if [ "$MODEL_KEY" = "a3b" ]; then
+  MODEL_PATH=${MODEL_PATH:-$WORK/models/Qwen3-30B-A3B}
+elif [ "$MODEL_KEY" = "inst" ]; then
+  MODEL_PATH=${MODEL_PATH:-$WORK/models/Qwen3-30B-A3B-Instruct-2507}
+else
+  : ${MODEL_PATH:?Set MODEL_PATH if MODEL_KEY is not a3b or inst}
+fi
+cd $PROJ
+INFER_BACKEND=${INFER_BACKEND:-vllm} \
+MODEL_PATH="$MODEL_PATH" \
+TRAIN_FILES=$PROJ/data/tiny_format/$FORMAT_MODE/train.parquet \
+VAL_FILES=$PROJ/data/tiny_format/$FORMAT_MODE/val.parquet \
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2} \
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-4} \
+ROLLOUT_N=${ROLLOUT_N:-2} \
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024} \
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128} \
+NGPUS_PER_NODE=8 NNODES=1 \
+bash $VERL_SRC/examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh \
+  trainer.logger='["console"]' \
+  trainer.total_epochs=1 \
+  trainer.save_freq=-1 \
+  trainer.test_freq=-1 \
+  trainer.val_before_train=False \
+  reward_model.reward_kwargs.overlong_buffer_cfg.enable=False \
+  custom_reward_function.path=$PROJ/rewards/debug_print_reward.py \
+  custom_reward_function.name=compute_score
+
+echo "DEBUG_REWARD_LOG=$DEBUG_REWARD_LOG"
+if [ -f "$DEBUG_REWARD_LOG" ]; then
+  tail -n 20 "$DEBUG_REWARD_LOG"
+fi

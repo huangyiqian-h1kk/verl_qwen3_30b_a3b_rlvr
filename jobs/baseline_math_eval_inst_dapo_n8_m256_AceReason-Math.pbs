@@ -1,0 +1,29 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=04:00:00
+#PBS -N q3_base_eval
+#PBS -j oe
+
+set -euo pipefail
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+source $PROJ/scripts/abci_verl_env.sh
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate $ENV_PREFIX
+mkdir -p $PROJ/logs $PROJ/outputs/baseline_eval
+LOG=$PROJ/logs/baseline_eval_AceReason-Math${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+exec > >(tee -a "$LOG") 2>&1
+set -x
+OUT=$PROJ/outputs/baseline_eval/inst_dapo_n8_m256_${PBS_JOBID:-manual}.jsonl
+python $PROJ/scripts/baseline_math_eval_vllm.py \
+  --model /groups/gcg51557/experiments/0390_rlsd/models/Qwen3-30B-A3B-Instruct-2507 \
+  --data /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/data/nvidia_AceReason-Math.jsonl \
+  --prompt-style dapo \
+  --tp 4 \
+  --n 8 \
+  --max-samples 256 \
+  --max-tokens 6000 \
+  --out "$OUT"

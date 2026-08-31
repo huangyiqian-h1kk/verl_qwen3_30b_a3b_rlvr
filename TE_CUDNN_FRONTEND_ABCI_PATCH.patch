@@ -1,0 +1,24 @@
+diff --git a/cmake/cuDNN.cmake b/cmake/cuDNN.cmake
+index 697767a..889f58c 100644
+--- a/cmake/cuDNN.cmake
++++ b/cmake/cuDNN.cmake
+@@ -1,3 +1,19 @@
++
++# ---- ABCI local patch: force cuDNN path from environment ----
++if(DEFINED ENV{CUDNN_PATH})
++  set(CUDNN_INCLUDE_DIR "$ENV{CUDNN_PATH}/include" CACHE PATH "cuDNN include directory" FORCE)
++  if(EXISTS "$ENV{CUDNN_PATH}/lib/libcudnn.so")
++    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib/libcudnn.so" CACHE FILEPATH "cuDNN library" FORCE)
++  elseif(EXISTS "$ENV{CUDNN_PATH}/lib/libcudnn.so.9")
++    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib/libcudnn.so.9" CACHE FILEPATH "cuDNN library" FORCE)
++  elseif(EXISTS "$ENV{CUDNN_PATH}/lib64/libcudnn.so")
++    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib64/libcudnn.so" CACHE FILEPATH "cuDNN library" FORCE)
++  elseif(EXISTS "$ENV{CUDNN_PATH}/lib64/libcudnn.so.9")
++    set(CUDNN_LIBRARY "$ENV{CUDNN_PATH}/lib64/libcudnn.so.9" CACHE FILEPATH "cuDNN library" FORCE)
++  endif()
++endif()
++# ---- end ABCI local patch ----
++
+ add_library(CUDNN::cudnn_all INTERFACE IMPORTED)
+ 
+ find_path(

@@ -1,0 +1,71 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=16:00:00
+#PBS -N 0390_q3_rg_base12
+#PBS -j oe
+#PBS -o /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/logs/0390_q3_rg_base12_${PBS_JOBID}.log
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+export MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+export RG_PY=$PROJ/vendor/reasoning_gym_py
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+CONFIG=$PROJ/config/reasoning_gym_calibration_v1.yaml
+DATA=$PROJ/data/reasoning_gym_v1/reasoning_gym_calibration_v1.parquet
+OUT_DIR=$PROJ/outputs/reasoning_gym_baseline
+OUT=$OUT_DIR/qwen3_30b_a3b_inst2507_rg_calibration_k12_${PBS_JOBID}.jsonl
+SYSTEM_PROMPT=$PROJ/config/unicode_system_prompt.txt
+
+mkdir -p "$PROJ/logs" "$OUT_DIR" "$(dirname "$DATA")" /tmp/0390_mpl_${PBS_JOBID}
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+
+export PYTHONPATH="$RG_PY:$PROJ/compat${PYTHONPATH:+:$PYTHONPATH}"
+export MPLCONFIGDIR=/tmp/0390_mpl_${PBS_JOBID}
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+
+python - <<'PY'
+import importlib.metadata
+import reasoning_gym
+from transformers import AutoTokenizer
+from vllm import LLM
+print("[PASS] reasoning-gym", importlib.metadata.version("reasoning-gym"))
+print("[PASS] Reasoning Gym tasks", len(reasoning_gym.factory.DATASETS))
+PY
+
+python "$PROJ/scripts/build_reasoning_gym_parquet.py" \
+  --config "$CONFIG" \
+  --system-prompt-file "$SYSTEM_PROMPT" \
+  --output "$DATA" \
+  --split calibration
+
+python "$PROJ/scripts/baseline_reasoning_gym_vllm.py" \
+  --model "$MODEL_PATH" \
+  --data "$DATA" \
+  --out "$OUT" \
+  --max-samples 384 \
+  --n 12 \
+  --compare-k 8 \
+  --tp 8 \
+  --temperature 1.0 \
+  --top-p 1.0 \
+  --max-tokens 8192 \
+  --max-model-len 11264 \
+  --gpu-memory-utilization 0.90 \
+  --seed 42
+
+echo "[PASS] records: $OUT"
+echo "[PASS] summary: ${OUT%.jsonl}.summary.json"
+echo "[PASS] per-stratum table: ${OUT%.jsonl}.by_stratum.csv"
+

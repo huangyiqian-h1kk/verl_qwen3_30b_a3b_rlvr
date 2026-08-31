@@ -1,0 +1,10 @@
+{
+  "name": "legal_rlvr_entropy_curve_v1",
+  "version": 1,
+  "target": "ABCI PBS; Qwen3-30B-A3B-Instruct-2507 model-only snapshots",
+  "checkpoint_axis": "RLVR steps 0 through 100",
+  "probe_task": "existing legal reasoning JSONL task with none/weak/strong hints",
+  "entropy": "full-vocabulary Shannon entropy in nats from HF logits",
+  "generation": "vLLM, one fixed legal probe shared by all checkpoints",
+  "created": "2026-07-30"
+}

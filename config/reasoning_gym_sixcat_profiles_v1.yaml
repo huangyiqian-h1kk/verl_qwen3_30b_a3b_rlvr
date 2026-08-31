@@ -1,0 +1,287 @@
+version: reasoning_gym_sixcat_profiles_v1
+reasoning_gym_version: "0.1.25"
+
+# This is an ordinary application YAML consumed by
+# scripts/build_reasoning_gym_sixcat_parquet.py.  It is not a Hydra config.
+dataset:
+  train_size: 64000
+  validation_per_stratum: 8
+  train_base_seed: 2026090101
+  validation_base_seed: 2026090201
+  shuffle_seed: 20260903
+  max_attempt_multiplier: 50
+  min_attempts_per_stratum: 2000
+
+audit:
+  max_prompt_tokens: 4096
+  max_oracle_tokens: 4096
+  max_entry_json_bytes: 2097152
+  max_generate_seconds: 30.0
+  max_verifier_seconds: 5.0
+  require_oracle_score: 1.0
+  reject_empty_answer: true
+  reject_answer_substrings:
+    - "Integral("
+  codeio_static_safety_filter: true
+
+difficulty_policy:
+  # Scalar and non-interval range attributes use the middle level for medium
+  # and the following level for hard.  Interval attributes use the first two
+  # disjoint bands.  Explicit task overrides below take precedence.
+  range_mode: upper_bound
+  scalar_or_point_range_medium: middle
+  scalar_or_point_range_hard: next
+  interval_range_medium_level: 0
+  interval_range_hard_level: 1
+
+# These exact names are also a registry-drift guard.  With RG 0.1.25 the six
+# selected Python module categories contain 79 tasks in total.
+categories:
+  algebra:
+    - complex_arithmetic
+    - intermediate_integration
+    - polynomial_equations
+    - polynomial_multiplication
+    - simple_equations
+    - simple_integration
+
+  algorithmic:
+    - ab
+    - base_conversion
+    - binary_alternation
+    - binary_matrix
+    - caesar_cipher
+    - count_primes
+    - cryptarithm
+    - game_of_life
+    - game_of_life_halting
+    - graph_color
+    - group_anagrams
+    - isomorphic_strings
+    - jugs
+    - letter_counting
+    - letter_jumble
+    - manipulate_matrix
+    - number_filtering
+    - number_sorting
+    - palindrome_generation
+    - palindrome_partitioning
+    - pool_matrix
+    - ransom_note
+    - rotate_matrix
+    - rotten_oranges
+    - sentence_reordering
+    - spell_backward
+    - spiral_matrix
+    - string_insertion
+    - string_manipulation
+    - string_splitting
+    - string_synthesis
+    - word_ladder
+    - word_sequence_reversal
+    - word_sorting
+
+  arithmetic:
+    - basic_arithmetic
+    - bitwise_arithmetic
+    - calendar_arithmetic
+    - chain_sum
+    - count_bits
+    - decimal_arithmetic
+    - decimal_chain_sum
+    - dice
+    - fraction_simplification
+    - gcd
+    - gsm_symbolic
+    - lcm
+    - leg_counting
+    - number_format
+    - power_function
+    - prime_factorization
+    - products
+    - time_intervals
+
+  geometry:
+    - advanced_geometry
+    - simple_geometry
+
+  code:
+    - bf
+    - codeio
+
+  games:
+    - boxnet
+    - countdown
+    - emoji_mystery
+    - futoshiki
+    - kakurasu
+    - knight_swap
+    - mahjong_puzzle
+    - maze
+    - mini_sudoku
+    - n_queens
+    - puzzle24
+    - rush_hour
+    - sokoban
+    - sudoku
+    - survo
+    - tower_of_hanoi
+    - tsumego
+
+# Equal task weights are used unless overridden here.  BF difficulty 2 has a
+# finite prompt support (empirically about 1.8k distinct prompts), so assigning
+# half of the 10,666-example Code category to BF would make zero-duplicate
+# generation impossible.  A 3:13 BF:CodeIO split gives 2,000 BF and 8,666
+# CodeIO examples while preserving the Code category's overall 1/6 mass.
+task_weights:
+  code:
+    bf: 3
+    codeio: 13
+
+# gsm_symbolic is the only selected RG 0.1.25 task without a curriculum.
+fixed_tasks:
+  gsm_symbolic:
+    tier: fixed
+    config:
+      difficulty: 1.0
+
+# Targeted caps keep known combinatorial and matrix generators below prompt,
+# verifier, and exhaustive-search pathologies.  All other tasks are generated
+# from their native curricula using the systematic policy above.
+task_overrides:
+  polynomial_equations:
+    medium:
+      min_terms: 3
+      max_terms: 5
+      min_value: 1
+      max_value: 150
+      min_degree: 2
+      max_degree: 3
+    hard:
+      min_terms: 5
+      max_terms: 7
+      min_value: 1
+      max_value: 500
+      min_degree: 3
+      max_degree: 4
+
+  intermediate_integration:
+    medium:
+      problem_types: [polynomial_exp_trig, cyclic, repeated_parts, log_inverse_trig]
+      problem_type_weights: [0.30, 0.20, 0.30, 0.20]
+      linear_lower_bound: 1
+      linear_upper_bound: 12
+      min_linear_degree: 2
+      max_linear_degree: 5
+      outer_constant_min: 1
+      outer_constant_max: 5
+      min_poly_degree: 3
+      max_poly_degree: 4
+    hard:
+      problem_types: [polynomial_exp_trig, cyclic, repeated_parts, log_inverse_trig]
+      problem_type_weights: [0.35, 0.15, 0.40, 0.10]
+      linear_lower_bound: 1
+      linear_upper_bound: 25
+      min_linear_degree: 4
+      max_linear_degree: 8
+      outer_constant_min: 2
+      outer_constant_max: 12
+      min_poly_degree: 5
+      max_poly_degree: 7
+
+  cryptarithm:
+    medium: {min_words: 2, max_words: 3, allow_leading_zero: false}
+    hard: {min_words: 3, max_words: 4, allow_leading_zero: false}
+
+  graph_color:
+    medium:
+      num_colors: 4
+      min_num_vertices: 16
+      max_num_vertices: 20
+      edge_probability: 0.20
+    hard:
+      num_colors: 3
+      min_num_vertices: 24
+      max_num_vertices: 30
+      edge_probability: 0.15
+
+  jugs:
+    medium: {num_jugs: 3, difficulty: 10}
+    hard: {num_jugs: 4, difficulty: 15}
+
+  countdown:
+    medium:
+      min_numbers: 6
+      max_numbers: 6
+      min_value: 1
+      max_value: 100
+      min_target: 100
+      max_target: 1000
+    hard:
+      min_numbers: 8
+      max_numbers: 8
+      min_value: 1
+      max_value: 200
+      min_target: 500
+      max_target: 5000
+
+  bf:
+    medium: {difficulty: 2}
+    hard: {difficulty: 3}
+
+  codeio:
+    # Levels 7/8 provide substantially more source-program diversity than 6.
+    # The builder also rejects snippets with filesystem/network/process APIs.
+    medium: {difficulty: 7}
+    hard: {difficulty: 8}
+
+  binary_matrix:
+    medium: {min_n: 12, max_n: 16, p_zero: 0.25}
+    hard: {min_n: 20, max_n: 25, p_zero: 0.10}
+
+  manipulate_matrix:
+    medium: {min_rows: 12, max_rows: 16, min_cols: 12, max_cols: 16, min_transforms: 3, max_transforms: 5}
+    hard: {min_rows: 20, max_rows: 25, min_cols: 20, max_cols: 25, min_transforms: 5, max_transforms: 10}
+
+  pool_matrix:
+    medium: {min_rows: 12, max_rows: 16, min_cols: 12, max_cols: 16, min_pool_size: 3, max_pool_size: 5}
+    hard: {min_rows: 20, max_rows: 25, min_cols: 20, max_cols: 25, min_pool_size: 5, max_pool_size: 7}
+
+  rotate_matrix:
+    medium: {min_n: 12, max_n: 16, min_rotations: 1, max_rotations: 5}
+    hard: {min_n: 20, max_n: 25, min_rotations: 5, max_rotations: 10}
+
+  spiral_matrix:
+    medium: {min_n: 12, max_n: 16}
+    hard: {min_n: 20, max_n: 25}
+
+  game_of_life:
+    medium: {grid_size_x: 16, grid_size_y: 16, filled_cells_weights: 0.20, simulation_steps: 2}
+    hard: {grid_size_x: 25, grid_size_y: 25, filled_cells_weights: 0.50, simulation_steps: 5}
+
+  game_of_life_halting:
+    medium: {grid_size_x: 16, grid_size_y: 16, difficulty: 2, num_oscillators: 7, max_simulation_steps: 50}
+    hard: {grid_size_x: 25, grid_size_y: 25, difficulty: 3, num_oscillators: 10, max_simulation_steps: 100}
+
+  # The native curriculum's middle levels fill every square with a knight
+  # (8/8 and 10/10 occupied), leaving no legal move.  Preserve spare squares
+  # and make hard differ through both piece count and requested solution length.
+  knight_swap:
+    medium: {min_nodes: 8, max_nodes: 8, min_pieces: 2, max_pieces: 2, min_steps: 4, max_steps: 12, max_attempts: 100, impossible_ratio: 0.20}
+    hard: {min_nodes: 10, max_nodes: 10, min_pieces: 3, max_pieces: 3, min_steps: 8, max_steps: 20, max_attempts: 100, impossible_ratio: 0.20}
+
+  maze:
+    medium: {min_dist: 5, max_dist: 10, min_grid_size: 10, max_grid_size: 16}
+    hard: {min_dist: 10, max_dist: 15, min_grid_size: 18, max_grid_size: 25}
+
+  rush_hour:
+    medium: {min_moves: 5, max_moves: 20}
+    hard: {min_moves: 20, max_moves: 35}
+
+  sokoban:
+    medium: {min_w: 7, max_w: 8, min_h: 7, max_h: 8}
+    hard: {min_w: 9, max_w: 10, min_h: 9, max_h: 10}
+
+  tower_of_hanoi:
+    medium: {min_disks: 5, max_disks: 6, min_pegs: 3, max_pegs: 4, visualize: false}
+    hard: {min_disks: 7, max_disks: 8, min_pegs: 3, max_pegs: 5, visualize: false}
