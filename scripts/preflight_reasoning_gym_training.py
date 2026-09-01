@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import hashlib
+import importlib.util
 import importlib.metadata
 import json
 import os
@@ -15,10 +15,9 @@ from typing import Any
 import pandas as pd
 from packaging.version import Version
 
-import reasoning_gym
-
-
 EXPECTED_SCHEMA = "reasoning_gym_static_v2"
+EXPECTED_SYSTEM_ROLE = "system"
+EXPECTED_USER_ROLE = "user"
 
 
 def sha256_file(path: Path, chunk_size: int = 8 << 20) -> str:
@@ -27,18 +26,6 @@ def sha256_file(path: Path, chunk_size: int = 8 << 20) -> str:
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def tagged_object_hook(value: dict[str, Any]) -> Any:
-    kind = value.get("__rg_json_type__")
-    raw = value.get("value")
-    if kind == "datetime":
-        return dt.datetime.fromisoformat(str(raw))
-    if kind == "date":
-        return dt.date.fromisoformat(str(raw))
-    if kind == "time":
-        return dt.time.fromisoformat(str(raw))
-    return value
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -58,6 +45,45 @@ def parse_items(items: list[str]) -> dict[str, str]:
             raise ValueError(f"duplicate or empty fingerprint key: {key!r}")
         result[key] = value
     return result
+
+
+def as_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+        if isinstance(value, dict):
+            return value
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    raise TypeError(f"expected mapping-like value, got {type(value).__name__}")
+
+
+def as_messages(value: Any) -> list[dict[str, str]]:
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"prompt is not a message sequence: {type(value).__name__}")
+    return [
+        {"role": str(as_mapping(item)["role"]), "content": str(as_mapping(item)["content"])}
+        for item in value
+    ]
+
+
+def load_reward_module(path: Path):
+    spec = importlib.util.spec_from_file_location("rg_training_reward_preflight", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import reward module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name in ("compute_score", "extract_answer"):
+        if not callable(getattr(module, name, None)):
+            raise RuntimeError(f"reward module is missing callable {name}: {path}")
+    return module
 
 
 def main() -> None:
@@ -88,12 +114,19 @@ def main() -> None:
     if missing:
         raise SystemExit(f"[FAIL] missing required paths: {missing}")
 
+    reward_path = Path(args.reward_file).resolve()
+    system_prompt_path = Path(args.system_prompt_file).resolve()
+    expected_system_prompt = system_prompt_path.read_text(encoding="utf-8").strip()
+    reward_module = load_reward_module(reward_path)
+
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "COMPLETE" or audit.get("status") != "PASS":
         raise SystemExit("[FAIL] dataset manifest/audit is not complete")
     if manifest.get("schema_version") != EXPECTED_SCHEMA:
         raise SystemExit(f"[FAIL] unexpected schema: {manifest.get('schema_version')}")
+    if manifest.get("system_prompt_sha256") != sha256_file(system_prompt_path):
+        raise SystemExit("[FAIL] dataset manifest and training system prompt differ")
     actual_version = importlib.metadata.version("reasoning-gym")
     if Version(actual_version).base_version != Version(str(manifest["reasoning_gym_version"])).base_version:
         raise SystemExit(
@@ -111,7 +144,7 @@ def main() -> None:
         raise SystemExit("[FAIL] manifest hash differs from BUILD_COMPLETE")
 
     frames = {}
-    for split, expected_rows in (("train", 64000), ("validation", 1256)):
+    for split, expected_rows in (("train", 64000), ("validation", 1240)):
         info = manifest["outputs"][split]
         path = Path(info["path"])
         if not path.is_file():
@@ -130,27 +163,65 @@ def main() -> None:
     categories, tasks = set(), set()
     for split, frame in frames.items():
         for row in frame.itertuples(index=False):
-            extra = row.extra_info
+            extra = as_mapping(row.extra_info)
+            reward_model = as_mapping(row.reward_model)
+            messages = as_messages(row.prompt)
+            if len(messages) != 2:
+                raise SystemExit(f"[FAIL] {split} row does not contain exactly system+user messages")
+            if messages[0]["role"] != EXPECTED_SYSTEM_ROLE or messages[0]["content"].strip() != expected_system_prompt:
+                raise SystemExit(f"[FAIL] {split} row system prompt mismatch")
+            if messages[1]["role"] != EXPECTED_USER_ROLE:
+                raise SystemExit(f"[FAIL] {split} row user role mismatch")
+            if reward_model.get("style") != "reasoning_gym_native_binary_v2":
+                raise SystemExit(f"[FAIL] {split} row reward style mismatch")
             if extra["rg_schema_version"] != EXPECTED_SCHEMA:
                 raise SystemExit("[FAIL] row schema mismatch")
+            ground_truth = str(reward_model["ground_truth"])
+            formatted_oracle = (
+                "《reasoning》Oracle format compatibility check.《/reasoning》"
+                f"《answer》{ground_truth}《/answer》"
+            )
+            candidate, extraction, format_score = reward_module.extract_answer(formatted_oracle)
+            if extraction != "strict" or format_score != 1.0 or not candidate:
+                raise SystemExit(
+                    f"[FAIL] formatted oracle extraction failed for {extra['rg_task']}: "
+                    f"extraction={extraction!r}, format={format_score!r}, "
+                    f"candidate={candidate!r}"
+                )
             categories.add(str(extra["rg_category"]))
             tasks.add(str(extra["rg_task"]))
             key = f"{extra['rg_category']}/{extra['rg_task']}/{extra['rg_tier']}"
             strata.setdefault(key, (split, row))
-    if len(categories) != 6 or len(tasks) != 79 or len(strata) != 157:
+    if len(categories) != 6 or len(tasks) != 78 or len(strata) != 155:
         raise SystemExit(
             f"[FAIL] inventory mismatch: categories={len(categories)}, tasks={len(tasks)}, strata={len(strata)}"
         )
 
-    # Replay one frozen oracle per stratum using its exact stored config.
+    # Replay one strictly formatted frozen oracle per stratum through the exact
+    # custom reward function used by verl.  This covers answer extraction,
+    # format scoring, stored config/entry decoding, and the native verifier.
     for key, (_split, row) in sorted(strata.items()):
-        extra = row.extra_info
-        config = json.loads(str(extra["rg_config_json"]), object_hook=tagged_object_hook)
-        entry = json.loads(str(extra["rg_entry_json"]))
-        dataset = reasoning_gym.create_dataset(str(extra["rg_task"]), **config)
-        score = float(dataset.score_answer(str(row.reward_model["ground_truth"]), entry))
-        if score < 1.0 - 1e-12:
-            raise SystemExit(f"[FAIL] frozen oracle replay failed for {key}: {score}")
+        extra = as_mapping(row.extra_info)
+        reward_model = as_mapping(row.reward_model)
+        ground_truth = str(reward_model["ground_truth"])
+        formatted_oracle = (
+            "《reasoning》Oracle format compatibility check.《/reasoning》"
+            f"《answer》{ground_truth}《/answer》"
+        )
+        result = reward_module.compute_score(
+            data_source=str(row.data_source),
+            solution_str=formatted_oracle,
+            ground_truth=ground_truth,
+            extra_info=extra,
+        )
+        if not (
+            result.get("acc") == 1.0
+            and float(result.get("rg_score", 0.0)) >= 1.0 - 1e-12
+            and result.get("format") == 1.0
+            and result.get("answer_extraction") == "strict"
+            and result.get("score_error") is None
+        ):
+            raise SystemExit(f"[FAIL] custom reward replay failed for {key}: {result}")
 
     fingerprint = {
         "schema_version": "rg_training_fingerprint_v1",
@@ -159,9 +230,9 @@ def main() -> None:
             "train": manifest["outputs"]["train"]["sha256"],
             "validation": manifest["outputs"]["validation"]["sha256"],
             "dataset_manifest": sha256_file(manifest_path),
-            "reward": sha256_file(Path(args.reward_file)),
+            "reward": sha256_file(reward_path),
             "launcher": sha256_file(Path(args.launcher)),
-            "system_prompt": sha256_file(Path(args.system_prompt_file)),
+            "system_prompt": sha256_file(system_prompt_path),
             "model_config": sha256_file(Path(args.model_path) / "config.json"),
         },
     }

@@ -1,4 +1,4 @@
-version: reasoning_gym_sixcat_profiles_v1
+version: reasoning_gym_sixcat_nojugs_v1
 reasoning_gym_version: "0.1.25"
 
 # This is an ordinary application YAML consumed by
@@ -34,8 +34,15 @@ difficulty_policy:
   interval_range_medium_level: 0
   interval_range_hard_level: 1
 
-# These exact names are also a registry-drift guard.  With RG 0.1.25 the six
-# selected Python module categories contain 79 tasks in total.
+# These exact names plus excluded_tasks form a registry-drift guard.  With
+# RG 0.1.25 the six selected Python module categories contain 79 registered
+# tasks; 78 are selected and jugs is the sole intentional exclusion.  The
+# upstream jugs task accepts num_jugs > 3, but its native oracle generator is
+# hard-coded to solve only three-jug puzzles.
+excluded_tasks:
+  algorithmic:
+    - jugs
+
 categories:
   algebra:
     - complex_arithmetic
@@ -58,7 +65,6 @@ categories:
     - graph_color
     - group_anagrams
     - isomorphic_strings
-    - jugs
     - letter_counting
     - letter_jumble
     - manipulate_matrix
@@ -204,10 +210,6 @@ task_overrides:
       min_num_vertices: 24
       max_num_vertices: 30
       edge_probability: 0.15
-
-  jugs:
-    medium: {num_jugs: 3, difficulty: 10}
-    hard: {num_jugs: 4, difficulty: 15}
 
   countdown:
     medium:

@@ -117,14 +117,44 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return value
 
 
-def discover_selected_tasks(categories: dict[str, list[str]]) -> dict[str, list[str]]:
+def discover_selected_tasks(
+    categories: dict[str, list[str]],
+    excluded_tasks: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
     selected = {str(category): sorted(map(str, tasks)) for category, tasks in categories.items()}
+    excluded = {
+        str(category): set(map(str, tasks))
+        for category, tasks in (excluded_tasks or {}).items()
+    }
+    unknown_exclusion_categories = set(excluded) - set(selected)
+    if unknown_exclusion_categories:
+        raise RuntimeError(
+            "excluded_tasks contains unknown categories: "
+            f"{sorted(unknown_exclusion_categories)}"
+        )
+
     actual: dict[str, list[str]] = {category: [] for category in selected}
     for task, (dataset_cls, _config_cls) in DATASETS.items():
         parts = dataset_cls.__module__.split(".")
         if len(parts) >= 2 and parts[0] == "reasoning_gym" and parts[1] in actual:
             actual[parts[1]].append(task)
-    actual = {category: sorted(tasks) for category, tasks in actual.items()}
+
+    for category, tasks in actual.items():
+        registered = set(tasks)
+        excluded_here = excluded.get(category, set())
+        selected_here = set(selected[category])
+        overlap = selected_here & excluded_here
+        if overlap:
+            raise RuntimeError(
+                f"tasks cannot be both selected and excluded in {category}: {sorted(overlap)}"
+            )
+        missing_exclusions = excluded_here - registered
+        if missing_exclusions:
+            raise RuntimeError(
+                f"excluded tasks are not registered in {category}: {sorted(missing_exclusions)}"
+            )
+        actual[category] = sorted(registered - excluded_here)
+
     if actual != selected:
         details = {}
         for category in selected:
@@ -134,8 +164,8 @@ def discover_selected_tasks(categories: dict[str, list[str]]) -> dict[str, list[
             }
         raise RuntimeError(f"Reasoning Gym registry drift detected: {json.dumps(details, indent=2)}")
     flattened = [task for tasks in selected.values() for task in tasks]
-    if len(flattened) != 79 or len(set(flattened)) != 79:
-        raise RuntimeError(f"expected exactly 79 unique selected tasks, got {len(set(flattened))}")
+    if len(flattened) != 78 or len(set(flattened)) != 78:
+        raise RuntimeError(f"expected exactly 78 unique selected tasks, got {len(set(flattened))}")
     return selected
 
 
@@ -205,7 +235,11 @@ def stable_seed(base_seed: int, *parts: str) -> int:
 
 
 def make_plan(config: dict[str, Any], config_sha256: str, system_prompt_sha256: str) -> dict[str, Any]:
-    categories = discover_selected_tasks(config["categories"])
+    excluded_tasks = {
+        str(category): sorted(map(str, tasks))
+        for category, tasks in config.get("excluded_tasks", {}).items()
+    }
+    categories = discover_selected_tasks(config["categories"], excluded_tasks)
     fixed = config.get("fixed_tasks", {})
     overrides = config.get("task_overrides", {})
     task_weights = config.get("task_weights", {})
@@ -254,8 +288,8 @@ def make_plan(config: dict[str, Any], config_sha256: str, system_prompt_sha256: 
                     }
                 )
 
-    if len(specs) != 157:
-        raise RuntimeError(f"expected 157 task/tier strata, got {len(specs)}")
+    if len(specs) != 155:
+        raise RuntimeError(f"expected 155 task/tier strata, got {len(specs)}")
     if sum(spec["train_count"] for spec in specs) != int(dataset_cfg["train_size"]):
         raise RuntimeError("train quota apportionment does not sum to train_size")
     plan = {
@@ -264,6 +298,7 @@ def make_plan(config: dict[str, Any], config_sha256: str, system_prompt_sha256: 
         "reasoning_gym_version": package_version(),
         "config_sha256": config_sha256,
         "system_prompt_sha256": system_prompt_sha256,
+        "excluded_tasks": excluded_tasks,
         "category_train_counts": train_category_counts,
         "task_train_counts": {
             f"{spec['category']}/{spec['task']}": sum(
@@ -998,8 +1033,8 @@ def main() -> None:
         json.dumps(
             {
                 "reasoning_gym_version": actual_rg_version,
-                "tasks": 79,
-                "strata": 157,
+                "tasks": 78,
+                "strata": 155,
                 "train_rows": sum(item["train_count"] for item in plan["specs"]),
                 "validation_rows": sum(item["validation_count"] for item in plan["specs"]),
                 "plan_sha256": plan["plan_sha256"],

@@ -60,7 +60,7 @@ import reasoning_gym
 rg_path = Path(reasoning_gym.__file__).resolve()
 if not (rg_path == overlay or overlay in rg_path.parents):
     raise RuntimeError(f"reasoning_gym did not load from the thin overlay: {rg_path}")
-if Version(metadata.version("reasoning-gym")).base_version != Version("0.1.25"):
+if Version(metadata.version("reasoning-gym")).base_version != Version("0.1.25").base_version:
     raise RuntimeError(f"unexpected reasoning-gym version: {metadata.version('reasoning-gym')}")
 
 print(json.dumps({
