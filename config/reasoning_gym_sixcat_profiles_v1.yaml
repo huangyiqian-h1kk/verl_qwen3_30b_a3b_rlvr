@@ -144,6 +144,9 @@ task_weights:
     bf: 3
     codeio: 13
 
+  games:
+    tower_of_hanoi: 0.07
+    
 # gsm_symbolic is the only selected RG 0.1.25 task without a curriculum.
 fixed_tasks:
   gsm_symbolic:
@@ -252,6 +255,10 @@ task_overrides:
   rotate_matrix:
     medium: {min_n: 12, max_n: 16, min_rotations: 1, max_rotations: 5}
     hard: {min_n: 20, max_n: 25, min_rotations: 5, max_rotations: 10}
+
+  rotten_oranges:
+    medium: {min_n: 25, max_n: 25}
+    hard: {min_n: 36, max_n: 36}
 
   spiral_matrix:
     medium: {min_n: 12, max_n: 16}

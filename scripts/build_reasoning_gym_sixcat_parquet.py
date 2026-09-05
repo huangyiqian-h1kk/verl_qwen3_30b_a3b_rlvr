@@ -30,6 +30,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterator
 
+import numpy as np
 import pandas as pd
 import yaml
 from packaging.version import Version
@@ -53,6 +54,20 @@ def json_default(value: Any) -> Any:
             "numerator": value.numerator,
             "denominator": value.denominator,
         }
+    value_type = type(value)
+    if value_type.__module__.startswith("sympy.") and value_type.__name__ == "Integer":
+        return int(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        converted = float(value)
+        if not math.isfinite(converted):
+            raise ValueError(f"non-finite NumPy floating value: {value!r}")
+        return converted
+    if isinstance(value, np.ndarray):
+        return value.tolist()
     if isinstance(value, dt.datetime):
         return {"__rg_json_type__": "datetime", "value": value.isoformat()}
     if isinstance(value, dt.date):
@@ -63,11 +78,18 @@ def json_default(value: Any) -> Any:
         return value.value
     if isinstance(value, Path):
         return str(value)
-    raise TypeError(f"cannot serialize {type(value).__name__}")
+    raise TypeError(f"cannot serialize {type(value).__module__}.{type(value).__qualname__}")
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=json_default)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=json_default,
+        allow_nan=False,
+    )
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -540,19 +562,37 @@ def rejection_reason(
             return "codeio_empty_io"
     return None
 
-
 def retryable_generation_exception(task: str, exc: Exception) -> bool:
-    # Some native generators expose their own bounded rejection sampling as a
-    # ValueError.  Treat only known, exact failure signatures as a rejected
-    # candidate; every other exception remains fatal.
     message = str(exc)
-    return task == "knight_swap" and isinstance(exc, ValueError) and message.startswith(
-        "Failed to generate valid puzzle after trying "
-    )
 
+    if (
+        task == "knight_swap"
+        and isinstance(exc, ValueError)
+        and message.startswith("Failed to generate valid puzzle after trying ")
+    ):
+        return True
+
+    if (
+        task == "codeio"
+        and isinstance(exc, TypeError)
+        and message.startswith("Object of type ")
+        and message.endswith(" is not JSON serializable")
+    ):
+        return True
+
+    # Some difficulty-3 BF programs are pathologically slow in bfi.interpret().
+    # The builder's SIGALRM safely interrupts them; reject only that candidate.
+    if (
+        task == "bf"
+        and isinstance(exc, TimeoutError)
+        and message.startswith("operation exceeded ")
+    ):
+        return True
+
+    return False
 
 def codeio_record_is_safe(record: dict[str, Any]) -> bool:
-    """Conservative static filter before CodeIO's native generator calls exec."""
+    """Conservative safety and runtime-compatibility filter for CodeIO."""
     blocked_modules = {
         "builtins",
         "ctypes",
@@ -584,19 +624,53 @@ def codeio_record_is_safe(record: dict[str, Any]) -> bool:
         "open",
         "vars",
     }
+    removed_numpy_attributes = {"math", "mat"}
     source = str(record.get("code_sample", "")) + "\n" + str(record.get("input_generator", ""))
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return False
+
+    # Collect every local name bound to NumPy so that aliases such as
+    # ``import numpy as np`` and ``import numpy as n`` are both recognized.
+    numpy_aliases = {"numpy"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            if any(alias.name.split(".")[0] in blocked_modules for alias in node.names):
-                return False
+            for alias in node.names:
+                module_root = alias.name.split(".")[0]
+                if module_root in blocked_modules:
+                    return False
+                if module_root == "numpy":
+                    numpy_aliases.add(alias.asname or "numpy")
         elif isinstance(node, ast.ImportFrom):
-            if str(node.module or "").split(".")[0] in blocked_modules:
+            module_root = str(node.module or "").split(".")[0]
+            if module_root in blocked_modules:
                 return False
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
+            if module_root == "numpy" and any(
+                alias.name == "*" or alias.name in removed_numpy_attributes for alias in node.names
+            ):
+                return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
+            return False
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in numpy_aliases
+            and node.attr in removed_numpy_attributes
+        ):
+            return False
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in numpy_aliases
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in removed_numpy_attributes
+        ):
             return False
     return True
 
@@ -671,6 +745,9 @@ def generate_shard(job: dict[str, Any]) -> dict[str, Any]:
         try:
             entry_json = canonical_json(entry)
         except (TypeError, ValueError) as exc:
+            if spec["task"] == "codeio":
+                rejections["codeio_non_json_entry"] += 1
+                continue
             raise RuntimeError(
                 f"{spec['key']} source_index={source_index}: "
                 f"entry JSON serialization failed: {type(exc).__name__}: {exc}"
