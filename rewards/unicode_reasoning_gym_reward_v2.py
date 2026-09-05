@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ ANSWER_LINE_PATTERN = re.compile(r"(?im)^\s*(?:final\s+)?answer\s*[:：]\s*(.+?)
 def tagged_object_hook(value: dict[str, Any]) -> Any:
     kind = value.get("__rg_json_type__")
     raw = value.get("value")
+    if kind == "fraction":
+        return Fraction(int(value["numerator"]), int(value["denominator"]))
     if kind == "datetime":
         return dt.datetime.fromisoformat(str(raw))
     if kind == "date":
@@ -46,6 +49,15 @@ def tagged_object_hook(value: dict[str, Any]) -> Any:
     if kind == "time":
         return dt.time.fromisoformat(str(raw))
     return value
+
+
+def decode_tagged_mapping(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a JSON string, got {type(value).__name__}")
+    parsed = json.loads(value, object_hook=tagged_object_hook)
+    if not isinstance(parsed, dict):
+        raise TypeError(f"{field_name} must decode to a mapping")
+    return parsed
 
 
 def last_balanced_box(text: str) -> str | None:
@@ -105,9 +117,7 @@ def parse_extra(extra_info: Any) -> dict[str, Any]:
 
 @lru_cache(maxsize=512)
 def configured_dataset(task: str, config_json: str):
-    config = json.loads(config_json, object_hook=tagged_object_hook)
-    if not isinstance(config, dict):
-        raise TypeError("rg_config_json must decode to a mapping")
+    config = decode_tagged_mapping(config_json, "rg_config_json")
     return reasoning_gym.create_dataset(task, **config)
 
 
@@ -141,7 +151,7 @@ def compute_score(
         raise RuntimeError(f"unexpected rg_schema_version={schema!r}; expected={EXPECTED_SCHEMA!r}")
     task = str(extra["rg_task"])
     config_json = str(extra["rg_config_json"])
-    entry = json.loads(str(extra["rg_entry_json"]))
+    entry = decode_tagged_mapping(extra["rg_entry_json"], "rg_entry_json")
     candidate, extraction, format_score = extract_answer(solution_str)
 
     error = None
@@ -197,7 +207,16 @@ def self_test() -> None:
     entry = {
         "question": "How many legs do two dogs have?",
         "answer": "8",
-        "metadata": {"source_dataset": "leg_counting", "animals": {"dog": 2}, "total_legs": 8},
+        "metadata": {
+            "source_dataset": "leg_counting",
+            "animals": {"dog": 2},
+            "total_legs": 8,
+            "fraction_round_trip": {
+                "__rg_json_type__": "fraction",
+                "numerator": 2,
+                "denominator": 3,
+            },
+        },
     }
     config = {"seed": 1, "size": 1, "min_animals": 1, "max_animals": 4, "min_instances": 1, "max_instances": 4}
     extra = {
@@ -209,6 +228,9 @@ def self_test() -> None:
         "rg_config_json": json.dumps(config),
         "rg_entry_json": json.dumps(entry),
     }
+    decoded_entry = decode_tagged_mapping(extra["rg_entry_json"], "rg_entry_json")
+    assert decoded_entry["metadata"]["fraction_round_trip"] == Fraction(2, 3)
+    assert isinstance(decoded_entry["metadata"]["fraction_round_trip"], Fraction)
     solution = "《reasoning》Two dogs have eight legs.《/reasoning》《answer》8《/answer》"
     result = compute_score("reasoning_gym/arithmetic/leg_counting/test", solution, "8", extra)
     assert result["acc"] == 1.0 and result["format"] == 1.0, result

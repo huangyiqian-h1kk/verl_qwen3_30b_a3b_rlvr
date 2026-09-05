@@ -9,6 +9,7 @@ import importlib.util
 import importlib.metadata
 import json
 import os
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -74,13 +75,23 @@ def as_messages(value: Any) -> list[dict[str, str]]:
     ]
 
 
+def contains_fraction(value: Any) -> bool:
+    if isinstance(value, Fraction):
+        return True
+    if isinstance(value, dict):
+        return any(contains_fraction(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(contains_fraction(item) for item in value)
+    return False
+
+
 def load_reward_module(path: Path):
     spec = importlib.util.spec_from_file_location("rg_training_reward_preflight", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import reward module from {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    for name in ("compute_score", "extract_answer"):
+    for name in ("compute_score", "extract_answer", "decode_tagged_mapping"):
         if not callable(getattr(module, name, None)):
             raise RuntimeError(f"reward module is missing callable {name}: {path}")
     return module
@@ -161,6 +172,7 @@ def main() -> None:
 
     strata = {}
     categories, tasks = set(), set()
+    fraction_tagged_payloads = 0
     for split, frame in frames.items():
         for row in frame.itertuples(index=False):
             extra = as_mapping(row.extra_info)
@@ -176,6 +188,16 @@ def main() -> None:
                 raise SystemExit(f"[FAIL] {split} row reward style mismatch")
             if extra["rg_schema_version"] != EXPECTED_SCHEMA:
                 raise SystemExit("[FAIL] row schema mismatch")
+            for field_name in ("rg_config_json", "rg_entry_json"):
+                payload = str(extra[field_name])
+                if "__rg_json_type__" in payload and '"fraction"' in payload:
+                    decoded = reward_module.decode_tagged_mapping(payload, field_name)
+                    if not contains_fraction(decoded):
+                        raise SystemExit(
+                            f"[FAIL] {field_name} contains a fraction tag but did not "
+                            f"restore Fraction for {extra['rg_task']}"
+                        )
+                    fraction_tagged_payloads += 1
             ground_truth = str(reward_model["ground_truth"])
             formatted_oracle = (
                 "《reasoning》Oracle format compatibility check.《/reasoning》"
@@ -255,6 +277,7 @@ def main() -> None:
         "categories": len(categories),
         "tasks": len(tasks),
         "strata": len(strata),
+        "fraction_tagged_payloads": fraction_tagged_payloads,
         "fingerprint": str(fingerprint_path.resolve()),
     }
     print(json.dumps(result, indent=2))

@@ -9,6 +9,7 @@ the native verifier.
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 import ast
 import contextlib
 import dataclasses
@@ -46,6 +47,12 @@ _TOKENIZER_PATH = None
 
 
 def json_default(value: Any) -> Any:
+    if isinstance(value, Fraction):
+        return {
+            "__rg_json_type__": "fraction",
+            "numerator": value.numerator,
+            "denominator": value.denominator,
+        }
     if isinstance(value, dt.datetime):
         return {"__rg_json_type__": "datetime", "value": value.isoformat()}
     if isinstance(value, dt.date):
@@ -661,7 +668,13 @@ def generate_shard(job: dict[str, Any]) -> dict[str, Any]:
         if answer_value is None:
             raise RuntimeError(f"{spec['key']} source_index={source_index}: missing oracle answer")
         answer = display_answer(answer_value)
-        entry_json = canonical_json(entry)
+        try:
+            entry_json = canonical_json(entry)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"{spec['key']} source_index={source_index}: "
+                f"entry JSON serialization failed: {type(exc).__name__}: {exc}"
+            ) from exc
         prompt_tokens = chat_token_count(tokenizer, system_prompt, question)
         oracle_tokens = len(tokenizer.encode(answer, add_special_tokens=False))
         reason = rejection_reason(
