@@ -193,8 +193,8 @@ def discover_selected_tasks(
             }
         raise RuntimeError(f"Reasoning Gym registry drift detected: {json.dumps(details, indent=2)}")
     flattened = [task for tasks in selected.values() for task in tasks]
-    if len(flattened) != 78 or len(set(flattened)) != 78:
-        raise RuntimeError(f"expected exactly 78 unique selected tasks, got {len(set(flattened))}")
+    if not flattened or len(flattened) != len(set(flattened)):
+        raise RuntimeError(f"expected nonempty, nonduplicated selected tasks, got {len(set(flattened))}")
     return selected
 
 
@@ -264,6 +264,25 @@ def stable_seed(base_seed: int, *parts: str) -> int:
 
 
 def make_plan(config: dict[str, Any], config_sha256: str, system_prompt_sha256: str) -> dict[str, Any]:
+    # rg-retained-plan-v1: preserve existing per-stratum quotas and profiles.
+    if config.get("retained_plan_file"):
+        retained_path = Path(config["_config_path"]).parent / config["retained_plan_file"]
+        plan = json.loads(retained_path.read_text(encoding="utf-8"))
+        selected = discover_selected_tasks(config["categories"], config.get("excluded_tasks", {}))
+        expected_tasks = {(category, task) for category, tasks in selected.items() for task in tasks}
+        actual_tasks = {(s["category"], s["task"]) for s in plan["specs"]}
+        if actual_tasks != expected_tasks:
+            raise RuntimeError("retained plan tasks differ from YAML categories")
+        if str(plan["reasoning_gym_version"]) != str(config["reasoning_gym_version"]):
+            raise RuntimeError("retained plan Reasoning Gym version differs from YAML")
+        if sum(s["train_count"] for s in plan["specs"]) != int(config["dataset"]["train_size"]):
+            raise RuntimeError("retained plan train quotas differ from YAML train_size")
+        plan.update(dataset_version=config["version"], config_sha256=config_sha256,
+                    system_prompt_sha256=system_prompt_sha256,
+                    excluded_tasks=config.get("excluded_tasks", {}))
+        plan.pop("plan_sha256", None)
+        plan["plan_sha256"] = sha256_bytes(canonical_json(plan).encode("utf-8"))
+        return plan
     excluded_tasks = {
         str(category): sorted(map(str, tasks))
         for category, tasks in config.get("excluded_tasks", {}).items()
@@ -317,8 +336,8 @@ def make_plan(config: dict[str, Any], config_sha256: str, system_prompt_sha256: 
                     }
                 )
 
-    if len(specs) != 155:
-        raise RuntimeError(f"expected 155 task/tier strata, got {len(specs)}")
+    if len(specs) != sum(1 if task in fixed else len(TIERS) for tasks in categories.values() for task in tasks):
+        raise RuntimeError(f"unexpected task/tier stratum count: {len(specs)}")
     if sum(spec["train_count"] for spec in specs) != int(dataset_cfg["train_size"]):
         raise RuntimeError("train quota apportionment does not sum to train_size")
     plan = {
@@ -855,9 +874,7 @@ def generate_pair(pair_job: dict[str, Any]) -> list[dict[str, Any]]:
 
     train_path, train_manifest_path = shard_paths(output_dir, "train", spec)
     train_count = int(pair_job["train_count"])
-    train_valid = bool(pair_job["resume"]) and valid_resumable_shard(
-        train_path, train_manifest_path, train_count, pair_job["plan_sha256"]
-    )
+    train_valid = bool(pair_job["resume"]) and valid_resumable_shard(train_path, train_manifest_path, train_count, pair_job['plan_sha256'], spec=spec, split='train', system_prompt=pair_job['common']['system_prompt'])
     if train_valid:
         train_result = json.loads(train_manifest_path.read_text(encoding="utf-8"))
     else:
@@ -878,9 +895,7 @@ def generate_pair(pair_job: dict[str, Any]) -> list[dict[str, Any]]:
 
     validation_path, validation_manifest_path = shard_paths(output_dir, "validation", spec)
     validation_count = int(pair_job["validation_count"])
-    validation_valid = train_valid and bool(pair_job["resume"]) and valid_resumable_shard(
-        validation_path, validation_manifest_path, validation_count, pair_job["plan_sha256"]
-    )
+    validation_valid = train_valid and bool(pair_job["resume"]) and valid_resumable_shard(validation_path, validation_manifest_path, validation_count, pair_job['plan_sha256'], spec=spec, split='validation', system_prompt=pair_job['common']['system_prompt'])
     if validation_valid:
         validation_result = json.loads(validation_manifest_path.read_text(encoding="utf-8"))
     else:
@@ -907,17 +922,36 @@ def shard_paths(output_dir: Path, split: str, spec: dict[str, Any]) -> tuple[Pat
     return parquet, parquet.with_suffix(".manifest.json")
 
 
-def valid_resumable_shard(parquet: Path, manifest: Path, rows: int, plan_sha256: str) -> bool:
+def valid_resumable_shard(parquet: Path, manifest: Path, rows: int, plan_sha256: str,
+                          *, spec: dict[str, Any], split: str, system_prompt: str) -> bool:
+    """Use rows/config/prompt compatibility; never compare SHA values."""
     if not parquet.is_file() or not manifest.is_file():
         return False
     try:
         value = json.loads(manifest.read_text(encoding="utf-8"))
-        return (
-            int(value["rows"]) == rows
-            and value["plan_sha256"] == plan_sha256
-            and value["parquet_sha256"] == sha256_file(parquet)
-        )
-    except Exception:
+        if (int(value["rows"]) != rows or value["key"] != spec["key"]
+                or value["split"] != split
+                or int(value["seed"]) != int(spec[f"{split}_seed"])
+                or value["profile_config"] != spec["profile_config"]):
+            raise ValueError("manifest row count, stratum, seed or profile differs")
+        frame = pd.read_parquet(parquet, columns=["extra_info", "prompt"])
+        if len(frame) != rows:
+            raise ValueError("actual parquet row count differs")
+        for extra, messages in zip(frame["extra_info"], frame["prompt"]):
+            if (extra["rg_schema_version"] != SCHEMA_VERSION
+                    or str(extra["rg_category"]) != spec["category"]
+                    or str(extra["rg_task"]) != spec["task"]
+                    or str(extra["rg_tier"]) != spec["tier"]
+                    or int(extra["rg_seed"]) != int(spec[f"{split}_seed"])
+                    or json.loads(str(extra["rg_config_json"])) != value["row_config"]):
+                raise ValueError("parquet row schema, stratum or config differs")
+            if (len(messages) != 2 or messages[0]["role"] != "system"
+                    or str(messages[0]["content"]).strip() != system_prompt.strip()
+                    or messages[1]["role"] != "user"):
+                raise ValueError("parquet prompt differs from current system prompt")
+        return True
+    except Exception as exc:
+        print(f"[REBUILD] {parquet.name}: {type(exc).__name__}: {exc}", flush=True)
         return False
 
 
@@ -927,6 +961,63 @@ def percentile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, math.ceil(q * len(ordered)) - 1))
     return float(ordered[index])
+
+
+def rg_unique_merge(split_frames, plan):
+    """Preserve validation first, then retain disjoint unique training rows."""
+    from collections import Counter
+    report = {
+        "policy": "exact_user_content; validation_first; first_in_plan_order",
+        "splits": {},
+    }
+    validation_questions = set()
+    for split in ("validation", "train"):
+        frame = split_frames[split]
+        kept = []
+        seen = set()
+        before, after = Counter(), Counter()
+        duplicate, overlap = Counter(), Counter()
+        for position, (messages, extra) in enumerate(zip(frame["prompt"], frame["extra_info"])):
+            key = f"{extra['rg_category']}/{extra['rg_task']}/{extra['rg_tier']}"
+            question = str(messages[-1]["content"])
+            before[key] += 1
+            if split == "train" and question in validation_questions:
+                overlap[key] += 1
+                continue
+            if question in seen:
+                duplicate[key] += 1
+                continue
+            seen.add(question)
+            kept.append(position)
+            after[key] += 1
+        if split == "validation":
+            validation_questions = seen
+        result = frame.iloc[kept].reset_index(drop=True)
+        split_frames[split] = result
+        per_stratum = {
+            s["key"]: {
+                "input_rows": before[s["key"]],
+                "kept_rows": after[s["key"]],
+                "removed_duplicate": duplicate[s["key"]],
+                "removed_validation_overlap": overlap[s["key"]],
+            }
+            for s in plan["specs"]
+        }
+        report["splits"][split] = {
+            "input_rows": len(frame), "kept_rows": len(result),
+            "removed_duplicate": sum(duplicate.values()),
+            "removed_validation_overlap": sum(overlap.values()),
+            "per_stratum": per_stratum,
+        }
+        print(f"[DEDUP] {split}: {len(frame)} -> {len(result)}; "
+              f"duplicates={sum(duplicate.values())}; "
+              f"validation_overlap={sum(overlap.values())}", flush=True)
+        for key, counts in per_stratum.items():
+            if counts["kept_rows"] != counts["input_rows"]:
+                print(f"[DEDUP] {split} {key}: {counts}", flush=True)
+        if result.empty:
+            raise RuntimeError(f"{split}: no rows remain after global deduplication")
+    return report
 
 
 def merge_and_audit(
@@ -947,6 +1038,10 @@ def merge_and_audit(
         expected = sum(spec[f"{split}_count"] for spec in plan["specs"])
         if len(frame) != expected:
             raise RuntimeError(f"{split}: merged rows={len(frame)}, expected={expected}")
+        split_frames[split] = frame
+
+    dedup_report = rg_unique_merge(split_frames, plan)
+    for split, frame in split_frames.items():
         random_state = int(config["dataset"]["shuffle_seed"]) + (0 if split == "train" else 1)
         split_frames[split] = frame.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
 
@@ -976,6 +1071,10 @@ def merge_and_audit(
         outputs[split] = {
             "path": str(path.resolve()),
             "rows": len(frame),
+            "stratum_rows": {
+                key: counts["kept_rows"]
+                for key, counts in dedup_report["splits"][split]["per_stratum"].items()
+            },
             "sha256": sha256_file(path),
             "bytes": path.stat().st_size,
         }
@@ -999,6 +1098,9 @@ def merge_and_audit(
         "strata": len(plan["specs"]),
         "train_rows": len(split_frames["train"]),
         "validation_rows": len(split_frames["validation"]),
+        "deduplication": dedup_report,
+        "actual_train_tasks": len(task_counts),
+        "actual_train_strata": len(tier_counts),
         "duplicate_train_prompts": 0,
         "duplicate_validation_prompts": 0,
         "train_validation_prompt_overlap": 0,
@@ -1024,6 +1126,7 @@ def merge_and_audit(
         "system_prompt_path": str(system_prompt_path.resolve()),
         "system_prompt_sha256": sha256_file(system_prompt_path),
         "tokenizer_path": str(tokenizer_path.resolve()),
+        "merge_policy": dedup_report["policy"],
         "outputs": outputs,
         "audit_report": str((output_dir / "audit_report.json").resolve()),
         "shard_manifests": len(shard_manifests),
@@ -1052,10 +1155,8 @@ def build_jobs(
         validation_path, validation_manifest = shard_paths(output_dir, "validation", spec)
         pair_valid = (
             resume
-            and valid_resumable_shard(train_path, train_manifest, train_count, plan["plan_sha256"])
-            and valid_resumable_shard(
-                validation_path, validation_manifest, validation_count, plan["plan_sha256"]
-            )
+            and valid_resumable_shard(train_path, train_manifest, train_count, plan['plan_sha256'], spec=spec, split='train', system_prompt=system_prompt)
+            and valid_resumable_shard(validation_path, validation_manifest, validation_count, plan['plan_sha256'], spec=spec, split='validation', system_prompt=system_prompt)
         )
         if pair_valid:
             completed.extend(
@@ -1123,8 +1224,8 @@ def main() -> None:
         json.dumps(
             {
                 "reasoning_gym_version": actual_rg_version,
-                "tasks": 78,
-                "strata": 155,
+                "tasks": len({s["task"] for s in plan["specs"]}),
+                "strata": len(plan["specs"]),
                 "train_rows": sum(item["train_count"] for item in plan["specs"]),
                 "validation_rows": sum(item["validation_count"] for item in plan["specs"]),
                 "plan_sha256": plan["plan_sha256"],
@@ -1193,3 +1294,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# rg-global-unique-merge-v1

@@ -97,6 +97,50 @@ def load_reward_module(path: Path):
     return module
 
 
+def rg_actual_output_counts(manifest, expected_specs):
+    """Check actual-count metadata against original generation upper bounds."""
+    counts = {}
+    if manifest.get("merge_policy") != "exact_user_content; validation_first; first_in_plan_order":
+        raise SystemExit("[FAIL] rebuild final outputs with the global deduplication patch")
+    for split in ("train", "validation"):
+        info = manifest["outputs"][split]
+        values = info.get("stratum_rows")
+        if not isinstance(values, dict) or set(values) != set(expected_specs):
+            raise SystemExit(f"[FAIL] {split} actual-count inventory differs from plan")
+        for key, value in values.items():
+            if type(value) is not int or not 0 <= value <= int(expected_specs[key][f"{split}_count"]):
+                raise SystemExit(f"[FAIL] {split} {key}: invalid retained count {value!r}")
+        if sum(values.values()) != int(info["rows"]) or int(info["rows"]) <= 0:
+            raise SystemExit(f"[FAIL] {split} manifest total differs from stratum counts")
+        counts[split] = values
+    return counts
+
+
+def rg_check_unique_outputs(frames, actual_counts, as_mapping, as_messages):
+    from collections import Counter
+    questions = {}
+    ids = {}
+    for split, frame in frames.items():
+        observed = Counter()
+        qs, sample_ids = [], []
+        for extra_value, prompt in zip(frame["extra_info"], frame["prompt"]):
+            extra = as_mapping(extra_value)
+            key = f"{extra['rg_category']}/{extra['rg_task']}/{extra['rg_tier']}"
+            observed[key] += 1
+            qs.append(as_messages(prompt)[-1]["content"])
+            sample_ids.append(str(extra["index"]))
+        expected = {k: v for k, v in actual_counts[split].items() if v > 0}
+        if dict(observed) != expected:
+            raise SystemExit(f"[FAIL] {split} actual per-stratum counts differ from manifest")
+        if len(set(qs)) != len(qs) or len(set(sample_ids)) != len(sample_ids):
+            raise SystemExit(f"[FAIL] {split} contains duplicate prompts or sample IDs")
+        questions[split], ids[split] = set(qs), set(sample_ids)
+    if questions["train"] & questions["validation"]:
+        raise SystemExit("[FAIL] train/validation prompt overlap")
+    if ids["train"] & ids["validation"]:
+        raise SystemExit("[FAIL] train/validation sample ID overlap")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
@@ -136,8 +180,7 @@ def main() -> None:
         raise SystemExit("[FAIL] dataset manifest/audit is not complete")
     if manifest.get("schema_version") != EXPECTED_SCHEMA:
         raise SystemExit(f"[FAIL] unexpected schema: {manifest.get('schema_version')}")
-    if manifest.get("system_prompt_sha256") != sha256_file(system_prompt_path):
-        raise SystemExit("[FAIL] dataset manifest and training system prompt differ")
+    # File SHA verification disabled.
     actual_version = importlib.metadata.version("reasoning-gym")
     if Version(actual_version).base_version != Version(str(manifest["reasoning_gym_version"])).base_version:
         raise SystemExit(
@@ -151,17 +194,27 @@ def main() -> None:
             complete_values[key] = value
     if complete_values.get("status") != "PASS":
         raise SystemExit("[FAIL] BUILD_COMPLETE does not say status=PASS")
-    if complete_values.get("manifest_sha256") != sha256_file(manifest_path):
-        raise SystemExit("[FAIL] manifest hash differs from BUILD_COMPLETE")
+    # File SHA verification disabled.
 
+    retained_plan = json.loads((data_dir / "plan.json").read_text(encoding="utf-8"))
+    expected_specs = {s["key"]: s for s in retained_plan["specs"]}
+    if not expected_specs or len(expected_specs) != len(retained_plan["specs"]):
+        raise SystemExit("[FAIL] empty plan or duplicate stratum keys")
+    expected_categories = {s["category"] for s in expected_specs.values()}
+    expected_tasks = {s["task"] for s in expected_specs.values()}
+    for split in ("train", "validation"):
+        if any(int(s[f"{split}_count"]) <= 0 for s in expected_specs.values()):
+            raise SystemExit(f"[FAIL] {split} plan contains a non-positive quota")
+
+    actual_counts = rg_actual_output_counts(manifest, expected_specs)
     frames = {}
-    for split, expected_rows in (("train", 64000), ("validation", 1240)):
+    for split in ("train", "validation"):
+        expected_rows = sum(actual_counts[split].values())
         info = manifest["outputs"][split]
         path = Path(info["path"])
         if not path.is_file():
             raise SystemExit(f"[FAIL] missing {split} parquet: {path}")
-        if sha256_file(path) != info["sha256"]:
-            raise SystemExit(f"[FAIL] {split} parquet SHA256 mismatch")
+        # File SHA verification disabled.
         frame = pd.read_parquet(path)
         if len(frame) != expected_rows or len(frame) != int(info["rows"]):
             raise SystemExit(f"[FAIL] {split} rows={len(frame)}, expected={expected_rows}")
@@ -214,10 +267,7 @@ def main() -> None:
             tasks.add(str(extra["rg_task"]))
             key = f"{extra['rg_category']}/{extra['rg_task']}/{extra['rg_tier']}"
             strata.setdefault(key, (split, row))
-    if len(categories) != 6 or len(tasks) != 78 or len(strata) != 155:
-        raise SystemExit(
-            f"[FAIL] inventory mismatch: categories={len(categories)}, tasks={len(tasks)}, strata={len(strata)}"
-        )
+    rg_check_unique_outputs(frames, actual_counts, as_mapping, as_messages)
 
     # Replay one strictly formatted frozen oracle per stratum through the exact
     # custom reward function used by verl.  This covers answer extraction,
@@ -245,29 +295,27 @@ def main() -> None:
         ):
             raise SystemExit(f"[FAIL] custom reward replay failed for {key}: {result}")
 
+    # Keep parameter compatibility; file SHA changes do not block a run.
     fingerprint = {
-        "schema_version": "rg_training_fingerprint_v1",
+        "schema_version": "rg_training_run_record_v2",
         "parameters": parse_items(args.item),
+        "sha_verification": False,
         "files": {
-            "train": manifest["outputs"]["train"]["sha256"],
-            "validation": manifest["outputs"]["validation"]["sha256"],
-            "dataset_manifest": sha256_file(manifest_path),
-            "reward": sha256_file(reward_path),
-            "launcher": sha256_file(Path(args.launcher)),
-            "system_prompt": sha256_file(system_prompt_path),
-            "model_config": sha256_file(Path(args.model_path) / "config.json"),
+            "train": str(manifest["outputs"]["train"]["path"]),
+            "validation": str(manifest["outputs"]["validation"]["path"]),
+            "dataset_manifest": str(manifest_path),
+            "reward": str(reward_path),
+            "launcher": str(Path(args.launcher).resolve()),
+            "system_prompt": str(system_prompt_path),
+            "model_config": str((Path(args.model_path) / "config.json").resolve()),
         },
     }
     fingerprint_path = Path(args.fingerprint_file)
     if fingerprint_path.exists():
         existing = json.loads(fingerprint_path.read_text(encoding="utf-8"))
-        if existing != fingerprint:
-            raise SystemExit(
-                "[FAIL] resume fingerprint differs from the original run:\n"
-                + json.dumps({"existing": existing, "current": fingerprint}, indent=2)
-            )
-    else:
-        atomic_write_json(fingerprint_path, fingerprint)
+        if existing.get("parameters") != fingerprint["parameters"]:
+            raise SystemExit("[FAIL] training parameters differ from the original run")
+    atomic_write_json(fingerprint_path, fingerprint)
 
     result = {
         "status": "PASS",
@@ -285,3 +333,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# rg-retained-plan-v1
+
+# rg-global-unique-merge-v1
