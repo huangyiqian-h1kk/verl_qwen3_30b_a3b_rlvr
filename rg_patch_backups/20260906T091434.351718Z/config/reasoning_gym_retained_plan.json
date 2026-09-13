@@ -1,0 +1,3424 @@
+{
+  "category_train_counts": {
+    "algebra": 10667,
+    "algorithmic": 10667,
+    "arithmetic": 10667,
+    "geometry": 10667,
+    "code": 10666,
+    "games": 10002
+  },
+  "config_sha256": "05890db4f1975ee0b28a5b2e2a570db86de8b18b0e626cc965b17c6441487699",
+  "dataset_version": "reasoning_gym_sixcat_nojugs_v1_nopuzzle24_retained_v1",
+  "excluded_tasks": {
+    "algorithmic": [
+      "jugs"
+    ],
+    "games": [
+      "puzzle24"
+    ]
+  },
+  "plan_sha256": "31957f0078f2ab2e22dc6949fd0143527beedd455bcc4bfc86f66b5b3c6ca884",
+  "reasoning_gym_version": "0.1.25",
+  "schema_version": "reasoning_gym_static_v2",
+  "specs": [
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "max_imag": 1,
+        "max_real": 1,
+        "min_imag": 1,
+        "min_real": 1,
+        "operations_weights": 1
+      },
+      "key": "algebra/complex_arithmetic/medium",
+      "profile_config": {
+        "max_imag": 100,
+        "max_real": 100,
+        "min_imag": -100,
+        "min_real": -100,
+        "operations": [
+          "+",
+          "-",
+          "*",
+          "/"
+        ],
+        "operations_weights": [
+          0.25,
+          0.25,
+          0.25,
+          0.25
+        ]
+      },
+      "task": "complex_arithmetic",
+      "tier": "medium",
+      "train_count": 889,
+      "train_seed": 785308999,
+      "validation_count": 8,
+      "validation_seed": 1079344672
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "max_imag": 2,
+        "max_real": 2,
+        "min_imag": 2,
+        "min_real": 2,
+        "operations_weights": 2
+      },
+      "key": "algebra/complex_arithmetic/hard",
+      "profile_config": {
+        "max_imag": 10000,
+        "max_real": 10000,
+        "min_imag": -10000,
+        "min_real": -10000,
+        "operations": [
+          "+",
+          "-",
+          "*",
+          "/"
+        ],
+        "operations_weights": [
+          0.2,
+          0.2,
+          0.3,
+          0.3
+        ]
+      },
+      "task": "complex_arithmetic",
+      "tier": "hard",
+      "train_count": 889,
+      "train_seed": 191825793,
+      "validation_count": 8,
+      "validation_seed": 1147959001
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "problem_type_weights": 3
+      },
+      "key": "algebra/intermediate_integration/medium",
+      "profile_config": {
+        "linear_lower_bound": 1,
+        "linear_upper_bound": 12,
+        "max_linear_degree": 5,
+        "max_poly_degree": 4,
+        "min_linear_degree": 2,
+        "min_poly_degree": 3,
+        "operators": [
+          "+",
+          "-"
+        ],
+        "outer_constant_max": 5,
+        "outer_constant_min": 1,
+        "problem_type_weights": [
+          0.3,
+          0.2,
+          0.3,
+          0.2
+        ],
+        "problem_types": [
+          "polynomial_exp_trig",
+          "cyclic",
+          "repeated_parts",
+          "log_inverse_trig"
+        ],
+        "symbols": "x"
+      },
+      "task": "intermediate_integration",
+      "tier": "medium",
+      "train_count": 889,
+      "train_seed": 311885895,
+      "validation_count": 8,
+      "validation_seed": 1307341386
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "problem_type_weights": 4
+      },
+      "key": "algebra/intermediate_integration/hard",
+      "profile_config": {
+        "linear_lower_bound": 1,
+        "linear_upper_bound": 25,
+        "max_linear_degree": 8,
+        "max_poly_degree": 7,
+        "min_linear_degree": 4,
+        "min_poly_degree": 5,
+        "operators": [
+          "+",
+          "-"
+        ],
+        "outer_constant_max": 12,
+        "outer_constant_min": 2,
+        "problem_type_weights": [
+          0.35,
+          0.15,
+          0.4,
+          0.1
+        ],
+        "problem_types": [
+          "polynomial_exp_trig",
+          "cyclic",
+          "repeated_parts",
+          "log_inverse_trig"
+        ],
+        "symbols": "x"
+      },
+      "task": "intermediate_integration",
+      "tier": "hard",
+      "train_count": 889,
+      "train_seed": 867845095,
+      "validation_count": 8,
+      "validation_seed": 1716081482
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "degree": 0,
+        "terms": 1
+      },
+      "key": "algebra/polynomial_equations/medium",
+      "profile_config": {
+        "max_degree": 3,
+        "max_terms": 5,
+        "max_value": 150,
+        "min_degree": 2,
+        "min_terms": 3,
+        "min_value": 1,
+        "operators": [
+          "+",
+          "-"
+        ]
+      },
+      "task": "polynomial_equations",
+      "tier": "medium",
+      "train_count": 889,
+      "train_seed": 1488456640,
+      "validation_count": 8,
+      "validation_seed": 578788298
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "degree": 1,
+        "terms": 2
+      },
+      "key": "algebra/polynomial_equations/hard",
+      "profile_config": {
+        "max_degree": 4,
+        "max_terms": 7,
+        "max_value": 500,
+        "min_degree": 3,
+        "min_terms": 5,
+        "min_value": 1,
+        "operators": [
+          "+",
+          "-"
+        ]
+      },
+      "task": "polynomial_equations",
+      "tier": "hard",
+      "train_count": 889,
+      "train_seed": 178583011,
+      "validation_count": 8,
+      "validation_seed": 179879797
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "max_degree": 1,
+        "max_polynomials": 1,
+        "max_terms": 1,
+        "max_value": 1,
+        "min_degree": 1,
+        "min_polynomials": 1,
+        "min_terms": 1,
+        "min_value": 1
+      },
+      "key": "algebra/polynomial_multiplication/medium",
+      "profile_config": {
+        "allow_cross_variable_product": false,
+        "allow_multivariate_polynomials": false,
+        "max_degree": 4,
+        "max_polynomials": 6,
+        "max_terms": 8,
+        "max_value": 10000,
+        "min_degree": 1,
+        "min_polynomials": 3,
+        "min_terms": 4,
+        "min_value": 10,
+        "operators": [
+          "+",
+          "-"
+        ],
+        "variables": [
+          "x",
+          "y",
+          "z"
+        ]
+      },
+      "task": "polynomial_multiplication",
+      "tier": "medium",
+      "train_count": 889,
+      "train_seed": 862029925,
+      "validation_count": 8,
+      "validation_seed": 1676732196
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "max_degree": 2,
+        "max_polynomials": 2,
+        "max_terms": 2,
+        "max_value": 2,
+        "min_degree": 2,
+        "min_polynomials": 2,
+        "min_terms": 2,
+        "min_value": 2
+      },
+      "key": "algebra/polynomial_multiplication/hard",
+      "profile_config": {
+        "allow_cross_variable_product": false,
+        "allow_multivariate_polynomials": false,
+        "max_degree": 8,
+        "max_polynomials": 8,
+        "max_terms": 12,
+        "max_value": 1000000,
+        "min_degree": 2,
+        "min_polynomials": 4,
+        "min_terms": 6,
+        "min_value": 100,
+        "operators": [
+          "+",
+          "-"
+        ],
+        "variables": [
+          "x",
+          "y",
+          "z"
+        ]
+      },
+      "task": "polynomial_multiplication",
+      "tier": "hard",
+      "train_count": 889,
+      "train_seed": 5805692,
+      "validation_count": 8,
+      "validation_seed": 557243782
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "max_terms": 1,
+        "max_value": 1,
+        "min_terms": 1,
+        "min_value": 1,
+        "operators_weights": 1
+      },
+      "key": "algebra/simple_equations/medium",
+      "profile_config": {
+        "max_terms": 10,
+        "max_value": 10000,
+        "min_terms": 3,
+        "min_value": 10,
+        "operators": [
+          "+",
+          "-",
+          "*"
+        ],
+        "operators_weights": [
+          0.35,
+          0.35,
+          0.3
+        ]
+      },
+      "task": "simple_equations",
+      "tier": "medium",
+      "train_count": 889,
+      "train_seed": 1557195155,
+      "validation_count": 8,
+      "validation_seed": 479547140
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "max_terms": 2,
+        "max_value": 2,
+        "min_terms": 2,
+        "min_value": 2,
+        "operators_weights": 2
+      },
+      "key": "algebra/simple_equations/hard",
+      "profile_config": {
+        "max_terms": 15,
+        "max_value": 1000000,
+        "min_terms": 4,
+        "min_value": 100,
+        "operators": [
+          "+",
+          "-",
+          "*"
+        ],
+        "operators_weights": [
+          0.3,
+          0.3,
+          0.4
+        ]
+      },
+      "task": "simple_equations",
+      "tier": "hard",
+      "train_count": 889,
+      "train_seed": 581456467,
+      "validation_count": 8,
+      "validation_seed": 871880251
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "terms": 1
+      },
+      "key": "algebra/simple_integration/medium",
+      "profile_config": {
+        "max_bounds": 10,
+        "max_degree": 10,
+        "max_terms": 3,
+        "min_bounds": 1,
+        "min_degree": 1,
+        "min_terms": 3,
+        "operators": [
+          "+",
+          "-"
+        ],
+        "symbols": [
+          "x",
+          "X"
+        ]
+      },
+      "task": "simple_integration",
+      "tier": "medium",
+      "train_count": 889,
+      "train_seed": 1393954066,
+      "validation_count": 8,
+      "validation_seed": 1681909162
+    },
+    {
+      "category": "algebra",
+      "curriculum_levels": {
+        "terms": 2
+      },
+      "key": "algebra/simple_integration/hard",
+      "profile_config": {
+        "max_bounds": 10,
+        "max_degree": 10,
+        "max_terms": 4,
+        "min_bounds": 1,
+        "min_degree": 1,
+        "min_terms": 4,
+        "operators": [
+          "+",
+          "-"
+        ],
+        "symbols": [
+          "x",
+          "X"
+        ]
+      },
+      "task": "simple_integration",
+      "tier": "hard",
+      "train_count": 888,
+      "train_seed": 203375522,
+      "validation_count": 8,
+      "validation_seed": 1092981927
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "length": 1
+      },
+      "key": "algorithmic/ab/medium",
+      "profile_config": {
+        "length": 25
+      },
+      "task": "ab",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1945888909,
+      "validation_count": 8,
+      "validation_seed": 1100298928
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "length": 2
+      },
+      "key": "algorithmic/ab/hard",
+      "profile_config": {
+        "length": 50
+      },
+      "task": "ab",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 1139432133,
+      "validation_count": 8,
+      "validation_seed": 889706060
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "base": 0,
+        "value": 0
+      },
+      "key": "algorithmic/base_conversion/medium",
+      "profile_config": {
+        "max_base": 9,
+        "max_value": 10000,
+        "min_base": 2,
+        "min_value": 1000
+      },
+      "task": "base_conversion",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1934147521,
+      "validation_count": 8,
+      "validation_seed": 451725852
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "base": 1,
+        "value": 1
+      },
+      "key": "algorithmic/base_conversion/hard",
+      "profile_config": {
+        "max_base": 18,
+        "max_value": 100000,
+        "min_base": 9,
+        "min_value": 10000
+      },
+      "task": "base_conversion",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 122098541,
+      "validation_count": 8,
+      "validation_seed": 237772438
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 0
+      },
+      "key": "algorithmic/binary_alternation/medium",
+      "profile_config": {
+        "max_n": 50,
+        "min_n": 10,
+        "p_solvable": 0.8
+      },
+      "task": "binary_alternation",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1706076584,
+      "validation_count": 8,
+      "validation_seed": 1707605628
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 1
+      },
+      "key": "algorithmic/binary_alternation/hard",
+      "profile_config": {
+        "max_n": 500,
+        "min_n": 50,
+        "p_solvable": 0.8
+      },
+      "task": "binary_alternation",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 1343873702,
+      "validation_count": 8,
+      "validation_seed": 43592863
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 1,
+        "p_zero": 1
+      },
+      "key": "algorithmic/binary_matrix/medium",
+      "profile_config": {
+        "max_n": 16,
+        "min_n": 12,
+        "p_zero": 0.25
+      },
+      "task": "binary_matrix",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 803174947,
+      "validation_count": 8,
+      "validation_seed": 1925003554
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 2,
+        "p_zero": 2
+      },
+      "key": "algorithmic/binary_matrix/hard",
+      "profile_config": {
+        "max_n": 25,
+        "min_n": 20,
+        "p_zero": 0.1
+      },
+      "task": "binary_matrix",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 1255139285,
+      "validation_count": 8,
+      "validation_seed": 426467427
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "rotation": 0,
+        "words": 0
+      },
+      "key": "algorithmic/caesar_cipher/medium",
+      "profile_config": {
+        "delimiter": ".",
+        "max_rotation": 15,
+        "max_words": 15,
+        "min_rotation": 5,
+        "min_words": 5
+      },
+      "task": "caesar_cipher",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1777960501,
+      "validation_count": 8,
+      "validation_seed": 95947228
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "rotation": 1,
+        "words": 1
+      },
+      "key": "algorithmic/caesar_cipher/hard",
+      "profile_config": {
+        "delimiter": ".",
+        "max_rotation": 25,
+        "max_words": 25,
+        "min_rotation": 15,
+        "min_words": 15
+      },
+      "task": "caesar_cipher",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 821432107,
+      "validation_count": 8,
+      "validation_seed": 1114056424
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 0
+      },
+      "key": "algorithmic/count_primes/medium",
+      "profile_config": {
+        "max_n": 1000,
+        "min_n": 10
+      },
+      "task": "count_primes",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1983349664,
+      "validation_count": 8,
+      "validation_seed": 1904896593
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 1
+      },
+      "key": "algorithmic/count_primes/hard",
+      "profile_config": {
+        "max_n": 10000,
+        "min_n": 1000
+      },
+      "task": "count_primes",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 354417836,
+      "validation_count": 8,
+      "validation_seed": 159930768
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words": 0
+      },
+      "key": "algorithmic/cryptarithm/medium",
+      "profile_config": {
+        "allow_leading_zero": false,
+        "max_words": 3,
+        "min_words": 2
+      },
+      "task": "cryptarithm",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 68647637,
+      "validation_count": 8,
+      "validation_seed": 926677091
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words": 1
+      },
+      "key": "algorithmic/cryptarithm/hard",
+      "profile_config": {
+        "allow_leading_zero": false,
+        "max_words": 4,
+        "min_words": 3
+      },
+      "task": "cryptarithm",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 1680536347,
+      "validation_count": 8,
+      "validation_seed": 586239945
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "filled_cells_weights": 1,
+        "grid_size_x": 1,
+        "grid_size_y": 1,
+        "simulation_steps": 1
+      },
+      "key": "algorithmic/game_of_life/medium",
+      "profile_config": {
+        "filled_cells": 10,
+        "filled_cells_weights": 0.2,
+        "grid_size_x": 16,
+        "grid_size_y": 16,
+        "simulation_steps": 2
+      },
+      "task": "game_of_life",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1902326419,
+      "validation_count": 8,
+      "validation_seed": 420992563
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "filled_cells_weights": 2,
+        "grid_size_x": 2,
+        "grid_size_y": 2,
+        "simulation_steps": 2
+      },
+      "key": "algorithmic/game_of_life/hard",
+      "profile_config": {
+        "filled_cells": 10,
+        "filled_cells_weights": 0.5,
+        "grid_size_x": 25,
+        "grid_size_y": 25,
+        "simulation_steps": 5
+      },
+      "task": "game_of_life",
+      "tier": "hard",
+      "train_count": 162,
+      "train_seed": 464310922,
+      "validation_count": 8,
+      "validation_seed": 141681110
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "difficulty": 1,
+        "grid_size_x": 1,
+        "grid_size_y": 1,
+        "max_simulation_steps": 1,
+        "num_oscillators": 1
+      },
+      "key": "algorithmic/game_of_life_halting/medium",
+      "profile_config": {
+        "difficulty": 2,
+        "grid_size_x": 16,
+        "grid_size_y": 16,
+        "max_simulation_steps": 50,
+        "num_oscillators": 7
+      },
+      "task": "game_of_life_halting",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1076450139,
+      "validation_count": 8,
+      "validation_seed": 929503712
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "difficulty": 2,
+        "grid_size_x": 2,
+        "grid_size_y": 2,
+        "max_simulation_steps": 2,
+        "num_oscillators": 2
+      },
+      "key": "algorithmic/game_of_life_halting/hard",
+      "profile_config": {
+        "difficulty": 3,
+        "grid_size_x": 25,
+        "grid_size_y": 25,
+        "max_simulation_steps": 100,
+        "num_oscillators": 10
+      },
+      "task": "game_of_life_halting",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1163621172,
+      "validation_count": 8,
+      "validation_seed": 977718253
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "num_colors": 1,
+        "num_vertices": 0
+      },
+      "key": "algorithmic/graph_color/medium",
+      "profile_config": {
+        "edge_probability": 0.2,
+        "max_num_vertices": 20,
+        "min_num_vertices": 16,
+        "num_colors": 4
+      },
+      "task": "graph_color",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1606729006,
+      "validation_count": 8,
+      "validation_seed": 1487824079
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "num_colors": 2,
+        "num_vertices": 1
+      },
+      "key": "algorithmic/graph_color/hard",
+      "profile_config": {
+        "edge_probability": 0.15,
+        "max_num_vertices": 30,
+        "min_num_vertices": 24,
+        "num_colors": 3
+      },
+      "task": "graph_color",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 787635721,
+      "validation_count": 8,
+      "validation_seed": 241741181
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "anagram_groups": 0,
+        "words_per_group": 1
+      },
+      "key": "algorithmic/group_anagrams/medium",
+      "profile_config": {
+        "max_anagram_groups": 10,
+        "max_words_per_group": 5,
+        "min_anagram_groups": 5,
+        "min_words_per_group": 5
+      },
+      "task": "group_anagrams",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 957440026,
+      "validation_count": 8,
+      "validation_seed": 784458700
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "anagram_groups": 1,
+        "words_per_group": 2
+      },
+      "key": "algorithmic/group_anagrams/hard",
+      "profile_config": {
+        "max_anagram_groups": 50,
+        "max_words_per_group": 10,
+        "min_anagram_groups": 10,
+        "min_words_per_group": 10
+      },
+      "task": "group_anagrams",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1906144438,
+      "validation_count": 8,
+      "validation_seed": 1828315989
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "string_length": 1
+      },
+      "key": "algorithmic/isomorphic_strings/medium",
+      "profile_config": {
+        "max_string_length": 50,
+        "min_string_length": 50,
+        "p_solvable": 0.5
+      },
+      "task": "isomorphic_strings",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 697992833,
+      "validation_count": 8,
+      "validation_seed": 935201415
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "string_length": 2
+      },
+      "key": "algorithmic/isomorphic_strings/hard",
+      "profile_config": {
+        "max_string_length": 100,
+        "min_string_length": 100,
+        "p_solvable": 0.5
+      },
+      "task": "isomorphic_strings",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 851276479,
+      "validation_count": 8,
+      "validation_seed": 251269859
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words": 0
+      },
+      "key": "algorithmic/letter_counting/medium",
+      "profile_config": {
+        "max_words": 7,
+        "min_words": 5
+      },
+      "task": "letter_counting",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1704288653,
+      "validation_count": 8,
+      "validation_seed": 1963200594
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words": 1
+      },
+      "key": "algorithmic/letter_counting/hard",
+      "profile_config": {
+        "max_words": 9,
+        "min_words": 7
+      },
+      "task": "letter_counting",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1405923415,
+      "validation_count": 8,
+      "validation_seed": 1123494771
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "corruption_level": 0,
+        "word_len": 0,
+        "words": 0
+      },
+      "key": "algorithmic/letter_jumble/medium",
+      "profile_config": {
+        "consecutive_words": true,
+        "max_corruption_level": 0.3,
+        "max_word_len": 10,
+        "max_words": 10,
+        "min_corruption_level": 0.1,
+        "min_word_len": 5,
+        "min_words": 5
+      },
+      "task": "letter_jumble",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 520664137,
+      "validation_count": 8,
+      "validation_seed": 1532090655
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "corruption_level": 1,
+        "word_len": 1,
+        "words": 1
+      },
+      "key": "algorithmic/letter_jumble/hard",
+      "profile_config": {
+        "consecutive_words": true,
+        "max_corruption_level": 0.6,
+        "max_word_len": 15,
+        "max_words": 25,
+        "min_corruption_level": 0.3,
+        "min_word_len": 10,
+        "min_words": 10
+      },
+      "task": "letter_jumble",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1224568374,
+      "validation_count": 8,
+      "validation_seed": 35628445
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "cols": 1,
+        "num_transforms": 2,
+        "rows": 1
+      },
+      "key": "algorithmic/manipulate_matrix/medium",
+      "profile_config": {
+        "max_cols": 16,
+        "max_rows": 16,
+        "max_transforms": 5,
+        "min_cols": 12,
+        "min_rows": 12,
+        "min_transforms": 3,
+        "w_cmirror": 1,
+        "w_crop": 1,
+        "w_dmirror": 1,
+        "w_hmirror": 1,
+        "w_map": 1,
+        "w_remove_every_nth_col": 1,
+        "w_remove_every_nth_row": 1,
+        "w_rotate": 1,
+        "w_vmirror": 1,
+        "w_zero_divisible": 1
+      },
+      "task": "manipulate_matrix",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1296400537,
+      "validation_count": 8,
+      "validation_seed": 636237969
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "cols": 2,
+        "num_transforms": 3,
+        "rows": 2
+      },
+      "key": "algorithmic/manipulate_matrix/hard",
+      "profile_config": {
+        "max_cols": 25,
+        "max_rows": 25,
+        "max_transforms": 10,
+        "min_cols": 20,
+        "min_rows": 20,
+        "min_transforms": 5,
+        "w_cmirror": 1,
+        "w_crop": 1,
+        "w_dmirror": 1,
+        "w_hmirror": 1,
+        "w_map": 1,
+        "w_remove_every_nth_col": 1,
+        "w_remove_every_nth_row": 1,
+        "w_rotate": 1,
+        "w_vmirror": 1,
+        "w_zero_divisible": 1
+      },
+      "task": "manipulate_matrix",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 668413635,
+      "validation_count": 8,
+      "validation_seed": 158924519
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "decimals": 0,
+        "max_value": 1,
+        "min_value": 1,
+        "numbers": 0
+      },
+      "key": "algorithmic/number_filtering/medium",
+      "profile_config": {
+        "max_decimals": 2,
+        "max_numbers": 50,
+        "max_value": 500,
+        "min_decimals": 0,
+        "min_numbers": 10,
+        "min_value": -500
+      },
+      "task": "number_filtering",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1776391713,
+      "validation_count": 8,
+      "validation_seed": 1140102642
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "decimals": 1,
+        "max_value": 2,
+        "min_value": 2,
+        "numbers": 1
+      },
+      "key": "algorithmic/number_filtering/hard",
+      "profile_config": {
+        "max_decimals": 4,
+        "max_numbers": 100,
+        "max_value": 1000,
+        "min_decimals": 2,
+        "min_numbers": 50,
+        "min_value": -1000
+      },
+      "task": "number_filtering",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 378636833,
+      "validation_count": 8,
+      "validation_seed": 662337300
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "decimals": 0,
+        "max_value": 1,
+        "min_value": 1,
+        "numbers": 0
+      },
+      "key": "algorithmic/number_sorting/medium",
+      "profile_config": {
+        "max_decimals": 1,
+        "max_numbers": 100,
+        "max_value": 500,
+        "min_decimals": 0,
+        "min_numbers": 10,
+        "min_value": -500
+      },
+      "task": "number_sorting",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 988455042,
+      "validation_count": 8,
+      "validation_seed": 418920980
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "decimals": 1,
+        "max_value": 2,
+        "min_value": 2,
+        "numbers": 1
+      },
+      "key": "algorithmic/number_sorting/hard",
+      "profile_config": {
+        "max_decimals": 2,
+        "max_numbers": 500,
+        "max_value": 1000,
+        "min_decimals": 1,
+        "min_numbers": 100,
+        "min_value": -1000
+      },
+      "task": "number_sorting",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1741085129,
+      "validation_count": 8,
+      "validation_seed": 1221929816
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "length": 0
+      },
+      "key": "algorithmic/palindrome_generation/medium",
+      "profile_config": {
+        "max_length": 50,
+        "min_length": 10
+      },
+      "task": "palindrome_generation",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1350777612,
+      "validation_count": 8,
+      "validation_seed": 1720440540
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "length": 1
+      },
+      "key": "algorithmic/palindrome_generation/hard",
+      "profile_config": {
+        "max_length": 100,
+        "min_length": 50
+      },
+      "task": "palindrome_generation",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1064574813,
+      "validation_count": 8,
+      "validation_seed": 1731016954
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "string_len": 0,
+        "substring_palindrome_len": 0
+      },
+      "key": "algorithmic/palindrome_partitioning/medium",
+      "profile_config": {
+        "max_string_len": 5,
+        "max_substring_palindrome_len": 3,
+        "min_string_len": 1,
+        "min_substring_palindrome_len": 1
+      },
+      "task": "palindrome_partitioning",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1264388895,
+      "validation_count": 8,
+      "validation_seed": 19019675
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "string_len": 1,
+        "substring_palindrome_len": 1
+      },
+      "key": "algorithmic/palindrome_partitioning/hard",
+      "profile_config": {
+        "max_string_len": 10,
+        "max_substring_palindrome_len": 5,
+        "min_string_len": 5,
+        "min_substring_palindrome_len": 3
+      },
+      "task": "palindrome_partitioning",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1232910942,
+      "validation_count": 8,
+      "validation_seed": 178016525
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "cols": 1,
+        "pool_size": 1,
+        "rows": 1
+      },
+      "key": "algorithmic/pool_matrix/medium",
+      "profile_config": {
+        "max_cols": 16,
+        "max_pool_size": 5,
+        "max_rows": 16,
+        "min_cols": 12,
+        "min_pool_size": 3,
+        "min_rows": 12
+      },
+      "task": "pool_matrix",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1942179832,
+      "validation_count": 8,
+      "validation_seed": 667820003
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "cols": 2,
+        "pool_size": 2,
+        "rows": 2
+      },
+      "key": "algorithmic/pool_matrix/hard",
+      "profile_config": {
+        "max_cols": 25,
+        "max_pool_size": 7,
+        "max_rows": 25,
+        "min_cols": 20,
+        "min_pool_size": 5,
+        "min_rows": 20
+      },
+      "task": "pool_matrix",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1275420680,
+      "validation_count": 8,
+      "validation_seed": 1195353352
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "magazine_length": 0,
+        "note_length": 0
+      },
+      "key": "algorithmic/ransom_note/medium",
+      "profile_config": {
+        "max_magazine_length": 100,
+        "max_note_length": 50,
+        "min_magazine_length": 50,
+        "min_note_length": 10,
+        "p_solvable": 0.5
+      },
+      "task": "ransom_note",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1571177407,
+      "validation_count": 8,
+      "validation_seed": 1052059953
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "magazine_length": 1,
+        "note_length": 1
+      },
+      "key": "algorithmic/ransom_note/hard",
+      "profile_config": {
+        "max_magazine_length": 500,
+        "max_note_length": 100,
+        "min_magazine_length": 100,
+        "min_note_length": 50,
+        "p_solvable": 0.5
+      },
+      "task": "ransom_note",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 961090043,
+      "validation_count": 8,
+      "validation_seed": 338699506
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 1,
+        "num_rotations": 0
+      },
+      "key": "algorithmic/rotate_matrix/medium",
+      "profile_config": {
+        "max_n": 16,
+        "max_rotations": 5,
+        "min_n": 12,
+        "min_rotations": 1
+      },
+      "task": "rotate_matrix",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1353285926,
+      "validation_count": 8,
+      "validation_seed": 796383445
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 2,
+        "num_rotations": 1
+      },
+      "key": "algorithmic/rotate_matrix/hard",
+      "profile_config": {
+        "max_n": 25,
+        "max_rotations": 10,
+        "min_n": 20,
+        "min_rotations": 5
+      },
+      "task": "rotate_matrix",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1829018870,
+      "validation_count": 8,
+      "validation_seed": 1008122988
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 1
+      },
+      "key": "algorithmic/rotten_oranges/medium",
+      "profile_config": {
+        "max_n": 25,
+        "min_n": 25,
+        "p_oranges": 0.85,
+        "p_rotten": 0.1
+      },
+      "task": "rotten_oranges",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1299373648,
+      "validation_count": 8,
+      "validation_seed": 1095044418
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 2
+      },
+      "key": "algorithmic/rotten_oranges/hard",
+      "profile_config": {
+        "max_n": 36,
+        "min_n": 36,
+        "p_oranges": 0.85,
+        "p_rotten": 0.1
+      },
+      "task": "rotten_oranges",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1987385949,
+      "validation_count": 8,
+      "validation_seed": 955478080
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words_in_sentence": 0
+      },
+      "key": "algorithmic/sentence_reordering/medium",
+      "profile_config": {
+        "max_words_in_sentence": 20,
+        "min_words_in_sentence": 5
+      },
+      "task": "sentence_reordering",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1265270294,
+      "validation_count": 8,
+      "validation_seed": 278087071
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words_in_sentence": 1
+      },
+      "key": "algorithmic/sentence_reordering/hard",
+      "profile_config": {
+        "max_words_in_sentence": 50,
+        "min_words_in_sentence": 20
+      },
+      "task": "sentence_reordering",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1703265897,
+      "validation_count": 8,
+      "validation_seed": 167597211
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "word_len": 2
+      },
+      "key": "algorithmic/spell_backward/medium",
+      "profile_config": {
+        "data_file": "words3to10.txt",
+        "max_word_len": 7,
+        "min_word_len": 7
+      },
+      "task": "spell_backward",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1343027220,
+      "validation_count": 8,
+      "validation_seed": 305060864
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "word_len": 3
+      },
+      "key": "algorithmic/spell_backward/hard",
+      "profile_config": {
+        "data_file": "words3to10.txt",
+        "max_word_len": 9,
+        "min_word_len": 9
+      },
+      "task": "spell_backward",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 615578319,
+      "validation_count": 8,
+      "validation_seed": 1476359741
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 1
+      },
+      "key": "algorithmic/spiral_matrix/medium",
+      "profile_config": {
+        "max_n": 16,
+        "min_n": 12
+      },
+      "task": "spiral_matrix",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 342588890,
+      "validation_count": 8,
+      "validation_seed": 1374692314
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "n": 2
+      },
+      "key": "algorithmic/spiral_matrix/hard",
+      "profile_config": {
+        "max_n": 25,
+        "min_n": 20
+      },
+      "task": "spiral_matrix",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1964201900,
+      "validation_count": 8,
+      "validation_seed": 971182055
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "string_length": 0
+      },
+      "key": "algorithmic/string_insertion/medium",
+      "profile_config": {
+        "max_string_length": 50,
+        "min_string_length": 10
+      },
+      "task": "string_insertion",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1745217295,
+      "validation_count": 8,
+      "validation_seed": 445619551
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "string_length": 1
+      },
+      "key": "algorithmic/string_insertion/hard",
+      "profile_config": {
+        "max_string_length": 100,
+        "min_string_length": 50
+      },
+      "task": "string_insertion",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1414933483,
+      "validation_count": 8,
+      "validation_seed": 73557869
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "num_rules": 0,
+        "string_length": 0
+      },
+      "key": "algorithmic/string_manipulation/medium",
+      "profile_config": {
+        "max_num_rules": 5,
+        "max_string_length": 50,
+        "min_num_rules": 3,
+        "min_string_length": 10
+      },
+      "task": "string_manipulation",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1408003317,
+      "validation_count": 8,
+      "validation_seed": 1611450488
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "num_rules": 1,
+        "string_length": 1
+      },
+      "key": "algorithmic/string_manipulation/hard",
+      "profile_config": {
+        "max_num_rules": 10,
+        "max_string_length": 100,
+        "min_num_rules": 5,
+        "min_string_length": 50
+      },
+      "task": "string_manipulation",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 10456894,
+      "validation_count": 8,
+      "validation_seed": 1777944347
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "initial_machines": 0
+      },
+      "key": "algorithmic/string_splitting/medium",
+      "profile_config": {
+        "max_initial_machines": 50,
+        "max_iterations": 1000,
+        "min_initial_machines": 10
+      },
+      "task": "string_splitting",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1492765584,
+      "validation_count": 8,
+      "validation_seed": 853382136
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "initial_machines": 1
+      },
+      "key": "algorithmic/string_splitting/hard",
+      "profile_config": {
+        "max_initial_machines": 100,
+        "max_iterations": 1000,
+        "min_initial_machines": 50
+      },
+      "task": "string_splitting",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 664560802,
+      "validation_count": 8,
+      "validation_seed": 1792054493
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "initial_blocks": 0
+      },
+      "key": "algorithmic/string_synthesis/medium",
+      "profile_config": {
+        "max_initial_blocks": 50,
+        "max_iterations": 1000,
+        "min_initial_blocks": 10
+      },
+      "task": "string_synthesis",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1107576246,
+      "validation_count": 8,
+      "validation_seed": 533175665
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "initial_blocks": 1
+      },
+      "key": "algorithmic/string_synthesis/hard",
+      "profile_config": {
+        "max_initial_blocks": 100,
+        "max_iterations": 1000,
+        "min_initial_blocks": 50
+      },
+      "task": "string_synthesis",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1604440595,
+      "validation_count": 8,
+      "validation_seed": 1102585124
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "word_length": 0
+      },
+      "key": "algorithmic/word_ladder/medium",
+      "profile_config": {
+        "max_chain_length": -1,
+        "max_word_length": 4,
+        "min_chain_length": -1,
+        "min_word_length": 3
+      },
+      "task": "word_ladder",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 503470390,
+      "validation_count": 8,
+      "validation_seed": 707484884
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "word_length": 1
+      },
+      "key": "algorithmic/word_ladder/hard",
+      "profile_config": {
+        "max_chain_length": -1,
+        "max_word_length": 5,
+        "min_chain_length": -1,
+        "min_word_length": 4
+      },
+      "task": "word_ladder",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1063722234,
+      "validation_count": 8,
+      "validation_seed": 1907217021
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words": 0
+      },
+      "key": "algorithmic/word_sequence_reversal/medium",
+      "profile_config": {
+        "max_words": 25,
+        "min_words": 10
+      },
+      "task": "word_sequence_reversal",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 102596841,
+      "validation_count": 8,
+      "validation_seed": 38150247
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "words": 1
+      },
+      "key": "algorithmic/word_sequence_reversal/hard",
+      "profile_config": {
+        "max_words": 50,
+        "min_words": 25
+      },
+      "task": "word_sequence_reversal",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 168135013,
+      "validation_count": 8,
+      "validation_seed": 399857148
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "num_words": 0,
+        "word_length": 0
+      },
+      "key": "algorithmic/word_sorting/medium",
+      "profile_config": {
+        "max_word_length": 5,
+        "max_words": 10,
+        "min_word_length": 3,
+        "min_words": 5,
+        "transformation": "original"
+      },
+      "task": "word_sorting",
+      "tier": "medium",
+      "train_count": 162,
+      "train_seed": 1513905468,
+      "validation_count": 8,
+      "validation_seed": 1238494383
+    },
+    {
+      "category": "algorithmic",
+      "curriculum_levels": {
+        "num_words": 1,
+        "word_length": 1
+      },
+      "key": "algorithmic/word_sorting/hard",
+      "profile_config": {
+        "max_word_length": 10,
+        "max_words": 25,
+        "min_word_length": 5,
+        "min_words": 10,
+        "transformation": "original"
+      },
+      "task": "word_sorting",
+      "tier": "hard",
+      "train_count": 161,
+      "train_seed": 1709577074,
+      "validation_count": 8,
+      "validation_seed": 1596931871
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_digits": 1,
+        "num_terms": 2
+      },
+      "key": "arithmetic/basic_arithmetic/medium",
+      "profile_config": {
+        "allow_negation": true,
+        "allow_parentheses": true,
+        "format_style": "simple",
+        "max_digits": 2,
+        "max_terms": 4,
+        "min_digits": 2,
+        "min_terms": 4,
+        "operators": [
+          "+",
+          "-",
+          "*",
+          "/"
+        ],
+        "whitespace": "single"
+      },
+      "task": "basic_arithmetic",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 1200959780,
+      "validation_count": 8,
+      "validation_seed": 477367410
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_digits": 2,
+        "num_terms": 3
+      },
+      "key": "arithmetic/basic_arithmetic/hard",
+      "profile_config": {
+        "allow_negation": true,
+        "allow_parentheses": true,
+        "format_style": "simple",
+        "max_digits": 3,
+        "max_terms": 5,
+        "min_digits": 3,
+        "min_terms": 5,
+        "operators": [
+          "+",
+          "-",
+          "*",
+          "/"
+        ],
+        "whitespace": "single"
+      },
+      "task": "basic_arithmetic",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1373908563,
+      "validation_count": 8,
+      "validation_seed": 1660609770
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "difficulty": 4
+      },
+      "key": "arithmetic/bitwise_arithmetic/medium",
+      "profile_config": {
+        "difficulty": 5
+      },
+      "task": "bitwise_arithmetic",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 515766666,
+      "validation_count": 8,
+      "validation_seed": 1395245434
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "difficulty": 5
+      },
+      "key": "arithmetic/bitwise_arithmetic/hard",
+      "profile_config": {
+        "difficulty": 6
+      },
+      "task": "bitwise_arithmetic",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1240047017,
+      "validation_count": 8,
+      "validation_seed": 1572943687
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "offset_upper_bound": 1,
+        "tasks": 1
+      },
+      "key": "arithmetic/calendar_arithmetic/medium",
+      "profile_config": {
+        "leap_year_range": 200,
+        "offset_upper_bound": 100,
+        "tasks": [
+          "weekday_of_date",
+          "is_leap_year",
+          "weekday_offset"
+        ],
+        "year": 2022
+      },
+      "task": "calendar_arithmetic",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 86586295,
+      "validation_count": 8,
+      "validation_seed": 1977078710
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "offset_upper_bound": 2,
+        "tasks": 2
+      },
+      "key": "arithmetic/calendar_arithmetic/hard",
+      "profile_config": {
+        "leap_year_range": 200,
+        "offset_upper_bound": 250,
+        "tasks": [
+          "weekday_of_date",
+          "is_leap_year",
+          "weekday_offset",
+          "count_days",
+          "count_business_days"
+        ],
+        "year": 2022
+      },
+      "task": "calendar_arithmetic",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1447719560,
+      "validation_count": 8,
+      "validation_seed": 1593840756
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_digits": 4,
+        "num_terms": 5
+      },
+      "key": "arithmetic/chain_sum/medium",
+      "profile_config": {
+        "allow_negation": false,
+        "max_digits": 5,
+        "max_terms": 7,
+        "min_digits": 5,
+        "min_terms": 7
+      },
+      "task": "chain_sum",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 1943204102,
+      "validation_count": 8,
+      "validation_seed": 818705542
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_digits": 5,
+        "num_terms": 6
+      },
+      "key": "arithmetic/chain_sum/hard",
+      "profile_config": {
+        "allow_negation": false,
+        "max_digits": 6,
+        "max_terms": 8,
+        "min_digits": 6,
+        "min_terms": 8
+      },
+      "task": "chain_sum",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1492247516,
+      "validation_count": 8,
+      "validation_seed": 429348543
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "n": 0
+      },
+      "key": "arithmetic/count_bits/medium",
+      "profile_config": {
+        "max_n": 1000,
+        "min_n": 10
+      },
+      "task": "count_bits",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 1040216994,
+      "validation_count": 8,
+      "validation_seed": 993787472
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "n": 1
+      },
+      "key": "arithmetic/count_bits/hard",
+      "profile_config": {
+        "max_n": 1000000,
+        "min_n": 1000
+      },
+      "task": "count_bits",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1301479004,
+      "validation_count": 8,
+      "validation_seed": 296067728
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "decimal_places": 0,
+        "num_terms": 1,
+        "precision": 1
+      },
+      "key": "arithmetic/decimal_arithmetic/medium",
+      "profile_config": {
+        "max_num_decimal_places": 4,
+        "max_terms": 5,
+        "min_num_decimal_places": 2,
+        "min_terms": 5,
+        "precision": 8
+      },
+      "task": "decimal_arithmetic",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 1942447373,
+      "validation_count": 8,
+      "validation_seed": 1307944333
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "decimal_places": 1,
+        "num_terms": 2,
+        "precision": 2
+      },
+      "key": "arithmetic/decimal_arithmetic/hard",
+      "profile_config": {
+        "max_num_decimal_places": 6,
+        "max_terms": 8,
+        "min_num_decimal_places": 4,
+        "min_terms": 8,
+        "precision": 10
+      },
+      "task": "decimal_arithmetic",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1903239730,
+      "validation_count": 8,
+      "validation_seed": 1777464264
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "decimal_places": 0,
+        "num_digits": 0,
+        "num_terms": 1
+      },
+      "key": "arithmetic/decimal_chain_sum/medium",
+      "profile_config": {
+        "allow_negation": false,
+        "max_decimal_places": 2,
+        "max_digits": 2,
+        "max_terms": 5,
+        "min_decimal_places": 1,
+        "min_digits": 1,
+        "min_terms": 5
+      },
+      "task": "decimal_chain_sum",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 247787099,
+      "validation_count": 8,
+      "validation_seed": 40428860
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "decimal_places": 1,
+        "num_digits": 1,
+        "num_terms": 2
+      },
+      "key": "arithmetic/decimal_chain_sum/hard",
+      "profile_config": {
+        "allow_negation": false,
+        "max_decimal_places": 4,
+        "max_digits": 4,
+        "max_terms": 8,
+        "min_decimal_places": 2,
+        "min_digits": 2,
+        "min_terms": 8
+      },
+      "task": "decimal_chain_sum",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1271040992,
+      "validation_count": 8,
+      "validation_seed": 661346154
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "max_dice_size": 1,
+        "num_dice": 1
+      },
+      "key": "arithmetic/dice/medium",
+      "profile_config": {
+        "max_dice_size": 25,
+        "num_dice": 6
+      },
+      "task": "dice",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 902420435,
+      "validation_count": 8,
+      "validation_seed": 1496517307
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "max_dice_size": 2,
+        "num_dice": 2
+      },
+      "key": "arithmetic/dice/hard",
+      "profile_config": {
+        "max_dice_size": 30,
+        "num_dice": 8
+      },
+      "task": "dice",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 332064707,
+      "validation_count": 8,
+      "validation_seed": 1398191833
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "factor": 0,
+        "value": 0
+      },
+      "key": "arithmetic/fraction_simplification/medium",
+      "profile_config": {
+        "max_factor": 10,
+        "max_value": 100,
+        "min_factor": 1,
+        "min_value": 1,
+        "styles": [
+          "plain",
+          "latex_inline",
+          "latex_frac",
+          "latex_dfrac"
+        ]
+      },
+      "task": "fraction_simplification",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 1449782313,
+      "validation_count": 8,
+      "validation_seed": 1152951366
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "factor": 1,
+        "value": 1
+      },
+      "key": "arithmetic/fraction_simplification/hard",
+      "profile_config": {
+        "max_factor": 100,
+        "max_value": 1000,
+        "min_factor": 10,
+        "min_value": 100,
+        "styles": [
+          "plain",
+          "latex_inline",
+          "latex_frac",
+          "latex_dfrac"
+        ]
+      },
+      "task": "fraction_simplification",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 704864869,
+      "validation_count": 8,
+      "validation_seed": 1306639494
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_terms": 1,
+        "value": 0
+      },
+      "key": "arithmetic/gcd/medium",
+      "profile_config": {
+        "max_numbers": 3,
+        "max_value": 1000,
+        "min_numbers": 3,
+        "min_value": 100
+      },
+      "task": "gcd",
+      "tier": "medium",
+      "train_count": 297,
+      "train_seed": 239063129,
+      "validation_count": 8,
+      "validation_seed": 1353662359
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_terms": 2,
+        "value": 1
+      },
+      "key": "arithmetic/gcd/hard",
+      "profile_config": {
+        "max_numbers": 4,
+        "max_value": 10000,
+        "min_numbers": 4,
+        "min_value": 1000
+      },
+      "task": "gcd",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1593251896,
+      "validation_count": 8,
+      "validation_seed": 647105681
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {},
+      "key": "arithmetic/gsm_symbolic/fixed",
+      "profile_config": {
+        "difficulty": 1.0
+      },
+      "task": "gsm_symbolic",
+      "tier": "fixed",
+      "train_count": 593,
+      "train_seed": 962780113,
+      "validation_count": 8,
+      "validation_seed": 584125243
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "numbers": 1,
+        "value": 0
+      },
+      "key": "arithmetic/lcm/medium",
+      "profile_config": {
+        "max_numbers": 3,
+        "max_value": 1000,
+        "min_numbers": 3,
+        "min_value": 100
+      },
+      "task": "lcm",
+      "tier": "medium",
+      "train_count": 296,
+      "train_seed": 827094334,
+      "validation_count": 8,
+      "validation_seed": 1568098780
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "numbers": 2,
+        "value": 1
+      },
+      "key": "arithmetic/lcm/hard",
+      "profile_config": {
+        "max_numbers": 4,
+        "max_value": 10000,
+        "min_numbers": 4,
+        "min_value": 1000
+      },
+      "task": "lcm",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 496916841,
+      "validation_count": 8,
+      "validation_seed": 40801055
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_animals": 17,
+        "num_instances": 0
+      },
+      "key": "arithmetic/leg_counting/medium",
+      "profile_config": {
+        "max_animals": 18,
+        "max_instances": 4,
+        "min_animals": 18,
+        "min_instances": 2
+      },
+      "task": "leg_counting",
+      "tier": "medium",
+      "train_count": 296,
+      "train_seed": 1548422382,
+      "validation_count": 8,
+      "validation_seed": 1962133030
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_animals": 18,
+        "num_instances": 1
+      },
+      "key": "arithmetic/leg_counting/hard",
+      "profile_config": {
+        "max_animals": 19,
+        "max_instances": 8,
+        "min_animals": 19,
+        "min_instances": 4
+      },
+      "task": "leg_counting",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1939297510,
+      "validation_count": 8,
+      "validation_seed": 34325889
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "max_delta": 1,
+        "n": 0,
+        "num_candidates": 0
+      },
+      "key": "arithmetic/number_format/medium",
+      "profile_config": {
+        "max_delta": 1.0,
+        "max_n": 100000,
+        "max_num_candidates": 25,
+        "min_n": 1000,
+        "min_num_candidates": 5
+      },
+      "task": "number_format",
+      "tier": "medium",
+      "train_count": 296,
+      "train_seed": 740595263,
+      "validation_count": 8,
+      "validation_seed": 164812520
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "max_delta": 2,
+        "n": 1,
+        "num_candidates": 1
+      },
+      "key": "arithmetic/number_format/hard",
+      "profile_config": {
+        "max_delta": 0.001,
+        "max_n": 1000000,
+        "max_num_candidates": 100,
+        "min_n": 100000,
+        "min_num_candidates": 25
+      },
+      "task": "number_format",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 857611035,
+      "validation_count": 8,
+      "validation_seed": 1776944927
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "exponent": 2
+      },
+      "key": "arithmetic/power_function/medium",
+      "profile_config": {
+        "max_base": 1000.0,
+        "max_exponent": 6,
+        "min_base": -1000.0,
+        "min_exponent": 6
+      },
+      "task": "power_function",
+      "tier": "medium",
+      "train_count": 296,
+      "train_seed": 62885360,
+      "validation_count": 8,
+      "validation_seed": 1074520080
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "exponent": 3
+      },
+      "key": "arithmetic/power_function/hard",
+      "profile_config": {
+        "max_base": 1000.0,
+        "max_exponent": 8,
+        "min_base": -1000.0,
+        "min_exponent": 8
+      },
+      "task": "power_function",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 58435388,
+      "validation_count": 8,
+      "validation_seed": 1563931227
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "value": 0
+      },
+      "key": "arithmetic/prime_factorization/medium",
+      "profile_config": {
+        "max_value": 1000,
+        "min_value": 10
+      },
+      "task": "prime_factorization",
+      "tier": "medium",
+      "train_count": 296,
+      "train_seed": 280308915,
+      "validation_count": 8,
+      "validation_seed": 679601739
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "value": 1
+      },
+      "key": "arithmetic/prime_factorization/hard",
+      "profile_config": {
+        "max_value": 5000,
+        "min_value": 1000
+      },
+      "task": "prime_factorization",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 365376745,
+      "validation_count": 8,
+      "validation_seed": 272539994
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_digits": 4,
+        "num_terms": 5
+      },
+      "key": "arithmetic/products/medium",
+      "profile_config": {
+        "allow_negation": false,
+        "max_digits": 5,
+        "max_terms": 7,
+        "min_digits": 5,
+        "min_terms": 7
+      },
+      "task": "products",
+      "tier": "medium",
+      "train_count": 296,
+      "train_seed": 1022557,
+      "validation_count": 8,
+      "validation_seed": 491177182
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "num_digits": 5,
+        "num_terms": 6
+      },
+      "key": "arithmetic/products/hard",
+      "profile_config": {
+        "allow_negation": false,
+        "max_digits": 6,
+        "max_terms": 8,
+        "min_digits": 6,
+        "min_terms": 8
+      },
+      "task": "products",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 289727148,
+      "validation_count": 8,
+      "validation_seed": 1478850116
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "max_date_difference_days": 2,
+        "max_time_difference_seconds": 3
+      },
+      "key": "arithmetic/time_intervals/medium",
+      "profile_config": {
+        "max_date": {
+          "__rg_json_type__": "date",
+          "value": "3000-01-01"
+        },
+        "max_date_difference_days": 30,
+        "max_time": {
+          "__rg_json_type__": "time",
+          "value": "23:59:59.999999"
+        },
+        "max_time_difference_seconds": 21600,
+        "min_date": {
+          "__rg_json_type__": "date",
+          "value": "1900-01-01"
+        },
+        "min_time": {
+          "__rg_json_type__": "time",
+          "value": "00:00:00"
+        },
+        "task_types": [
+          "time",
+          "time_seconds",
+          "time_ms",
+          "date",
+          "datetime",
+          "datetime_tz"
+        ]
+      },
+      "task": "time_intervals",
+      "tier": "medium",
+      "train_count": 296,
+      "train_seed": 154534635,
+      "validation_count": 8,
+      "validation_seed": 219270647
+    },
+    {
+      "category": "arithmetic",
+      "curriculum_levels": {
+        "max_date_difference_days": 3,
+        "max_time_difference_seconds": 4
+      },
+      "key": "arithmetic/time_intervals/hard",
+      "profile_config": {
+        "max_date": {
+          "__rg_json_type__": "date",
+          "value": "3000-01-01"
+        },
+        "max_date_difference_days": 365,
+        "max_time": {
+          "__rg_json_type__": "time",
+          "value": "23:59:59.999999"
+        },
+        "max_time_difference_seconds": 32400,
+        "min_date": {
+          "__rg_json_type__": "date",
+          "value": "1900-01-01"
+        },
+        "min_time": {
+          "__rg_json_type__": "time",
+          "value": "00:00:00"
+        },
+        "task_types": [
+          "time",
+          "time_seconds",
+          "time_ms",
+          "date",
+          "datetime",
+          "datetime_tz"
+        ]
+      },
+      "task": "time_intervals",
+      "tier": "hard",
+      "train_count": 296,
+      "train_seed": 1523909596,
+      "validation_count": 8,
+      "validation_seed": 1687424245
+    },
+    {
+      "category": "geometry",
+      "curriculum_levels": {
+        "max_coord": 1,
+        "min_coord": 1
+      },
+      "key": "geometry/advanced_geometry/medium",
+      "profile_config": {
+        "max_coord": 100,
+        "min_coord": -100,
+        "task_types": [
+          "orthocenter",
+          "incircle_radius",
+          "angle_measure"
+        ]
+      },
+      "task": "advanced_geometry",
+      "tier": "medium",
+      "train_count": 2667,
+      "train_seed": 721674954,
+      "validation_count": 8,
+      "validation_seed": 1591175884
+    },
+    {
+      "category": "geometry",
+      "curriculum_levels": {
+        "max_coord": 2,
+        "min_coord": 2
+      },
+      "key": "geometry/advanced_geometry/hard",
+      "profile_config": {
+        "max_coord": 1000,
+        "min_coord": -1000,
+        "task_types": [
+          "orthocenter",
+          "incircle_radius",
+          "angle_measure"
+        ]
+      },
+      "task": "advanced_geometry",
+      "tier": "hard",
+      "train_count": 2667,
+      "train_seed": 1345358407,
+      "validation_count": 8,
+      "validation_seed": 1472520219
+    },
+    {
+      "category": "geometry",
+      "curriculum_levels": {
+        "sides": 0
+      },
+      "key": "geometry/simple_geometry/medium",
+      "profile_config": {
+        "max_angle": 170,
+        "max_sides": 10,
+        "min_angle": 10,
+        "min_sides": 5
+      },
+      "task": "simple_geometry",
+      "tier": "medium",
+      "train_count": 2667,
+      "train_seed": 501383878,
+      "validation_count": 8,
+      "validation_seed": 1479180454
+    },
+    {
+      "category": "geometry",
+      "curriculum_levels": {
+        "sides": 1
+      },
+      "key": "geometry/simple_geometry/hard",
+      "profile_config": {
+        "max_angle": 170,
+        "max_sides": 15,
+        "min_angle": 10,
+        "min_sides": 10
+      },
+      "task": "simple_geometry",
+      "tier": "hard",
+      "train_count": 2666,
+      "train_seed": 740722831,
+      "validation_count": 8,
+      "validation_seed": 1735833887
+    },
+    {
+      "category": "code",
+      "curriculum_levels": {
+        "difficulty": 1
+      },
+      "key": "code/bf/medium",
+      "profile_config": {
+        "difficulty": 2
+      },
+      "task": "bf",
+      "tier": "medium",
+      "train_count": 1000,
+      "train_seed": 1623051569,
+      "validation_count": 8,
+      "validation_seed": 48495945
+    },
+    {
+      "category": "code",
+      "curriculum_levels": {
+        "difficulty": 2
+      },
+      "key": "code/bf/hard",
+      "profile_config": {
+        "difficulty": 3
+      },
+      "task": "bf",
+      "tier": "hard",
+      "train_count": 1000,
+      "train_seed": 1171546200,
+      "validation_count": 8,
+      "validation_seed": 1699605626
+    },
+    {
+      "category": "code",
+      "curriculum_levels": {
+        "difficulty": 1
+      },
+      "key": "code/codeio/medium",
+      "profile_config": {
+        "difficulty": 7,
+        "input_prediction_probability": 0.5
+      },
+      "task": "codeio",
+      "tier": "medium",
+      "train_count": 4333,
+      "train_seed": 1157013925,
+      "validation_count": 8,
+      "validation_seed": 89480386
+    },
+    {
+      "category": "code",
+      "curriculum_levels": {
+        "difficulty": 2
+      },
+      "key": "code/codeio/hard",
+      "profile_config": {
+        "difficulty": 8,
+        "input_prediction_probability": 0.5
+      },
+      "task": "codeio",
+      "tier": "hard",
+      "train_count": 4333,
+      "train_seed": 1907696698,
+      "validation_count": 8,
+      "validation_seed": 1169829238
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "box_num": 0,
+        "column_num": 0,
+        "row_num": 0
+      },
+      "key": "games/boxnet/medium",
+      "profile_config": {
+        "colour_list": [
+          "red",
+          "blue",
+          "green"
+        ],
+        "max_box_num": 2,
+        "max_column_num": 2,
+        "max_row_num": 2,
+        "min_box_num": 1,
+        "min_column_num": 1,
+        "min_row_num": 1
+      },
+      "task": "boxnet",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 329930303,
+      "validation_count": 8,
+      "validation_seed": 1424274966
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "box_num": 1,
+        "column_num": 1,
+        "row_num": 1
+      },
+      "key": "games/boxnet/hard",
+      "profile_config": {
+        "colour_list": [
+          "red",
+          "blue",
+          "green"
+        ],
+        "max_box_num": 3,
+        "max_column_num": 3,
+        "max_row_num": 3,
+        "min_box_num": 2,
+        "min_column_num": 2,
+        "min_row_num": 2
+      },
+      "task": "boxnet",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 1437524730,
+      "validation_count": 8,
+      "validation_seed": 1697837853
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "numbers": 0,
+        "target": 0,
+        "value": 0
+      },
+      "key": "games/countdown/medium",
+      "profile_config": {
+        "max_numbers": 6,
+        "max_target": 1000,
+        "max_value": 100,
+        "min_numbers": 6,
+        "min_target": 100,
+        "min_value": 1,
+        "operators": [
+          "+",
+          "-",
+          "*",
+          "/"
+        ],
+        "shuffle": true
+      },
+      "task": "countdown",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 225802796,
+      "validation_count": 8,
+      "validation_seed": 1233534490
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "numbers": 1,
+        "target": 1,
+        "value": 1
+      },
+      "key": "games/countdown/hard",
+      "profile_config": {
+        "max_numbers": 8,
+        "max_target": 5000,
+        "max_value": 200,
+        "min_numbers": 8,
+        "min_target": 500,
+        "min_value": 1,
+        "operators": [
+          "+",
+          "-",
+          "*",
+          "/"
+        ],
+        "shuffle": true
+      },
+      "task": "countdown",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 880318381,
+      "validation_count": 8,
+      "validation_seed": 215445934
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "num_words_in_sentence": 0
+      },
+      "key": "games/emoji_mystery/medium",
+      "profile_config": {
+        "max_words_in_sentence": 10,
+        "min_words_in_sentence": 5
+      },
+      "task": "emoji_mystery",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1457608800,
+      "validation_count": 8,
+      "validation_seed": 26063258
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "num_words_in_sentence": 1
+      },
+      "key": "games/emoji_mystery/hard",
+      "profile_config": {
+        "max_words_in_sentence": 20,
+        "min_words_in_sentence": 10
+      },
+      "task": "emoji_mystery",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 1410890770,
+      "validation_count": 8,
+      "validation_seed": 630437335
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "board_size": 1,
+        "difficulty": 1
+      },
+      "key": "games/futoshiki/medium",
+      "profile_config": {
+        "max_board_size": 6,
+        "max_difficulty": 1,
+        "min_board_size": 6,
+        "min_difficulty": 1
+      },
+      "task": "futoshiki",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 550831042,
+      "validation_count": 8,
+      "validation_seed": 1449666817
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "board_size": 2,
+        "difficulty": 2
+      },
+      "key": "games/futoshiki/hard",
+      "profile_config": {
+        "max_board_size": 7,
+        "max_difficulty": 2,
+        "min_board_size": 7,
+        "min_difficulty": 2
+      },
+      "task": "futoshiki",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 690180109,
+      "validation_count": 8,
+      "validation_seed": 978642413
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "cols": 1,
+        "p_ones": 1,
+        "rows": 1
+      },
+      "key": "games/kakurasu/medium",
+      "profile_config": {
+        "max_cols": 6,
+        "max_retries": 1000,
+        "max_rows": 6,
+        "min_cols": 6,
+        "min_rows": 6,
+        "p_ones": 0.4
+      },
+      "task": "kakurasu",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1032284455,
+      "validation_count": 8,
+      "validation_seed": 389748688
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "cols": 2,
+        "p_ones": 2,
+        "rows": 2
+      },
+      "key": "games/kakurasu/hard",
+      "profile_config": {
+        "max_cols": 7,
+        "max_retries": 1000,
+        "max_rows": 7,
+        "min_cols": 7,
+        "min_rows": 7,
+        "p_ones": 0.3
+      },
+      "task": "kakurasu",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 581695443,
+      "validation_count": 8,
+      "validation_seed": 1353870717
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "nodes": 2,
+        "pieces": 2,
+        "steps": 0
+      },
+      "key": "games/knight_swap/medium",
+      "profile_config": {
+        "impossible_ratio": 0.2,
+        "max_attempts": 100,
+        "max_nodes": 8,
+        "max_pieces": 2,
+        "max_steps": 12,
+        "min_nodes": 8,
+        "min_pieces": 2,
+        "min_steps": 4
+      },
+      "task": "knight_swap",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1123236855,
+      "validation_count": 8,
+      "validation_seed": 946403909
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "nodes": 3,
+        "pieces": 3,
+        "steps": 1
+      },
+      "key": "games/knight_swap/hard",
+      "profile_config": {
+        "impossible_ratio": 0.2,
+        "max_attempts": 100,
+        "max_nodes": 10,
+        "max_pieces": 3,
+        "max_steps": 20,
+        "min_nodes": 10,
+        "min_pieces": 3,
+        "min_steps": 8
+      },
+      "task": "knight_swap",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 780113561,
+      "validation_count": 8,
+      "validation_seed": 824942129
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "num_rounds": 1
+      },
+      "key": "games/mahjong_puzzle/medium",
+      "profile_config": {
+        "max_num_rounds": 50,
+        "min_num_rounds": 50
+      },
+      "task": "mahjong_puzzle",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 221526572,
+      "validation_count": 8,
+      "validation_seed": 1381782404
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "num_rounds": 2
+      },
+      "key": "games/mahjong_puzzle/hard",
+      "profile_config": {
+        "max_num_rounds": 100,
+        "min_num_rounds": 100
+      },
+      "task": "mahjong_puzzle",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 1505653779,
+      "validation_count": 8,
+      "validation_seed": 507674085
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "dist": 0,
+        "grid_size": 0
+      },
+      "key": "games/maze/medium",
+      "profile_config": {
+        "max_dist": 10,
+        "max_grid_size": 16,
+        "min_dist": 5,
+        "min_grid_size": 10
+      },
+      "task": "maze",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1246087529,
+      "validation_count": 8,
+      "validation_seed": 1599668985
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "dist": 1,
+        "grid_size": 1
+      },
+      "key": "games/maze/hard",
+      "profile_config": {
+        "max_dist": 15,
+        "max_grid_size": 25,
+        "min_dist": 10,
+        "min_grid_size": 18
+      },
+      "task": "maze",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 1005608311,
+      "validation_count": 8,
+      "validation_seed": 1694886400
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "empty": 0
+      },
+      "key": "games/mini_sudoku/medium",
+      "profile_config": {
+        "max_empty": 6,
+        "min_empty": 4
+      },
+      "task": "mini_sudoku",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1997469229,
+      "validation_count": 8,
+      "validation_seed": 1363293533
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "empty": 1
+      },
+      "key": "games/mini_sudoku/hard",
+      "profile_config": {
+        "max_empty": 8,
+        "min_empty": 6
+      },
+      "task": "mini_sudoku",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 1618624160,
+      "validation_count": 8,
+      "validation_seed": 1356995221
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "n": 2,
+        "num_removed": 0
+      },
+      "key": "games/n_queens/medium",
+      "profile_config": {
+        "max_remove": 4,
+        "min_remove": 2,
+        "n": 8
+      },
+      "task": "n_queens",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1459958511,
+      "validation_count": 8,
+      "validation_seed": 1106916218
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "n": 3,
+        "num_removed": 1
+      },
+      "key": "games/n_queens/hard",
+      "profile_config": {
+        "max_remove": 6,
+        "min_remove": 4,
+        "n": 10
+      },
+      "task": "n_queens",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 357833187,
+      "validation_count": 8,
+      "validation_seed": 1341434765
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "moves": 0
+      },
+      "key": "games/rush_hour/medium",
+      "profile_config": {
+        "max_moves": 20,
+        "min_moves": 5
+      },
+      "task": "rush_hour",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 124548814,
+      "validation_count": 8,
+      "validation_seed": 111756842
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "moves": 1
+      },
+      "key": "games/rush_hour/hard",
+      "profile_config": {
+        "max_moves": 35,
+        "min_moves": 20
+      },
+      "task": "rush_hour",
+      "tier": "hard",
+      "train_count": 332,
+      "train_seed": 1053787435,
+      "validation_count": 8,
+      "validation_seed": 594816962
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "height": 6,
+        "width": 6
+      },
+      "key": "games/sokoban/medium",
+      "profile_config": {
+        "max_boxes": 10,
+        "max_depth": 80,
+        "max_h": 8,
+        "max_w": 8,
+        "min_boxes": 4,
+        "min_h": 7,
+        "min_w": 7
+      },
+      "task": "sokoban",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1052262507,
+      "validation_count": 8,
+      "validation_seed": 795258446
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "height": 7,
+        "width": 7
+      },
+      "key": "games/sokoban/hard",
+      "profile_config": {
+        "max_boxes": 10,
+        "max_depth": 80,
+        "max_h": 10,
+        "max_w": 10,
+        "min_boxes": 4,
+        "min_h": 9,
+        "min_w": 9
+      },
+      "task": "sokoban",
+      "tier": "hard",
+      "train_count": 331,
+      "train_seed": 945102968,
+      "validation_count": 8,
+      "validation_seed": 1574397913
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "empty": 0
+      },
+      "key": "games/sudoku/medium",
+      "profile_config": {
+        "max_empty": 30,
+        "min_empty": 20
+      },
+      "task": "sudoku",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 1158383636,
+      "validation_count": 8,
+      "validation_seed": 1279595738
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "empty": 1
+      },
+      "key": "games/sudoku/hard",
+      "profile_config": {
+        "max_empty": 40,
+        "min_empty": 30
+      },
+      "task": "sudoku",
+      "tier": "hard",
+      "train_count": 331,
+      "train_seed": 1710247316,
+      "validation_count": 8,
+      "validation_seed": 640291524
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "board_size": 1,
+        "empty": 1
+      },
+      "key": "games/survo/medium",
+      "profile_config": {
+        "max_board_size": 5,
+        "max_empty": 9,
+        "max_num": 9,
+        "min_board_size": 5,
+        "min_empty": 9,
+        "min_num": 1
+      },
+      "task": "survo",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 911112660,
+      "validation_count": 8,
+      "validation_seed": 38183931
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "board_size": 2,
+        "empty": 2
+      },
+      "key": "games/survo/hard",
+      "profile_config": {
+        "max_board_size": 6,
+        "max_empty": 16,
+        "max_num": 9,
+        "min_board_size": 6,
+        "min_empty": 16,
+        "min_num": 1
+      },
+      "task": "survo",
+      "tier": "hard",
+      "train_count": 331,
+      "train_seed": 404865156,
+      "validation_count": 8,
+      "validation_seed": 1679870510
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "num_disks": 1,
+        "num_pegs": 1
+      },
+      "key": "games/tower_of_hanoi/medium",
+      "profile_config": {
+        "max_disks": 6,
+        "max_pegs": 4,
+        "min_disks": 5,
+        "min_pegs": 3,
+        "visualize": false
+      },
+      "task": "tower_of_hanoi",
+      "tier": "medium",
+      "train_count": 23,
+      "train_seed": 1350906822,
+      "validation_count": 8,
+      "validation_seed": 806330992
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "num_disks": 2,
+        "num_pegs": 2
+      },
+      "key": "games/tower_of_hanoi/hard",
+      "profile_config": {
+        "max_disks": 8,
+        "max_pegs": 5,
+        "min_disks": 7,
+        "min_pegs": 3,
+        "visualize": false
+      },
+      "task": "tower_of_hanoi",
+      "tier": "hard",
+      "train_count": 23,
+      "train_seed": 751491810,
+      "validation_count": 8,
+      "validation_seed": 1223949893
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "board_size": 1,
+        "max_stones": 1
+      },
+      "key": "games/tsumego/medium",
+      "profile_config": {
+        "max_board_size": 10,
+        "max_stones": 10,
+        "min_board_size": 10
+      },
+      "task": "tsumego",
+      "tier": "medium",
+      "train_count": 332,
+      "train_seed": 36212887,
+      "validation_count": 8,
+      "validation_seed": 627780382
+    },
+    {
+      "category": "games",
+      "curriculum_levels": {
+        "board_size": 2,
+        "max_stones": 2
+      },
+      "key": "games/tsumego/hard",
+      "profile_config": {
+        "max_board_size": 15,
+        "max_stones": 13,
+        "min_board_size": 15
+      },
+      "task": "tsumego",
+      "tier": "hard",
+      "train_count": 331,
+      "train_seed": 1620101289,
+      "validation_count": 8,
+      "validation_seed": 361881174
+    }
+  ],
+  "system_prompt_sha256": "225ffe38d998e43713d8f5f5d6aa0611f99b86d761c6ebd59ab9406277b6a309",
+  "task_train_counts": {
+    "algebra/complex_arithmetic": 1778,
+    "algebra/intermediate_integration": 1778,
+    "algebra/polynomial_equations": 1778,
+    "algebra/polynomial_multiplication": 1778,
+    "algebra/simple_equations": 1778,
+    "algebra/simple_integration": 1777,
+    "algorithmic/ab": 324,
+    "algorithmic/base_conversion": 324,
+    "algorithmic/binary_alternation": 324,
+    "algorithmic/binary_matrix": 324,
+    "algorithmic/caesar_cipher": 324,
+    "algorithmic/count_primes": 324,
+    "algorithmic/cryptarithm": 324,
+    "algorithmic/game_of_life": 324,
+    "algorithmic/game_of_life_halting": 323,
+    "algorithmic/graph_color": 323,
+    "algorithmic/group_anagrams": 323,
+    "algorithmic/isomorphic_strings": 323,
+    "algorithmic/letter_counting": 323,
+    "algorithmic/letter_jumble": 323,
+    "algorithmic/manipulate_matrix": 323,
+    "algorithmic/number_filtering": 323,
+    "algorithmic/number_sorting": 323,
+    "algorithmic/palindrome_generation": 323,
+    "algorithmic/palindrome_partitioning": 323,
+    "algorithmic/pool_matrix": 323,
+    "algorithmic/ransom_note": 323,
+    "algorithmic/rotate_matrix": 323,
+    "algorithmic/rotten_oranges": 323,
+    "algorithmic/sentence_reordering": 323,
+    "algorithmic/spell_backward": 323,
+    "algorithmic/spiral_matrix": 323,
+    "algorithmic/string_insertion": 323,
+    "algorithmic/string_manipulation": 323,
+    "algorithmic/string_splitting": 323,
+    "algorithmic/string_synthesis": 323,
+    "algorithmic/word_ladder": 323,
+    "algorithmic/word_sequence_reversal": 323,
+    "algorithmic/word_sorting": 323,
+    "arithmetic/basic_arithmetic": 593,
+    "arithmetic/bitwise_arithmetic": 593,
+    "arithmetic/calendar_arithmetic": 593,
+    "arithmetic/chain_sum": 593,
+    "arithmetic/count_bits": 593,
+    "arithmetic/decimal_arithmetic": 593,
+    "arithmetic/decimal_chain_sum": 593,
+    "arithmetic/dice": 593,
+    "arithmetic/fraction_simplification": 593,
+    "arithmetic/gcd": 593,
+    "arithmetic/gsm_symbolic": 593,
+    "arithmetic/lcm": 592,
+    "arithmetic/leg_counting": 592,
+    "arithmetic/number_format": 592,
+    "arithmetic/power_function": 592,
+    "arithmetic/prime_factorization": 592,
+    "arithmetic/products": 592,
+    "arithmetic/time_intervals": 592,
+    "geometry/advanced_geometry": 5334,
+    "geometry/simple_geometry": 5333,
+    "code/bf": 2000,
+    "code/codeio": 8666,
+    "games/boxnet": 664,
+    "games/countdown": 664,
+    "games/emoji_mystery": 664,
+    "games/futoshiki": 664,
+    "games/kakurasu": 664,
+    "games/knight_swap": 664,
+    "games/mahjong_puzzle": 664,
+    "games/maze": 664,
+    "games/mini_sudoku": 664,
+    "games/n_queens": 664,
+    "games/rush_hour": 664,
+    "games/sokoban": 663,
+    "games/sudoku": 663,
+    "games/survo": 663,
+    "games/tower_of_hanoi": 46,
+    "games/tsumego": 663
+  },
+  "reuse_policy": "retained profiles, seeds and quotas; no SHA verification"
+}

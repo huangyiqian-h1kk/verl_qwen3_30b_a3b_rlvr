@@ -1,0 +1,299 @@
+#!/bin/bash
+#PBS -P gcg51557
+#PBS -q R9920261000
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=16:00:00
+#PBS -N 0390_rg_r08_16k
+#PBS -j oe
+
+# Submit with:
+#   qsub -v RTYPE=rt_HF,ACTOR_LR=1e-6,RUN_VERSION=v1_len16k jobs/0390_q3_rg_sixcat_r08_16k_from25_full500_k8.pbs
+# Resubmit the identical command to continue from this phase's latest checkpoint.
+
+set -euo pipefail
+
+export WORK=/groups/gcg51557/experiments/0390_rlsd
+export PROJ=$WORK/RLVR/verl_qwen3_30b_a3b_rlvr
+export ENV_PREFIX=$WORK/envs/verl_qwen3_moe_megatron_py312_cu128
+export MODEL_PATH=$WORK/models/Qwen3-30B-A3B-Instruct-2507
+export RG_PY=$PROJ/vendor/reasoning_gym_compat_py
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export PYTHONNOUSERSITE=1
+
+EXPECTED_VERL_COMMIT=62ac6d6e9fccc09ab6af2171217cee6e290b799b
+ACTOR_LR=${ACTOR_LR:?submit with ACTOR_LR explicitly, e.g. 1e-6}
+RUN_VERSION=${RUN_VERSION:-v1_len16k}
+TARGET_STEPS=${TARGET_STEPS:-500}
+
+case "$RUN_VERSION" in *[!A-Za-z0-9._-]*|'') echo "[FAIL] invalid RUN_VERSION" >&2; exit 2 ;; esac
+[[ "$TARGET_STEPS" == 500 ]] || { echo "[FAIL] this production job requires TARGET_STEPS=500" >&2; exit 2; }
+python - "$ACTOR_LR" <<'PY'
+import math, sys
+value = float(sys.argv[1])
+assert math.isfinite(value) and 0 < value <= 1e-3, value
+print(f"[PASS] ACTOR_LR={value:g}")
+PY
+
+[[ "$RUN_VERSION" == "v1_len16k" ]] || { echo "[FAIL] This prepared phase uses RUN_VERSION=v1_len16k" >&2; exit 2; }
+EXPERIMENT_NAME=inst2507_rg_sixcat_r08_k8_full_${RUN_VERSION}
+DATA_DIR=/groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/data/reasoning_gym_sixcat_r08
+TRAIN_FILES=$DATA_DIR/train_64k.parquet
+VAL_FILES=$DATA_DIR/validation_fixed.parquet
+SYSTEM_PROMPT_FILE=$PROJ/config/unicode_system_prompt.txt
+REWARD_FILE=$PROJ/rewards/unicode_reasoning_gym_reward_v2.py
+LAUNCHER=$PROJ/jobs/run_qwen3_30b_a3b_megatron.sh
+PREFLIGHT=$PROJ/scripts/preflight_reasoning_gym_training.py
+FULL_CKPT_ROOT=$PROJ/ckpts/verl_full
+FULL_CKPT_DIR=$FULL_CKPT_ROOT/$EXPERIMENT_NAME
+SNAP_DIR=$PROJ/ckpts/model_snapshots/$EXPERIMENT_NAME
+SNAPSHOT_POLICY=$PROJ/config/reasoning_gym_curve_steps_16k_from25.txt
+WATCHER=$PROJ/scripts/snapshot_watcher_v5_selected.sh
+PRUNER=$PROJ/scripts/prune_full_checkpoints_v5_selected.sh
+FINGERPRINT=$FULL_CKPT_DIR/run_fingerprint.json
+LOG=$PROJ/logs/0390_q3_rg6_r08_16k_${RUN_VERSION}_${PBS_JOBID:-manual}_$(date +%F_%H%M%S).log
+
+mkdir -p "$PROJ/logs" "$PROJ/outputs/reward_debug" "$PROJ/wandb" "$FULL_CKPT_DIR" "$SNAP_DIR"
+exec > >(tee -a "$LOG") 2>&1
+
+command -v flock >/dev/null || { echo "[FAIL] flock is required" >&2; exit 2; }
+exec 9>"$FULL_CKPT_DIR/.training.lock"
+flock -n 9 || { echo "[FAIL] another job holds $FULL_CKPT_DIR/.training.lock" >&2; exit 3; }
+printf 'job=%s host=%s started=%s\n' "${PBS_JOBID:-manual}" "$(hostname)" "$(date --iso-8601=seconds)" >&9
+
+source "$PROJ/scripts/abci_verl_env.sh"
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate "$ENV_PREFIX"
+[[ -d "$RG_PY" ]] || { echo "[FAIL] Reasoning Gym thin overlay missing: $RG_PY" >&2; exit 2; }
+export PYTHONPATH="$RG_PY:$PROJ/compat${PYTHONPATH:+:$PYTHONPATH}"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export WANDB_MODE=offline
+export WANDB_DIR=$PROJ/wandb
+export TOKENIZER_FALLBACK_DIR=$MODEL_PATH
+export ACC_WEIGHT=1.0
+export FORMAT_WEIGHT=0.05
+export REWARD_DEBUG_RATE=0.002
+export REWARD_DEBUG_LOG=$PROJ/outputs/reward_debug/${EXPERIMENT_NAME}_${PBS_JOBID:-manual}.jsonl
+export KEEP_FULL_CKPTS=2
+export EXPECTED_FULL_CKPT_ROOT=$FULL_CKPT_ROOT
+export FULL_CKPT_PRUNER=$PRUNER
+
+actual_verl_commit=$(git -C "$VERL_SRC" rev-parse HEAD)
+[[ "$actual_verl_commit" == "$EXPECTED_VERL_COMMIT" ]] || {
+  echo "[FAIL] verl commit mismatch: $actual_verl_commit" >&2; exit 2;
+}
+python "$REWARD_FILE"
+python "$PREFLIGHT" \
+  --data-dir "$DATA_DIR" \
+  --reward-file "$REWARD_FILE" \
+  --model-path "$MODEL_PATH" \
+  --launcher "$LAUNCHER" \
+  --system-prompt-file "$SYSTEM_PROMPT_FILE" \
+  --fingerprint-file "$FINGERPRINT" \
+  --item "model=Qwen3-30B-A3B-Instruct-2507" \
+  --item "algorithm=grpo" \
+  --item "rollout_n=8" \
+  --item "train_batch_size=256" \
+  --item "ppo_mini_batch_size=32" \
+  --item "ppo_epochs=1" \
+  --item "actor_lr=$ACTOR_LR" \
+  --item "max_prompt_length=4096" \
+  --item "max_response_length=16384" \
+  --item "rollout_max_model_len=20480" \
+  --item "enable_thinking=false" \
+  --item "temperature=1.0" \
+  --item "top_p=1.0" \
+  --item "save_freq=5" \
+  --item "test_freq=25" \
+  --item "total_steps=500" \
+  --item "format_weight=0.05" \
+  --item "verl_commit=$EXPECTED_VERL_COMMIT"
+
+# This phase was seeded with a complete step-25 checkpoint by the preparer.
+# On resubmission select this phase's latest committed checkpoint, never restart.
+TRACKER=$FULL_CKPT_DIR/latest_checkpointed_iteration.txt
+[[ -f "$FULL_CKPT_DIR/phase_start_step_25.json" && -f "$TRACKER" ]] || {
+  echo "[FAIL] Run prepare_rg_16k_resume.py in the repository before qsub." >&2; exit 2;
+}
+RESUME_STEP=$(tr -d '[:space:]' < "$TRACKER")
+case "$RESUME_STEP" in ''|*[!0-9]*) echo "[FAIL] Invalid checkpoint tracker: $RESUME_STEP" >&2; exit 2 ;; esac
+[[ "$RESUME_STEP" -ge 25 ]] || { echo "[FAIL] Expected a checkpoint at step >= 25" >&2; exit 2; }
+RESUME_FROM_PATH=$FULL_CKPT_DIR/global_step_$RESUME_STEP
+[[ -f "$RESUME_FROM_PATH/data.pt" && -f "$RESUME_FROM_PATH/actor/ckpt_contents.json" ]] || {
+  echo "[FAIL] Missing full checkpoint/data.pt at $RESUME_FROM_PATH" >&2; exit 2;
+}
+VAL_BEFORE_TRAIN=False
+[[ "$RESUME_STEP" -eq 25 ]] && VAL_BEFORE_TRAIN=True
+echo "[PASS] Resume $RESUME_FROM_PATH; response=16384; context=20480; val_before_train=$VAL_BEFORE_TRAIN"
+
+# RG_SNAPSHOT_WATCHER_FIX_V5
+WATCHER_LOG=$PROJ/logs/snapshot_watcher_${EXPERIMENT_NAME}.log
+WATCHER_PID=
+TRAIN_PID=
+EXIT_REASON=normal
+command -v setsid >/dev/null || { echo "[FAIL] setsid is required" >&2; exit 2; }
+WATCHER_READY_FILE=$(mktemp "$PROJ/logs/.watcher_ready.XXXXXXXX")
+
+stop_watcher() {
+  [[ -n "$WATCHER_PID" ]] || return 0
+  if kill -0 "$WATCHER_PID" 2>/dev/null; then
+    kill -TERM "$WATCHER_PID" 2>/dev/null || true
+    for ((rg_wait=0; rg_wait<10; rg_wait++)); do
+      kill -0 "$WATCHER_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$WATCHER_PID" 2>/dev/null; then
+      kill -KILL "$WATCHER_PID" 2>/dev/null || true
+    fi
+  fi
+  wait "$WATCHER_PID" 2>/dev/null || true
+  WATCHER_PID=
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT TERM INT HUP
+  set +x
+  if [[ -n "$TRAIN_PID" ]] && kill -0 "$TRAIN_PID" 2>/dev/null; then
+    kill -TERM -- "-$TRAIN_PID" 2>/dev/null || true
+    for ((rg_wait=0; rg_wait<5; rg_wait++)); do
+      kill -0 "$TRAIN_PID" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL -- "-$TRAIN_PID" 2>/dev/null || true
+    wait "$TRAIN_PID" 2>/dev/null || true
+  fi
+  stop_watcher
+  rm -f -- "$WATCHER_READY_FILE"
+  echo "[EXIT] job=${PBS_JOBID:-manual} reason=$EXIT_REASON status=$status time=$(date --iso-8601=seconds)"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'EXIT_REASON=SIGTERM; exit 143' TERM
+trap 'EXIT_REASON=SIGINT; exit 130' INT
+trap 'EXIT_REASON=SIGHUP; exit 129' HUP
+
+# fd 9 proves ownership of the training lock during one-time legacy migration.
+# The Python watcher closes its inherited fd 9 after migration.
+WATCHER_READY_FILE="$WATCHER_READY_FILE" \
+  bash "$WATCHER" watch "$FULL_CKPT_DIR" "$SNAP_DIR" "$SNAPSHOT_POLICY" 30 >> "$WATCHER_LOG" 2>&1 &
+WATCHER_PID=$!
+for ((rg_start=0; rg_start<20; rg_start++)); do
+  kill -0 "$WATCHER_PID" 2>/dev/null || break
+  [[ "$(cat "$WATCHER_READY_FILE")" == "$WATCHER_PID" ]] && break
+  sleep 1
+done
+if ! kill -0 "$WATCHER_PID" 2>/dev/null || [[ "$(cat "$WATCHER_READY_FILE")" != "$WATCHER_PID" ]]; then
+  EXIT_REASON=watcher_start_failed
+  echo "[FAIL] snapshot watcher did not become ready; see $WATCHER_LOG" >&2
+  tail -n 15 "$WATCHER_LOG" >&2 || true
+  exit 74
+fi
+echo "[PASS] snapshot watcher ready: pid=$WATCHER_PID log=$WATCHER_LOG"
+
+
+cd "$VERL_SRC"
+set -x
+ACTOR_TP=2 \
+ACTOR_PP=2 \
+ACTOR_VPP=1 \
+ACTOR_EP=2 \
+REF_TP=2 \
+REF_PP=2 \
+REF_VPP=1 \
+REF_EP=2 \
+ROLLOUT_TP=4 \
+GEN_MOE_TP=1 \
+GEN_MOE_EP=4 \
+INFER_BACKEND=vllm \
+MODEL_PATH="$MODEL_PATH" \
+TRAIN_FILES="$TRAIN_FILES" \
+VAL_FILES="$VAL_FILES" \
+NGPUS_PER_NODE=8 \
+NNODES=1 \
+TRAIN_BATCH_SIZE=256 \
+PPO_MINI_BATCH_SIZE=32 \
+ROLLOUT_N=8 \
+MAX_PROMPT_LENGTH=4096 \
+MAX_RESPONSE_LENGTH=16384 \
+PPO_MAX_TOKEN_LEN_PER_GPU=32768 \
+ROLLOUT_MAX_MODEL_LEN=20480 \
+ROLLOUT_MAX_NUM_BATCHED_TOKENS=24576 \
+ROLLOUT_MAX_NUM_SEQS=512 \
+ROLLOUT_TEMPERATURE=1.0 \
+ROLLOUT_TOP_P=1.0 \
+ACTOR_LR="$ACTOR_LR" \
+TEST_FREQ=25 \
+SAVE_FREQ=5 \
+VAL_N=1 \
+VAL_TEMPERATURE=1.0 \
+VAL_TOP_P=1.0 \
+TOTAL_EPOCHS=3 \
+PROJECT_NAME=qwen3_rlvr_grpo_full \
+EXPERIMENT_NAME="$EXPERIMENT_NAME" \
+setsid bash "$LAUNCHER" \
+  trainer.logger='["console","wandb"]' \
+  trainer.total_epochs=3 \
+  trainer.total_training_steps=500 \
+  trainer.val_before_train="$VAL_BEFORE_TRAIN" \
+  trainer.default_local_dir="$FULL_CKPT_DIR" \
+  trainer.resume_mode=resume_path \
+  trainer.resume_from_path="$RESUME_FROM_PATH" \
+  trainer.del_local_ckpt_after_load=False \
+  'actor_rollout_ref.actor.checkpoint.load_contents=[model,optimizer,extra]' \
+  actor_rollout_ref.actor.checkpoint.async_save=False \
+  reward.reward_manager.name=naive \
+  reward_model.reward_manager=naive \
+  trainer.max_actor_ckpt_to_keep=null \
+  trainer.log_val_generations=20 \
+  data.seed=42 \
+  +data.apply_chat_template_kwargs.enable_thinking=False \
+  actor_rollout_ref.actor.ppo_epochs=1 \
+  actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=null \
+  actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=null \
+  ++reward_model.reward_kwargs.overlong_buffer_cfg.enable=False \
+  ++reward_model.reward_kwargs.overlong_buffer_cfg.len=512 \
+  ++reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0 \
+  ++reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
+  ++reward_model.reward_kwargs.max_resp_len=16384 \
+  reward.custom_reward_function.path="$REWARD_FILE" \
+  reward.custom_reward_function.name=compute_score \
+  'actor_rollout_ref.actor.checkpoint.save_contents=[model,hf_model,optimizer,extra]' &
+TRAIN_PID=$!
+set +x
+while kill -0 "$TRAIN_PID" 2>/dev/null; do
+  if ! kill -0 "$WATCHER_PID" 2>/dev/null; then
+    EXIT_REASON=watcher_died
+    echo "[FAIL] snapshot watcher exited during training; see $WATCHER_LOG" >&2
+    tail -n 15 "$WATCHER_LOG" >&2 || true
+    exit 74
+  fi
+  sleep 5 &
+  wait $! || true
+done
+if wait "$TRAIN_PID"; then
+  TRAIN_STATUS=0
+else
+  TRAIN_STATUS=$?
+fi
+TRAIN_PID=
+if [[ "$TRAIN_STATUS" -ne 0 ]]; then
+  EXIT_REASON=training_failed
+  exit "$TRAIN_STATUS"
+fi
+
+# A final sweep is attempted only after successful training, never on a signal.
+stop_watcher
+if ! bash "$WATCHER" oneshot "$FULL_CKPT_DIR" "$SNAP_DIR" "$SNAPSHOT_POLICY" 30 >> "$WATCHER_LOG" 2>&1; then
+  EXIT_REASON=final_snapshot_failed
+  echo "[FAIL] final snapshot sweep failed; see $WATCHER_LOG" >&2
+  exit 74
+fi
+
+
+echo "[PASS] run completed target step 500"
+echo "full checkpoints: $FULL_CKPT_DIR"
+echo "curve snapshots: $SNAP_DIR"
+echo "log: $LOG"
