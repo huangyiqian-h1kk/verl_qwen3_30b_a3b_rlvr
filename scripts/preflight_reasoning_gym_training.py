@@ -291,7 +291,7 @@ def main() -> None:
             and float(result.get("rg_score", 0.0)) >= 1.0 - 1e-12
             and result.get("format") == 1.0
             and result.get("answer_extraction") == "strict"
-            and result.get("score_error") is None
+            and result.get("score_error") in (None, "")
         ):
             raise SystemExit(f"[FAIL] custom reward replay failed for {key}: {result}")
 

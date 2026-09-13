@@ -118,6 +118,12 @@ def parse_extra(extra_info: Any) -> dict[str, Any]:
 @lru_cache(maxsize=512)
 def configured_dataset(task: str, config_json: str):
     config = decode_tagged_mapping(config_json, "rg_config_json")
+    if task == "word_sorting" and "transformation" in config:
+        # JSON preserves the enum value as a string, but the RG config
+        # validator requires the actual TextTransformation instance.
+        from reasoning_gym.algorithmic.word_sorting import TextTransformation
+
+        config["transformation"] = TextTransformation(config["transformation"])
     return reasoning_gym.create_dataset(task, **config)
 
 
@@ -177,11 +183,11 @@ def compute_score(
         "format": format_score,
         "pred": candidate if candidate is not None else "[NO_ANSWER]",
         "answer_extraction": extraction,
-        "rg_category": extra.get("rg_category"),
+        "rg_category": str(extra.get("rg_category") or ""),
         "rg_task": task,
-        "rg_tier": extra.get("rg_tier"),
+        "rg_tier": str(extra.get("rg_tier") or ""),
         "rg_config_sha1": hashlib.sha1(config_json.encode("utf-8")).hexdigest()[:16],
-        "score_error": error,
+        "score_error": error or "",  # verl skips strings, but tries to average None.
     }
     if should_debug(solution_str):
         path = debug_path()
@@ -201,6 +207,55 @@ def compute_score(
                 + "\n"
             )
     return record
+
+
+
+def word_sorting_self_test() -> None:
+    """Replay JSON-frozen oracles for both tiers and all transformation modes."""
+    from dataclasses import asdict
+    from reasoning_gym.algorithmic.word_sorting import TextTransformation, WordSortingConfig
+
+    cases = 0
+    profiles = {
+        "medium": dict(min_words=5, max_words=10, min_word_length=3, max_word_length=5),
+        "hard": dict(min_words=10, max_words=25, min_word_length=5, max_word_length=10),
+    }
+    for tier, profile in profiles.items():
+        for transformation in TextTransformation:
+            config = WordSortingConfig(seed=1729, size=3, transformation=transformation, **profile)
+            dataset = reasoning_gym.create_dataset("word_sorting", **asdict(config))
+            config_json = json.dumps(asdict(config))
+            restored = configured_dataset("word_sorting", config_json)
+            assert restored.config.transformation is transformation
+            for index in range(3):
+                entry = dataset[index]
+                answer = str(entry["answer"])
+                extra = {
+                    "index": f"word-sorting-{tier}-{transformation.value}-{index}",
+                    "rg_schema_version": EXPECTED_SCHEMA,
+                    "rg_category": "algorithmic",
+                    "rg_task": "word_sorting",
+                    "rg_tier": tier,
+                    "rg_config_json": config_json,
+                    "rg_entry_json": json.dumps(entry),
+                }
+                solution = (
+                    "《reasoning》Oracle format compatibility check.《/reasoning》"
+                    f"《answer》{answer}《/answer》"
+                )
+                result = compute_score("reasoning_gym/algorithmic/word_sorting/" + tier,
+                                       solution, answer, extra)
+                assert (result["acc"] == 1.0 and result["rg_score"] == 1.0
+                        and result["format"] == 1.0 and result["answer_extraction"] == "strict"
+                        and result["score_error"] == ""), result
+                wrong = compute_score(
+                    "reasoning_gym/algorithmic/word_sorting/" + tier,
+                    "《reasoning》Negative check.《/reasoning》《answer》wrong_answer_12345《/answer》",
+                    answer, extra,
+                )
+                assert wrong["acc"] == 0.0 and wrong["score_error"] == "", wrong
+                cases += 1
+    print(f"[PASS] word_sorting JSON/enum reward replay: {cases} cases, both tiers, all 4 transformations")
 
 
 def self_test() -> None:
@@ -235,8 +290,10 @@ def self_test() -> None:
     result = compute_score("reasoning_gym/arithmetic/leg_counting/test", solution, "8", extra)
     assert result["acc"] == 1.0 and result["format"] == 1.0, result
     assert abs(result["score"] - (ACC_WEIGHT + FORMAT_WEIGHT)) < 1e-12, result
+    word_sorting_self_test()
     print("[PASS] unicode_reasoning_gym_reward_v2 self-test")
 
 
 if __name__ == "__main__":
     self_test()
+
