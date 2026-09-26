@@ -1,6 +1,6 @@
 #!/bin/bash
 # Source this after conda activation on login or compute nodes.
-set -euo pipefail
+# Preserve the calling shell's options when sourced.
 export MD_ROOT
 MD_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 export VERL_SRC=${VERL_SRC:-/groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/src/verl}

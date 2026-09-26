@@ -52,28 +52,32 @@ RG 的两个已发现异常的 propositional_logic 参考答案按 UUID 隔离�
 
 ## 1. 应用补丁并准备 Python 依赖
 
-本次交付为 `DATA_MIXTURE_RL_V1_2026-09-26.patch`，基于研究分支起点 `1dab79093458113d55fde65ca0f10c9c01482485`。GitHub 连接器写入被 403 拒绝，远端尚未包含这次改动。先将补丁上传到下面的项目根目录，再运行命令。
+初版通过 `DATA_MIXTURE_RL_V1_2026-09-26.patch` 交付，目前已提交到 `research/data-mixture-rl`。已应用补丁的工作目录不要重复应用。以下命令从现有项目根目录更新该分支并安装依赖。
 
 在 ABCI 登录节点执行：
 
 ```bash
-source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
-conda activate /groups/gcg51557/experiments/0390_rlsd/envs/verl_qwen3_moe_megatron_py312_cu128
-
+(
+set -e
 cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl
 git status --short
 git switch research/data-mixture-rl
-git apply --check DATA_MIXTURE_RL_V1_2026-09-26.patch
-git apply DATA_MIXTURE_RL_V1_2026-09-26.patch
+git pull --ff-only origin research/data-mixture-rl
+
+source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh
+conda activate /groups/gcg51557/experiments/0390_rlsd/envs/verl_qwen3_moe_megatron_py312_cu128
 
 bash scripts/multidomain/setup_cpu_dependencies.sh
 source scripts/multidomain/env.sh
 python -m unittest discover -s tests/multidomain -v
+)
 ```
 
-应当位于 `research/data-mixture-rl`。如果切换分支或 `git apply --check` 报错，保留输出和工作文件。检查失败时不要继续应用，也不要运行强制 reset。
+应当位于 `research/data-mixture-rl`。外层括号在独立子 shell 内执行：任一步失败即停止，不改变当前登录 shell 的退出选项。切换分支或拉取报错时保留输出和工作文件，不要运行强制 reset。
 
-依赖脚本在 `.venv-multidomain/` 建立可以读取原 conda 包的独立环境，并用原环境的 `pip freeze` 约束已有包版本。遇到依赖冲突会停下；不会升级共享 conda 的 torch/CUDA/Megatron。后续每个 PBS 作业会自动加载这个环境。
+依赖脚本在 `.venv-multidomain/` 建立可以读取原 conda 包的独立环境，用原 conda 解释器的 `pip list --format=freeze` 生成 `包名==版本` 约束，包括 editable 安装的包。训练框架与共享依赖继续使用这些约束；脚本中明确列出的评分包及其专用依赖可以在项目虚拟环境中另装版本。例如原 conda 的 `math-verify 0.9.0` 保留，新实验使用 `0.8.0` 及其要求的 `latex2sympy2_extended 1.10.2`。安装失败时可直接重跑，无需删除环境。其余依赖冲突仍会停下；共享 conda 的包不会被修改。后续每个 PBS 作业会自动加载这个环境。
+
+旧版脚本若报 `Editable requirements are not allowed as constraints`，说明依赖安装尚未完成；此时后续的 `xmltodict` 缺失是安装失败的结果。修订后的安装器记录原环境基线，只允许已确认的 outlines/Megatron/decord 诊断保留；新增问题仍失败。CPU 依赖成功状态为 `CPU_DEPENDENCIES_READY` 或 `CPU_DEPENDENCIES_READY_WITH_INHERITED_CONFLICTS`，随后应有 33 项测试全部 `OK`。这不代表 GPU 环境验收完成。版本来源、未解决问题及输出位置见 [依赖说明](docs/multidomain_dependencies.md)。提前执行 Git commit/push 不会引起安装错误，无需撤销提交。`env.sh` 保留调用者原有的 shell 选项，PBS 启动脚本仍自行开启严格模式。
 
 ## 2. 准备固定版本数据和模型资产
 
