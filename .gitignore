@@ -59,3 +59,9 @@ venv/
 # ===== OS/editor =====
 .DS_Store
 *.swp
+
+# Multidomain runtime assets and isolated dependency environment
+initial_setup_v1/
+.venv-multidomain/
+resolved/
+reports/local_*.json

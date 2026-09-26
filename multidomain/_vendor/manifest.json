@@ -1,0 +1,56 @@
+{
+  "pivot_comparator.py": {
+    "sha256": "16a875cbcb5eeb23120665d4a1f2737c8b1f753e3657c1591dec19016aff9738",
+    "gym_commit": "b9bd68548444eb58793260405cee123cc67c4b4f",
+    "original_path": "resources_servers/single_step_tool_use_with_argument_comparison/common/verification_utils.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "science_prompt.txt": {
+    "sha256": "9c87da7e5e241fadc25cc624df0a06e06f12cacb3926d770107d536988849de5",
+    "gym_commit": "6283f37f83f727561ce59e0012c00dcd9780a423",
+    "original_path": "resources_servers/equivalence_llm_judge/prompt_templates/equivalence_llm_judge.txt",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "format_verification.py": {
+    "sha256": "6e0a4bd8eae96b073598f12b68805772644a0c60e5a5ef61f09ad12ea8761f36",
+    "gym_commit": "6283f37f83f727561ce59e0012c00dcd9780a423",
+    "original_path": "resources_servers/format_verification/app.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "structured.py": {
+    "sha256": "d7dd220974edf87fdd7450c7dadfc33dc9f5714c8f846afad86a526c3599e046",
+    "gym_commit": "6283f37f83f727561ce59e0012c00dcd9780a423",
+    "original_path": "resources_servers/structured_outputs/app.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "math.py": {
+    "sha256": "fd2c109ba28d3a44a32eddfc65e26c4e454ea200faf2b12a35f7bb923cbe7492",
+    "gym_commit": "6283f37f83f727561ce59e0012c00dcd9780a423",
+    "original_path": "resources_servers/math_with_judge/app.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "pivot_app.py": {
+    "sha256": "63a31ab2875407c7760fa93d499342f7eb96d5b1042df7ac1d96117e228fb82a",
+    "gym_commit": "b9bd68548444eb58793260405cee123cc67c4b4f",
+    "original_path": "resources_servers/single_step_tool_use_with_argument_comparison/app.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "science.py": {
+    "sha256": "525e5a2cc10d01cc713c51ecb82be7c2d9dd35a6815c5180f456c55b7af921f9",
+    "gym_commit": "6283f37f83f727561ce59e0012c00dcd9780a423",
+    "original_path": "resources_servers/equivalence_llm_judge/app.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "reasoning.py": {
+    "sha256": "3a35c5d27392dae05499ceefac04e9c32ad963b51a54d77bb470ee59b1fe3127",
+    "gym_commit": "6283f37f83f727561ce59e0012c00dcd9780a423",
+    "original_path": "resources_servers/reasoning_gym/app.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  },
+  "pivot_response.py": {
+    "sha256": "eee741038c1917a84b94bfe92a7460762e66b5ccef1d4bd0b27da05dfe21a585",
+    "gym_commit": "b9bd68548444eb58793260405cee123cc67c4b4f",
+    "original_path": "resources_servers/single_step_tool_use_with_argument_comparison/common/response_utils.py",
+    "repository": "https://github.com/NVIDIA-NeMo/Gym"
+  }
+}

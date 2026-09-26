@@ -1,0 +1,210 @@
+{
+  "date_utc": "2026-09-26",
+  "scope": "local CPU validation; no ABCI GPU or training execution",
+  "code_fingerprint": "e687c67824660587936be17eac49a8b11e9df5c8a9500830e3aaaae4271a6f2d",
+  "unit_tests": {
+    "passed": 24,
+    "failed": 0
+  },
+  "adapter_tokenizer_parquet_dataset": {
+    "rows": {
+      "conversational_pivot": 32,
+      "if_citation": 32,
+      "if_freeform": 32,
+      "if_structured_direct_generation": 32,
+      "if_structured_diversified_tasks": 32,
+      "if_structured_tool_calling_extraction": 32,
+      "math": 32,
+      "science": 32,
+      "swe_pivot": 32,
+      "reasoning_gym": 52
+    },
+    "token_ranges": {
+      "conversational_pivot": [
+        2009,
+        6221
+      ],
+      "if_citation": [
+        649,
+        3989
+      ],
+      "if_freeform": [
+        238,
+        2844
+      ],
+      "if_structured_direct_generation": [
+        622,
+        2794
+      ],
+      "if_structured_diversified_tasks": [
+        163,
+        13804
+      ],
+      "if_structured_tool_calling_extraction": [
+        590,
+        12467
+      ],
+      "math": [
+        25,
+        408
+      ],
+      "science": [
+        49,
+        158
+      ],
+      "swe_pivot": [
+        4448,
+        47174
+      ],
+      "reasoning_gym": [
+        22,
+        1582
+      ]
+    },
+    "parquet_dataset_roundtrip_rows": 340,
+    "tokenizer_fingerprint": "98d9b4e041958cc78e339454c0a78873f5e26266cabe646cb71922df00b0187c"
+  },
+  "verifier_parity": {
+    "status": "PASS",
+    "scope": "real-row adapter/upstream score parity; candidate fixture coverage",
+    "sources": {
+      "if_freeform": 32,
+      "reasoning_gym": 52,
+      "swe_pivot": 32,
+      "if_structured": 32,
+      "if_citation": 32,
+      "math": 32,
+      "conversational_pivot": 32
+    },
+    "branches": {
+      "if_freeform/": 32,
+      "reasoning_gym/family_relationships": 1,
+      "swe_pivot/": 32,
+      "if_structured/('json', 'text')": 5,
+      "if_structured/('xml', 'text')": 8,
+      "if_structured/('yaml', 'text')": 4,
+      "if_structured/('toml', 'text')": 4,
+      "if_structured/('json', 'tool_call')": 7,
+      "reasoning_gym/isomorphic_strings": 1,
+      "reasoning_gym/knight_swap": 1,
+      "if_citation/": 32,
+      "reasoning_gym/pool_matrix": 1,
+      "math/": 32,
+      "conversational_pivot/": 32,
+      "reasoning_gym/game_of_life": 1,
+      "if_structured/('csv', 'text')": 4,
+      "reasoning_gym/zebra_puzzles": 1,
+      "reasoning_gym/spiral_matrix": 1,
+      "reasoning_gym/binary_alternation": 1,
+      "reasoning_gym/tsumego": 1,
+      "reasoning_gym/spell_backward": 1,
+      "reasoning_gym/ransom_note": 1,
+      "reasoning_gym/graph_color": 1,
+      "reasoning_gym/mahjong_puzzle": 1,
+      "reasoning_gym/futoshiki": 1,
+      "reasoning_gym/sudoku": 1,
+      "reasoning_gym/n_queens": 1,
+      "reasoning_gym/rotten_oranges": 1,
+      "reasoning_gym/binary_matrix": 1,
+      "reasoning_gym/propositional_logic": 1,
+      "reasoning_gym/largest_island": 1,
+      "reasoning_gym/sentence_reordering": 1,
+      "reasoning_gym/manipulate_matrix": 1,
+      "reasoning_gym/word_sorting": 1,
+      "reasoning_gym/game_of_life_halting": 1,
+      "reasoning_gym/syllogism": 1,
+      "reasoning_gym/self_reference": 1,
+      "reasoning_gym/rush_hour": 1,
+      "reasoning_gym/sokoban": 1,
+      "reasoning_gym/word_sequence_reversal": 1,
+      "reasoning_gym/tower_of_hanoi": 1,
+      "reasoning_gym/mini_sudoku": 1,
+      "reasoning_gym/caesar_cipher": 1,
+      "reasoning_gym/letter_jumble": 1,
+      "reasoning_gym/boxnet": 1,
+      "reasoning_gym/rotate_matrix": 1,
+      "reasoning_gym/palindrome_generation": 1,
+      "reasoning_gym/course_schedule": 1,
+      "reasoning_gym/string_synthesis": 1,
+      "reasoning_gym/string_splitting": 1,
+      "reasoning_gym/circuit_logic": 1,
+      "reasoning_gym/ab": 1,
+      "reasoning_gym/knights_knaves": 1,
+      "reasoning_gym/string_manipulation": 1,
+      "reasoning_gym/jugs": 1,
+      "reasoning_gym/emoji_mystery": 1,
+      "reasoning_gym/group_anagrams": 1,
+      "reasoning_gym/maze": 1,
+      "reasoning_gym/letter_counting": 1,
+      "reasoning_gym/palindrome_partitioning": 1,
+      "reasoning_gym/string_insertion": 1,
+      "reasoning_gym/shortest_path": 1,
+      "reasoning_gym/word_ladder": 1
+    },
+    "candidate_comparisons": 828,
+    "science": "separate human-labelled calibration required",
+    "limitations": [
+      "Structured positive-output completeness is checked in model smoke, not inferred from empty-output parity.",
+      "Math comparator shares math-verify==0.8.0; this checks adapter parity, not mathematical correctness of every gold label."
+    ]
+  },
+  "structured_full_corpus_adapter": {
+    "direct_generation": 28145,
+    "diversified_tasks": 25768,
+    "tool_calling_extraction": 8783,
+    "total": 62696,
+    "tokenization_scope": "32 rows per subset; full-corpus check covers normalization and metadata only"
+  },
+  "reasoning_gym_native_witnesses": {
+    "pass": 7549,
+    "quarantined_known_propositional_reference_rows": 2,
+    "rush_hour_real_solutions_passed": 145,
+    "tasks": 52,
+    "training_answers_modified": false
+  },
+  "verl_config": {
+    "fixed_commit": "62ac6d6e9fccc09ab6af2171217cee6e290b799b",
+    "hydra_compose": "PASS",
+    "validate_config": "PASS",
+    "worker_module_import": "PASS"
+  },
+  "verl_interface": {
+    "status": "PASS",
+    "path": "MultiDomainAgentLoop -> AgentLoopOutput -> DataProto -> NaiveRewardManager -> Pivot scorer",
+    "generation_transport": "mocked",
+    "prompt_fingerprint_mismatch": "rejected"
+  },
+  "syntax": {
+    "compileall": "PASS",
+    "shell_bash_n": "PASS",
+    "pbs_dry_run": "PASS"
+  },
+  "sample_selection": {
+    "math": "32 native non-placeholder rows; full Math restoration not executed locally",
+    "science": "32 native no-tool rows from pinned file suffix",
+    "structured": "32 per subset",
+    "reasoning_gym": "one row per selected task for tokenizer/Parquet audit; all 7551 candidates inspected in witness audit",
+    "other_sources": "32 prefix rows each"
+  },
+  "runtime": {
+    "python": "3.12.14",
+    "transformers": "5.17.0",
+    "torch": "2.14.0+cpu",
+    "pyarrow": "25.0.1",
+    "pydantic": "2.13.5",
+    "math-verify": "0.8.0",
+    "reasoning-gym": "0.1.25",
+    "openapi-schema-validator": "0.9.0"
+  },
+  "pending_abci": [
+    "full eight-source restore/build/dedup/split/balance",
+    "two-node Ray and 16-GPU NCCL",
+    "policy and frozen FP8 judge model loading",
+    "128-case human-labelled Science calibration",
+    "model smoke",
+    "64K actor forward/backward without optimizer step",
+    "baseline generation",
+    "formal training first optimizer-step memory",
+    "distributed checkpoint resume and final HF export"
+  ]
+}

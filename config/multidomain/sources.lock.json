@@ -1,0 +1,94 @@
+{
+  "version": 2,
+  "retrieved_on": "2026-09-22",
+  "counts_are": "published raw rows; NOT audited eligible training counts",
+  "sources": {
+    "math": {
+      "repo_id": "nvidia/Nemotron-RL-Math-v2",
+      "revision": "804418c1d4eceeaa453d895954887c0975e79121",
+      "files": [
+        "data/train.jsonl"
+      ],
+      "published_raw_rows": 7732,
+      "restore_script": "fill_placeholders.py"
+    },
+    "if_freeform": {
+      "repo_id": "nvidia/Nemotron-RL-Instruction-Following-Free-Form-Formatting-v1",
+      "revision": "76d9aac962ebb0c6360975b96a8d44ccd0d49acc",
+      "files": [
+        "ds2_freeform_train.jsonl"
+      ],
+      "published_raw_rows": 9037
+    },
+    "if_citation": {
+      "repo_id": "nvidia/Nemotron-RL-Instruction-Following-Citation-Formatting-v1",
+      "revision": "f989302ba9f4a47677db5b444c34d00bad66ff21",
+      "files": [
+        "ds3_citation_train.jsonl"
+      ],
+      "published_raw_rows": 9540
+    },
+    "if_structured": {
+      "repo_id": "nvidia/Nemotron-RL-Instruction-Following-Structured-Outputs-v2",
+      "revision": "bbf79030fcff484c29321faecaeec91a21ba2259",
+      "files": [
+        "direct_generation/train-00000-of-00001.parquet",
+        "diversified_tasks/train-00000-of-00001.parquet",
+        "tool_calling_extraction/train-00000-of-00001.parquet"
+      ],
+      "published_raw_rows": 62696
+    },
+    "science": {
+      "repo_id": "nvidia/Nemotron-RL-Science-v1",
+      "revision": "a7f55756f14bdd16c6469b94601d86be15e4c4fc",
+      "files": [
+        "so_openq.jsonl"
+      ],
+      "published_raw_rows": 150644,
+      "published_no_tool_rows": 60078
+    },
+    "conversational_pivot": {
+      "repo_id": "nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1",
+      "revision": "9643c8103d7bfbc2d7fc4d15991d6739c612ff58",
+      "files": [
+        "train.jsonl"
+      ],
+      "published_raw_rows": 170320
+    },
+    "swe_pivot": {
+      "repo_id": "nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1",
+      "revision": "4947a3c8ea803413a65f9eca14a96ef521b2ddf5",
+      "files": [
+        "train.jsonl"
+      ],
+      "published_raw_rows": 6436
+    },
+    "reasoning_gym": {
+      "repo_id": "nvidia/Nemotron-RL-ReasoningGym-v1",
+      "revision": "ad2c929b2dfd64ca30afb4d60e2f69a5a1919c4d",
+      "files": [
+        "data/train.jsonl"
+      ],
+      "published_raw_rows": 15000,
+      "raw_sha256": "ebc81871f5640607c1b4fdd0c57ab35102c630de7bfbbc07b96fa512aa33ae59"
+    }
+  },
+  "dependencies": {
+    "policy": {
+      "repo_id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "revision": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe"
+    },
+    "judge": {
+      "repo_id": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+      "revision": "e156cb4efae43fbee1a1ab073f946a1377e6b969"
+    },
+    "dapo": {
+      "repo_id": "BytedTsinghua-SIA/DAPO-Math-17k",
+      "revision": "65877096c24ffa7abc4e4fa5edb95cf3413a5674"
+    },
+    "skywork": {
+      "repo_id": "Skywork/Skywork-OR1-RL-Data",
+      "revision": "1cdedc52e0e2db85fdf252f9be682e63a5a38c33"
+    }
+  }
+}

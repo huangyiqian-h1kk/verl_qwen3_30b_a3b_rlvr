@@ -1,0 +1,22 @@
+{
+  "format_verification.py": {
+    "sha256": "6e0a4bd8eae96b073598f12b68805772644a0c60e5a5ef61f09ad12ea8761f36",
+    "gym_commit": "6283f37f83f727561ce59e0012c00dcd9780a423",
+    "original_path": "resources_servers/format_verification/app.py"
+  },
+  "pivot_comparator.py": {
+    "sha256": "16a875cbcb5eeb23120665d4a1f2737c8b1f753e3657c1591dec19016aff9738",
+    "gym_commit": "b9bd68548444eb58793260405cee123cc67c4b4f",
+    "original_path": "resources_servers/single_step_tool_use_with_argument_comparison/common/verification_utils.py"
+  },
+  "pivot_response.py": {
+    "sha256": "eee741038c1917a84b94bfe92a7460762e66b5ccef1d4bd0b27da05dfe21a585",
+    "gym_commit": "b9bd68548444eb58793260405cee123cc67c4b4f",
+    "original_path": "resources_servers/single_step_tool_use_with_argument_comparison/common/response_utils.py"
+  },
+  "pivot_app.py": {
+    "sha256": "63a31ab2875407c7760fa93d499342f7eb96d5b1042df7ac1d96117e228fb82a",
+    "gym_commit": "b9bd68548444eb58793260405cee123cc67c4b4f",
+    "original_path": "resources_servers/single_step_tool_use_with_argument_comparison/app.py"
+  }
+}
