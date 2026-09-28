@@ -63,6 +63,13 @@ def resolve(config, disabled=()):
     if train_gpus % t['rollout_tp']:
         raise ValueError('Rollout TP does not divide training GPUs')
     use_judge = c['domains'][j['enabled_when']]['enabled']
+    judge_ep = j.get('expert_parallel_size', 1)
+    if type(judge_ep) is not int or judge_ep < 1:
+        raise ValueError('Judge expert_parallel_size must be a positive integer')
+    if use_judge and judge_ep > 1 and judge_ep != j['tensor_parallel_size'] * j['data_parallel_size']:
+        raise ValueError('Judge EP must equal TP * DP for the pinned verl vLLM backend')
+    if use_judge and j['pipeline_parallel_size'] != 1:
+        raise ValueError('The pinned verl vLLM rollout does not support pipeline parallelism')
     judge_gpus = j['nodes'] * j['gpus_per_node'] if use_judge else 0
     judge_parallel = j['tensor_parallel_size'] * j['data_parallel_size'] * j['pipeline_parallel_size']
     replicas = judge_gpus // judge_parallel if use_judge else 0

@@ -40,9 +40,10 @@ def main():
     q = shlex.quote
     sched = c['scheduler']
     lines = ['#!/bin/bash', f'#PBS -P {sched["project"]}', f'#PBS -q {sched["queue"]}',
-             f'#PBS -v RTYPE={sched["rtype"]}', f'#PBS -l select={nodes}:mpiprocs=1',
+             f'#PBS -v RTYPE={sched["rtype"]}', f'#PBS -l select={nodes}',
              f'#PBS -l walltime={"01:00:00" if a.stage == "check-infra" else sched["walltime"]}',
-             f'#PBS -N md_{a.stage}', '#PBS -j oe', f'#PBS -o {job / "pbs.log"}', 'set -euo pipefail',
+             f'#PBS -N 0390_md_{a.stage}', '#PBS -j oe', '#PBS -k oe', 'set -euo pipefail',
+             f'exec > >(tee -a {q(str(job / "pbs.log"))}) 2>&1', 'export PYTHONUNBUFFERED=1',
              f'cd {q(str(ROOT))}', 'if ! type module >/dev/null 2>&1; then source /etc/profile.d/modules.sh; fi',
              'module load gcc/13.2.0 cuda/12.8/12.8.1 cudnn/9.10/9.10.2 nccl/2.29/2.29.7-1', 'source /home/aci18769hm/opt/miniforge3/etc/profile.d/conda.sh',
              f'conda activate {q(c["environment_prefix"])}']

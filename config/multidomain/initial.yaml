@@ -128,6 +128,7 @@ judge:
   nodes: 1
   gpus_per_node: 8
   tensor_parallel_size: 8
+  expert_parallel_size: 8
   data_parallel_size: 1
   pipeline_parallel_size: 1
   expected_replicas: 1
