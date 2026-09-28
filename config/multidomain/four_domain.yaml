@@ -1,0 +1,217 @@
+version: multidomain-v1
+seed: 42
+project_root: /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d
+verl_commit: 62ac6d6e9fccc09ab6af2171217cee6e290b799b
+domains:
+  math:
+    required: true
+    enabled: true
+    sources:
+    - math
+  if:
+    required: true
+    enabled: true
+    sources:
+    - if_freeform
+    - if_citation
+    - if_structured
+  science:
+    required: false
+    enabled: false
+    sources:
+    - science
+    agent_filter: equivalence_llm_judge_simple_agent
+    require_no_tools: true
+  conversational_pivot:
+    required: false
+    enabled: true
+    sources:
+    - conversational_pivot
+  swe_pivot:
+    required: false
+    enabled: false
+    sources:
+    - swe_pivot
+  logic_algorithmic:
+    required: false
+    enabled: true
+    sources:
+    - reasoning_gym
+    categories:
+    - algorithmic
+    - logic
+    - graphs
+    - games
+    exclude_tasks:
+    - base_conversion
+    - count_primes
+    - cryptarithm
+    - number_filtering
+    - number_sorting
+    - aiw
+    - quantum_lock
+    - countdown
+    - puzzle24
+    - kakurasu
+    - survo
+    category_mixture: preserve_selected_pool
+    use_published_samples_only: true
+data:
+  restore_math_placeholders: true
+  deduplicate_before_split: true
+  split_method: stable_group_hash
+  split_ratios:
+  - 0.9
+  - 0.05
+  - 0.05
+  validation_max_per_domain: 256
+  test_max_per_domain: 256
+  balance: min_eligible_train_domain
+  replacement: false
+  if_source_mixture: equal_capped
+  length_mode: shared_context
+  max_prompt_tokens: 65535
+  max_response_tokens: 65536
+  max_context_tokens: 65536
+  minimum_generation_headroom: 1
+  respect_per_record_max_output_tokens: true
+  check_science_judge_context_budget: true
+  overlength: reserve_without_truncation
+  automatic_difficulty_filter: false
+  mandatory_task_scaffold: native_only
+training:
+  model_id: Qwen/Qwen3-30B-A3B-Instruct-2507
+  model_path: /groups/gcg51557/experiments/0390_rlsd/models/Qwen3-30B-A3B-Instruct-2507
+  algorithm: grpo
+  train_nodes: 1
+  gpus_per_node: 8
+  actor_tp: 2
+  actor_pp: 2
+  actor_ep: 2
+  actor_cp: 1
+  actor_virtual_pp: null
+  param_optimizer_grad_offload: true
+  gradient_checkpointing: true
+  rollout_tp: 4
+  rollout_n: 8
+  rollout_temperature: 1.0
+  rollout_top_p: 1.0
+  rollout_gpu_memory_utilization: 0.6
+  rollout_max_num_seqs: 64
+  rollout_max_num_batched_tokens: 16384
+  train_batch_size: 256
+  ppo_mini_batch_size: 32
+  ppo_micro_batch_size_per_gpu: 1
+  ppo_max_token_len_per_gpu: 65536
+  log_prob_max_token_len_per_gpu: 65536
+  log_prob_micro_batch_size_per_gpu: 1
+  ppo_epochs: 1
+  learning_rate: 1.0e-06
+  entropy_coeff: 0.0
+  use_kl_loss: false
+  use_kl_in_reward: false
+  total_epochs: 3
+  total_training_steps: null
+  seed: 42
+  test_freq: 25
+  save_freq: 25
+  max_actor_checkpoints: 2
+  final_hf_export: true
+  intermediate_weight_only_snapshots: false
+  val_n: 1
+  val_temperature: 0.0
+judge:
+  enabled_when: science
+  model_id: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+  model_path: /groups/gcg51557/experiments/0390_rlsd/models/Qwen3-235B-A22B-Instruct-2507-FP8
+  frozen: true
+  nodes: 1
+  gpus_per_node: 8
+  tensor_parallel_size: 8
+  expert_parallel_size: 8
+  data_parallel_size: 1
+  pipeline_parallel_size: 1
+  expected_replicas: 1
+  activation_dtype: bfloat16
+  weight_quantization: model_native_fp8
+  gpu_memory_utilization: 0.8
+  max_model_len: 131072
+  max_num_seqs: 32
+  max_num_batched_tokens: 8192
+  max_output_tokens: 8192
+  temperature: 0.0
+  top_p: 1.0
+  max_inflight_global: 32
+  request_timeout_seconds: 300
+  retries: 2
+  invalid_result_policy: raise_infrastructure_error
+verifiers:
+  logic_algorithmic:
+    gym_commit: 6283f37f83f727561ce59e0012c00dcd9780a423
+    reasoning_gym_version: 0.1.25
+    backend: reasoning_gym
+    task_field: metadata.source_dataset
+    scoring: native_continuous_reward
+    answer_extraction: official_answer_tag_then_boxed_then_full_text
+    judge: false
+    execute_model_code_or_external_tools: false
+    simulate_fixed_game_rules: true
+  math:
+    gym_commit: 6283f37f83f727561ce59e0012c00dcd9780a423
+    backend: math_with_judge
+    should_use_judge: false
+    extra_format_bonus: 0.0
+    symbol_timeout_seconds: 10
+  if:
+    gym_commit: 6283f37f83f727561ce59e0012c00dcd9780a423
+    backends:
+    - format_verification
+    - structured_outputs
+    execute_tools: false
+    constrained_decoding: false
+  science:
+    gym_commit: 6283f37f83f727561ce59e0012c00dcd9780a423
+    backend: equivalence_llm_judge
+    use_per_record_regex: true
+    extraction_length_threshold: null
+    check_full_generation_on_fail: false
+    check_twice_swap: false
+    equal_label: '[[A=B]]'
+    unequal_label: '[[A!=B]]'
+  conversational_pivot:
+    gym_commit: b9bd68548444eb58793260405cee123cc67c4b4f
+    backend: single_step_tool_use_with_argument_comparison
+    word_count_similarity_threshold: 0.1
+    message_policy: official_type_only
+    action_selection: first_tool_call_else_first_message_text
+    execute_tools: false
+    max_assistant_turns: 1
+  swe_pivot:
+    gym_commit: b9bd68548444eb58793260405cee123cc67c4b4f
+    backend: single_step_tool_use_with_argument_comparison
+    word_count_similarity_threshold: 0.0
+    message_policy: official_type_only
+    action_selection: first_tool_call_else_first_message_text
+    execute_tools: false
+    max_assistant_turns: 1
+acceptance:
+  infrastructure_nodes: 1
+  infrastructure_gpus_per_node: 8
+  model_smoke_random_prompts_per_domain: 8
+  model_smoke_longest_prompts_per_domain: 4
+  model_smoke_n: 2
+  baseline_prompts_per_domain: 64
+  baseline_n: 8
+  model_test_mode: val_only
+  optimizer_steps: 0
+  optional_no_step_backward_capacity_check: true
+  science_judge_review_cases: 128
+  science_judge_min_accuracy: 0.95
+  science_judge_max_false_positive_rate: 0.05
+verl_src: /groups/gcg51557/experiments/0390_rlsd/RLVR/verl_qwen3_30b_a3b_rlvr/src/verl
+environment_prefix: /groups/gcg51557/experiments/0390_rlsd/envs/verl_qwen3_moe_megatron_py312_cu128
+scheduler:
+  project: gcg51557
+  queue: R9920261000
+  rtype: rt_HF
+  walltime: '16:00:00'

@@ -166,7 +166,7 @@ def build(config, raw_root, output, tokenizer_path, judge_tokenizer_path=None):
                     ids = render(tokenizer, json.loads(row['messages_json']), json.loads(row['tools_json']))
                     budget = response_budget(len(ids), config['data'], row['request_max_output_tokens'])
                     eligible, reason = budget > 0, None if budget > 0 else 'policy_context_overflow'
-                    if source == 'science' and eligible:
+                    if source == 'science' and eligible and judge_tok is not None:
                         from multidomain.reward import science_prompt
                         prompt = science_prompt(json.loads(row['verifier_json']), '')
                         judge_base = len(render(judge_tok, [{'role': 'user', 'content': prompt}], []))

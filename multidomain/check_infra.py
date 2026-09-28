@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ABCI infrastructure-only acceptance: Ray, 16 CUDA devices, cross-node NCCL.
+"""ABCI infrastructure acceptance: Ray and NCCL across the requested GPUs.
 
 No policy, judge, optimizer or training data is loaded. This is NOT a model-
 memory or verifier acceptance test. See README for the subsequent val_only stage.

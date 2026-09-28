@@ -55,13 +55,17 @@ def execute(req):
               'optimizer_steps': 'training' if stage == 'train' else 0}
     try:
         if stage == 'prepare-data':
-            from multidomain.build import build
-            build(c, req['raw_dir'], data_dir, c['training']['model_path'], c['judge']['model_path'])
+            if req.get('source_data_dir'):
+                from multidomain.reselect import reselect
+                reselect(c, req['source_data_dir'], data_dir, req['source_manifest_sha256'])
+            else:
+                from multidomain.build import build
+                build(c, req['raw_dir'], data_dir, c['training']['model_path'], c['judge']['model_path'])
             if c['resolved']['judge_enabled']:
                 from multidomain.calibration import make_template
                 make_template(data_dir, run_dir / 'review/science_128.jsonl')
         elif stage == 'check-infra':
-            subprocess.run([sys.executable, '-m', 'multidomain.check_infra', '--expected-nodes', '2',
+            subprocess.run([sys.executable, '-m', 'multidomain.check_infra', '--expected-nodes', str(req['expected_nodes']),
                             '--output', str(reports / 'infrastructure_detail.json')], check=True)
         else:
             require(reports, ['prepare-data'], fingerprint)
@@ -135,7 +139,31 @@ def execute(req):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--request', required=True)
-    execute(json.loads(Path(ap.parse_args().request).read_text()))
+    req = json.loads(Path(ap.parse_args().request).read_text())
+    if req['stage'] != 'accept-four':
+        execute(req)
+        return
+    c = req['config']
+    if set(c['resolved']['enabled_domains']) != {'math', 'if', 'conversational_pivot', 'logic_algorithmic'} or req['expected_nodes'] != 1:
+        raise ValueError('accept-four requires the four-domain single-node configuration')
+    # A restart uses only matching, successful reports from this NEW experiment.
+    from multidomain.preflight import check
+    reports = Path(req['run_dir']) / 'reports'
+    fp = digest({'config': digest(c), 'code': code_fingerprint(), 'data_id': Path(req['data_dir']).name})
+    for stage in ('prepare-data', 'check-verifiers', 'check-infra', 'smoke'):
+        report_file = reports / (stage + '.json')
+        old = json.loads(report_file.read_text()) if report_file.exists() else {}
+        matches = old.get('status') == 'PASS' and old.get('fingerprint') == fp
+        if matches:
+            if stage != 'check-infra':
+                check(c, Path(req['data_dir']), models=False)
+                if stage != 'prepare-data' and old.get('manifest_sha256') != file_sha(Path(req['data_dir']) / 'manifest.json'):
+                    raise RuntimeError('Prepared data changed after acceptance')
+            print('[0390] Reuse matching four-domain PASS: ' + stage, flush=True)
+            continue
+        print('[0390] Running four-domain stage: ' + stage, flush=True)
+        execute(dict(req, stage=stage))
+    print('[0390] FOUR-DOMAIN ACCEPTANCE PASS; optimizer_steps=0', flush=True)
 
 if __name__ == '__main__':
     main()

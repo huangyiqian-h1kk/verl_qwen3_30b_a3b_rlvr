@@ -18,11 +18,7 @@ MD_PYTHON="$MD_ROOT/.venv-multidomain/bin/python"
 "$MD_PYTHON" -c 'import sys; print("[0390] Ray launch Python:", sys.executable, "prefix:", sys.prefix, flush=True)'
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 cd "$MD_ROOT"
-# BEGIN 0390 SHARED MEMORY PREFLIGHT
-# Every allocated node must pass before any node starts Ray or loads a model.
-# Reports and an all-node acknowledgement barrier are scoped to this PBS job.
 "$MD_PYTHON" "$MD_ROOT/scripts/multidomain/check_shared_memory.py" --request "$MD_REQUEST" --rank "$MD_RANK"
-# END 0390 SHARED MEMORY PREFLIGHT
 # MPI only starts one shell per node; Ray/torch workers establish their own ranks.
 while IFS='=' read -r MD_ENV_NAME _; do
   case "$MD_ENV_NAME" in OMPI_*|PMI_*|PMIX_*|MPI_*) unset "$MD_ENV_NAME" ;; esac
@@ -53,7 +49,7 @@ print('[0390] vLLM GPU capability check PASS:', capabilities, flush=True)
 PY
 # BEGIN 0390 SMOKE DIAGNOSTICS
 # Export before Ray starts so actor and EngineCore children inherit these.
-MD_DIAGNOSTICS=$("$MD_PYTHON" -c 'import json, sys; print(int(json.load(open(sys.argv[1]))["stage"] == "smoke"))' "$MD_REQUEST")
+MD_DIAGNOSTICS=$("$MD_PYTHON" -c 'import json, sys; print(int(json.load(open(sys.argv[1]))["stage"] in ("smoke", "accept-four")))' "$MD_REQUEST")
 if [[ "$MD_DIAGNOSTICS" == 1 ]]; then
   export VLLM_LOGGING_LEVEL=DEBUG PYTHONFAULTHANDLER=1
 fi

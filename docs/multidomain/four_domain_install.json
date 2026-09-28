@@ -1,0 +1,13 @@
+{
+  "source_root": "/groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl",
+  "source_branch": "refs/heads/research/data-mixture-rl",
+  "source_head": "aaed20dd15d9c6cab7e58c3a35552a8ada9c6b72",
+  "six_snapshot_branch": "research/data-mixture-rl-6d",
+  "six_snapshot_commit": "3e40aebb02e3534494f8b57d0b5910e84391f997",
+  "source_code_fingerprint": "a8806f4c98401a4975a00ccbc8bc09c9b083d1ef3377350526cd4d1ade49a620",
+  "four_code_fingerprint": "1393536cd28989c84a9d979dfe391dca364e146947e323539b251a6dcf7420a4",
+  "parent_data": "/groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl/data/multidomain/all_six_v2_ep8",
+  "parent_manifest_sha256": "4c3f7a46c51f85167d88300dfd2aee2f8f20c4cfd388aa75acf8afb56b8bdf23",
+  "shared_environment": "/groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl/.venv-multidomain",
+  "validation_scope": "CPU tests and pinned verl config only; ABCI acceptance not yet run"
+}

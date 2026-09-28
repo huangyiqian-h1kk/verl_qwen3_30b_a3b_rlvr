@@ -103,6 +103,6 @@ def check(data_dir, output):
         raise AssertionError('Need >=32 real train rows per non-judge source: ' + str(count))
     write_json(output, {'status': 'PASS', 'scope': 'real-row adapter/upstream score parity; candidate fixture coverage',
                        'sources': dict(count), 'branches': dict(branches), 'candidate_comparisons': tested,
-                       'science': 'separate human-labelled calibration required',
+                       'science': 'separate human-labelled calibration required' if any(r['source'] == 'science' for r in rows) else 'disabled; no judge calibration required',
                        'limitations': ['Structured positive-output completeness is checked in model smoke, not inferred from empty-output parity.',
                                        'Math comparator shares math-verify==0.8.0; this checks adapter parity, not mathematical correctness of every gold label.']})
