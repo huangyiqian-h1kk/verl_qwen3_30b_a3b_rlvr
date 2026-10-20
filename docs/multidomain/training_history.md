@@ -29,6 +29,8 @@ python3 -I scripts/multidomain/collect_training_history.py --root "$PWD"
 - `manifest.json`、`warnings.json`：来源、日志快照 SHA256、扫描范围、变化／缺失／截断记录。
 - 压缩包的 `evidence/`：完整作业文本日志、配置、恢复／交接记录、相关 reward／sampler／trainer 源码快照和 checkpoint 元数据。
 
+Console 数值支持普通浮点数和 `np.float64(...)`、`numpy.int64(...)` 等数值标量表示；只按数值语法解析，不执行日志中的表达式，也不依赖 NumPy。
+
 默认扫描 `generations/` 与 `raw_generations/` 的全部现有 JSONL 行，保留所有数值和代表性文本，不复制全部长回答。若需要所有回答全文，加 `--full-generations`；这可能明显增大压缩包。脚本不能恢复此前未保存的 rollout、token 数或采样统计，也不会重新调用 verifier/tokenizer 评分。
 
 解释数据时必须保留的区分：

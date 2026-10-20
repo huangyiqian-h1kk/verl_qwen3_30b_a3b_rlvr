@@ -52,6 +52,14 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(row["nonfinite_keys"], ["actor/pg_loss", "actor/grad_norm"])
         json.dumps(row, allow_nan=False)
 
+    def test_numpy_scalar_reprs_from_pinned_verl_are_not_dropped(self):
+        row = m.parse_metric("step:25 - actor/pg_loss:np.float64(-0.002) - actor/lr:np.float64(1e-6) - val-core/math/acc/mean@1:np.float64(0.5) - num_turns/min:np.int32(2) - sampling/domain/math:numpy.float32(1.0)")
+        self.assertEqual(len(row["metrics"]), 5)
+        self.assertEqual(row["metrics"]["actor/pg_loss"], -0.002)
+        self.assertEqual(row["metrics"]["num_turns/min"], 2)
+        self.assertTrue(m.is_update(row))
+        self.assertIsNone(m.parse_metric("step:0 - val-core/math/acc/mean@1:np.float64(__import__('os'))"))
+
     def test_progress_restore_and_sampling_are_not_completed_steps(self):
         for line in ("Training Progress: 14% 65/468", "load checkpoint step 65", "[0390] sampling step 66: domain=if"):
             self.assertIsNone(m.parse_metric(line))

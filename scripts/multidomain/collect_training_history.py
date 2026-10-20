@@ -27,6 +27,7 @@ RUNS = {"random_single": "", "domain_single": "_db_v1",
         "random_dual": "_n2_once_v1", "domain_dual": "_db_n2_once_v1"}
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 NUMBER = r"[-+]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|inf(?:inity)?)"
+SCALAR_WRAPPER = re.compile(r"\b(?:np|numpy)\.(?:float(?:16|32|64|128)?|u?int(?:8|16|32|64)?)\(\s*(" + NUMBER + r")\s*\)", re.I)
 METRIC = re.compile(r"(?:^|\s+-\s+)([^:\s][^:]*?):\s*(" + NUMBER + r")(?=\s+-\s+|\s*$|\s*\[repeated)", re.I)
 STEP = re.compile(r"\bstep:\s*(\d+)\s+-\s+")
 SAMPLE = re.compile(r"sampling step\s+(\d+):\s*domain=([^,\s]+)")
@@ -67,6 +68,9 @@ def numeric(value, prefix=""):
 
 def parse_metric(line):
     line = ANSI.sub("", line).strip()
+    # Pinned verl prints numpy scalar reprs. Normalize only a numeric grammar;
+    # never eval log text or import numpy on the login node.
+    line = SCALAR_WRAPPER.sub(lambda m: m[1], line)
     match = STEP.search(line)
     if not match:
         return None
