@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 import io
+import subprocess
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
@@ -82,6 +83,67 @@ class ResourceTests(unittest.TestCase):
         nodes['hnode001']['resources_available']['host'] = '@hnode001'
         with self.assertRaises(RuntimeError):
             m.free_hosts({'nodes': nodes}, self.r, self.q)
+
+
+class ReservationLookupTests(unittest.TestCase):
+    def detailed(self, rid='R321.pbs2', queue=m.QUEUE):
+        return ('Resv ID: ' + rid + '\n    queue = ' + queue + '\n'
+                '    reserve_state = RESV_RUNNING\n'
+                '    resv_nodes = (hnode001[0]:ncpus=96+hnode001[1]:ncpus=96)\n')
+
+    def test_real_queue_mapping_and_server_are_used(self):
+        seen = []
+        def command(args, **kwargs):
+            seen.append(args)
+            if args == ['qrstat']:
+                return 'Resv ID  Queue  User State\nR321.pbs2 ' + m.QUEUE + ' owner RN\n'
+            if args == ['qrstat', '-f', 'R321.pbs2']:
+                return self.detailed()
+            self.fail('Unexpected assumed reservation: ' + str(args))
+        with patch.object(m, 'command', side_effect=command):
+            result = m.reservation_for_queue()
+        self.assertEqual(result['reservation_id'], 'R321.pbs2')
+        nodes = one_host()
+        for row in nodes.values():
+            row['resv'] = 'R321.pbs2'
+        q = dict(enabled='True', started='True', **{'default_chunk.node_group': 'nii'})
+        self.assertEqual(m.free_hosts({'nodes': nodes}, result, q)['free_slots'], 1)
+
+    def test_full_listing_records_are_not_accidentally_merged(self):
+        combined = self.detailed('R1.pbs1', 'other') + self.detailed() + self.detailed('R9.pbs1', 'last')
+        def command(args, **kwargs):
+            return combined if args == ['qrstat', '-f'] else ''
+        with patch.object(m, 'command', side_effect=command):
+            self.assertEqual(m.reservation_for_queue()['reservation_id'], 'R321.pbs2')
+
+    def test_short_id_wrapper_fallback_requires_explicit_queue_binding(self):
+        def command(args, **kwargs):
+            if args == ['qrstat', '-f', m.QUEUE]:
+                return self.detailed(m.QUEUE)
+            raise RuntimeError('site wrapper returned exit status 1')
+        with patch.object(m, 'command', side_effect=command):
+            self.assertEqual(m.reservation_for_queue()['reservation_id'], m.QUEUE)
+
+    def test_cached_binding_is_revalidated_and_failed_query_never_means_zero_free_nodes(self):
+        with patch.object(m, 'command', return_value=self.detailed()) as cmd:
+            self.assertEqual(m.reservation_for_queue('R321.pbs2')['queue'], m.QUEUE)
+            self.assertEqual(cmd.call_args.args[0], ['qrstat', '-f', 'R321.pbs2'])
+            self.assertEqual(cmd.call_count, 1)
+        with patch.object(m, 'command', side_effect=RuntimeError('exit status 1; stdout=empty; stderr=empty')):
+            with self.assertRaisesRegex(RuntimeError, 'Reservation lookup unavailable.*exit status 1'):
+                m.reservation_for_queue()
+
+    def test_conflicting_queue_records_rejected(self):
+        text = self.detailed('R1.pbs1') + self.detailed('R2.pbs2')
+        with patch.object(m, 'command', return_value=text):
+            with self.assertRaisesRegex(RuntimeError, 'Multiple reservation records'):
+                m.reservation_for_queue()
+
+    def test_empty_command_failure_retains_return_code(self):
+        result = subprocess.CompletedProcess(['qrstat'], 1, stdout='', stderr='')
+        with patch.object(m.subprocess, 'run', return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "exit status 1; stdout=''; stderr=''"):
+                m.command(['qrstat'])
 
 
 class DecisionTests(unittest.TestCase):
@@ -293,6 +355,73 @@ class IntegrationTests(unittest.TestCase):
                 report = policy.reconcile()
                 self.assertTrue(all(not c.args[2] for c in hold.call_args_list))
                 self.assertEqual(report['query_error'], 'no reservation response')
+
+    def test_read_only_status_does_not_compete_for_held_policy_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for kind, path in m.controls(root).items():
+                m.write(path / 'state.json', dict(states()[kind], controller_status='RUNNING'))
+            policy = m.Policy(root)
+            with m.locked(m.area(root) / 'policy.lock'):
+                with patch.object(policy, 'jobs', return_value={}), patch.object(policy, 'capacity', return_value=capacity(4)), patch.object(policy, 'set_hold') as hold:
+                    report = policy.reconcile(mutate=False)
+                self.assertTrue(report['read_only'])
+                hold.assert_not_called()
+                with self.assertRaises(BlockingIOError):
+                    policy.reconcile(mutate=True)
+
+    def test_status_still_reports_owners_when_scheduler_query_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for kind, path in m.controls(root).items():
+                m.write(path / 'state.json', dict(states()[kind], controller_status='RUNNING'))
+            with redirect_stdout(io.StringIO()), patch.object(m, 'active', return_value=True), patch.object(m.Policy, 'reconcile', side_effect=RuntimeError('PBS unavailable')):
+                report = m.status(root)
+            self.assertTrue(report['monitoring_active'])
+            self.assertFalse(report['capacity_ready'])
+            self.assertEqual(report['capacity_now']['query_error'], 'PBS unavailable')
+
+    def test_upgrade_preserves_extended_deadline_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            targets = {k: '2026-10-22T00:27:53+00:00' for k in m.ROLES}
+            old_hash = None
+            for kind, path in m.controls(root).items():
+                contract = {'type': kind}
+                identity = m.digest(contract)
+                m.write(path / 'plan.json', {'contract': contract, 'identity': identity})
+                m.write(path / 'state.json', {'identity': identity, 'phase': 'WAIT_READY',
+                    'deadline_utc': targets[kind], 'single': None, 'dual': None})
+                limits = path / 'runtime_limits_30h_24h/limits_policy.py'
+                m.atomic_text(limits, '# limits\n')
+                m.write(limits.parent / 'config.json', dict(version=m.LIMITS_VERSION, kind=kind, root=str(root),
+                    contract_identity=identity, policy_sha256=m.sha(limits), guarded_packages={}))
+                old = path / 'runtime_capacity/policy.py'
+                m.atomic_text(old, '# previously approved policy fixture\n')
+                old_hash = m.sha(old)
+                m.atomic_text(path / 'entry.py', m.entry_text(old, old_hash))
+            record = m.area(root) / 'operations/existing.json'
+            m.write(record, dict(version=m.PREVIOUS_VERSION, phase='RUNNING', extra_hours=24, targets=targets))
+            with redirect_stdout(io.StringIO()), patch.object(m, 'PREVIOUS_SHA256', old_hash), patch.object(m, 'start_owner') as start, patch.object(m, 'stop_controls', wraps=m.stop_controls) as stop, patch.object(m.Policy, 'reconcile', return_value={'capacity': None, 'query_error': 'lookup failed'}):
+                m.apply(root, 24, 'existing', Path('/python'), upgrade=True)
+                m.apply(root, 24, 'existing', Path('/python'), upgrade=True)
+                self.assertEqual(stop.call_count, 1)
+                self.assertEqual(start.call_count, 4)
+            op = m.read(record)
+            self.assertEqual(op['targets'], targets)
+            self.assertEqual(op['deadline_extension_in_this_upgrade'], 0)
+            self.assertTrue(op['monitors_verified'])
+            self.assertFalse(op['capacity_ready'])
+            self.assertEqual(op['phase'], 'RUNNING_CAPACITY_WAIT')
+            self.assertIn('lookup failed', op['warnings']['capacity'])
+            self.assertFalse(op['errors'])
+            for path in m.controls(root).values():
+                self.assertEqual(m.sha(path / 'runtime_capacity/policy.py'), m.sha(m.__file__))
+
+    def test_upgrade_never_creates_another_extension(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(RuntimeError, 'No saved extension operation'):
+                m.apply(Path(temp), 24, 'missing', Path('/python'), upgrade=True)
 
 
 if __name__ == '__main__':

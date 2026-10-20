@@ -9,8 +9,10 @@ and experiment contracts to remain valid. An unknown entry is rejected.
 
 ## Capacity and order
 
-Only the reservation `R9920261000.pbs1` / queue `R9920261000` is considered.
-The script reads `qrstat -f`, `qstat -Qf`, `pbsnodes -av -F json`, and current
+Only queue `R9920261000` is considered. The actual reservation ID and server
+are discovered from `qrstat` and confirmed against a detailed record's `queue`
+attribute, rather than assuming the queue name plus `.pbs1` is the correct ID.
+The script reads `qrstat -f`/`-F`, `qstat -Qf`, `pbsnodes -av -F json`, and current
 `qstat -f -F json`. Two NUMA vnodes of one 192-CPU/8-GPU host count as **one**
 physical node. Being part of this reservation is allowed. Other reservations,
 partial allocations, offline nodes, jobs on an apparently `free` vnode, and
@@ -96,6 +98,44 @@ Reports and backups are under:
 `outputs/multidomain/qwen30b_d4_10k_uniform_ctx64k_seed42_v1_capacity/`.
 `operations/20261020-plus24.json` records both targets and partial startup errors.
 `status.json` records capacity/decisions; `holds.json` records hold ownership.
+
+## Upgrade an already extended monitor (capacity.1 → capacity.2)
+
+The first deployed run confirmed both new owners and their extended deadlines,
+but exposed two operational defects: read-only `status` unnecessarily acquired
+the policy mutation lock (`Errno 11` during a background update), and an empty
+failure from the assumed `qrstat -f R9920261000.pbs1` lookup. That output alone
+does not identify why the site query failed.
+
+Version `2026-10-20.capacity.2` makes status independent of that lock, preserves
+monitor status even when PBS is unavailable, discovers the actual queue/reservation
+binding, and records command return codes/stdout/stderr on failed queries. It
+accepts only the exact previously published adapter SHA for upgrade, retains
+existing hold ownership and deadlines, and does not add another day.
+
+```bash
+python -I scripts/multidomain/manage_training_capacity.py upgrade \
+  --root "$D4_ROOT" --operation 20261020-plus24
+python -I scripts/multidomain/manage_training_capacity.py status --root "$D4_ROOT"
+```
+
+Use this with the original operation ID. Missing operations are rejected instead
+of silently creating another extension. Repeated upgrade is idempotent. Both
+owners restart cooperatively only when the frozen adapter actually needs updating.
+
+The report now separates:
+
+- `monitoring_active` (status) / `monitors_verified` (installation): both owners
+  and their saved deadlines have been checked.
+- `capacity_ready`: a valid capacity observation is available. This can be true
+  with zero free nodes; it indicates query health, not permission to start a dual.
+- `RUNNING_CAPACITY_WAIT`: monitoring is running but the resource query is still
+  unavailable or another owner is updating the policy. Check the warning/current
+  status; do not create a new 24-hour operation to fix a query.
+
+If all documented query forms remain unavailable, dual release stays blocked
+and the single-node retry loops continue. The detailed error needs cluster-side
+inspection; mocked tests cannot establish why a live reservation command failed.
 
 ## Validation and limitations
 

@@ -5,7 +5,7 @@ Standard-library only. This module is also frozen beside each installed entry.
 It never cancels a PBS job, edits a training snapshot, or deletes a checkpoint.
 """
 import argparse
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 import datetime as dt
 import fcntl
 import getpass
@@ -23,7 +23,11 @@ import sys
 import time
 import uuid
 
-VERSION = '2026-10-20.capacity.1'
+VERSION = '2026-10-20.capacity.2'
+PREVIOUS_VERSION = '2026-10-20.capacity.1'
+SUPPORTED_VERSIONS = {PREVIOUS_VERSION, VERSION}
+# Exact previously published adapter, accepted for an in-place operational upgrade.
+PREVIOUS_SHA256 = '7c490748fbf33183c89c632dd8be3d840586c8ef5aafed7f0f93774b77f71f22'
 LIMITS_VERSION = '2026-10-19.monitor30-training24.1'
 BASE = 'qwen30b_d4_10k_uniform_ctx64k_seed42_v1'
 QUEUE = 'R9920261000'
@@ -101,7 +105,8 @@ def command(args, root=None, timeout=20):
     env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
     env['LC_ALL'] = 'C'
     result = subprocess.run(args, cwd=root, env=env, text=True, capture_output=True, timeout=timeout)
-    need(result.returncode == 0, '{}: {}'.format(' '.join(map(str, args)), result.stderr or result.stdout))
+    need(result.returncode == 0, '{}: exit status {}; stdout={!r}; stderr={!r}'.format(
+        ' '.join(map(str, args)), result.returncode, result.stdout[:600], result.stderr[:600]))
     return result.stdout
 
 
@@ -118,6 +123,87 @@ def attributes(text):
         else:
             key = None
     return result
+
+
+def reservation_records(text):
+    """Split full reservation records before reading attributes; never merge them."""
+    records, current = [], []
+    identity = None
+    for line in text.splitlines():
+        match = re.match(r'^\s*(?:Resv\s+ID|Reservation\s+Id)\s*:\s*(\S+)\s*$', line, re.I)
+        if match:
+            if current:
+                row = attributes('\n'.join(current))
+                if row:
+                    records.append(dict(row, reservation_id=identity))
+            current, identity = [], match[1]
+        else:
+            current.append(line)
+    row = attributes('\n'.join(current))
+    if row:
+        records.append(dict(row, reservation_id=identity))
+    return records
+
+
+def listed_reservations(text):
+    """Use the actual Resv ID / Queue columns, including a different PBS server."""
+    result = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] == QUEUE and re.fullmatch(r'[RS]\d+(?:\.[\w.-]+)?', fields[0]):
+            result.append(fields[0])
+    return list(dict.fromkeys(result))
+
+
+def reservation_for_queue(cached_id=None):
+    """Discover queue binding; every accepted detailed record must name QUEUE."""
+    attempts, ids = [], []
+    deadline = time.monotonic() + 25
+
+    def query(args):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError('Reservation lookup timed out. ' + ' | '.join(attempts))
+        try:
+            text = command(args, timeout=min(10, remaining))
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            attempts.append(str(exc))
+            return None
+        records = [r for r in reservation_records(text) if r.get('queue') == QUEUE and r.get('resv_nodes')]
+        need(len(records) <= 1, 'Multiple reservation records bind the same queue; refusing to select one')
+        if records:
+            return records[0]
+        ids.extend(listed_reservations(text))
+        attempts.append(' '.join(args) + ': no detailed record for ' + QUEUE)
+        return None
+
+    if cached_id:
+        found = query(['qrstat', '-f', cached_id])
+        if found:
+            return dict(found, reservation_id=found.get('reservation_id') or cached_id)
+    found = query(['qrstat'])
+    if found:
+        return found
+    # Query the exact IDs observed in the scheduler listing first.
+    for rid in dict.fromkeys(ids):
+        found = query(['qrstat', '-f', rid])
+        if found:
+            return dict(found, reservation_id=found.get('reservation_id') or rid)
+    for args in (['qrstat', '-f'], ['qrstat', '-F']):
+        found = query(args)
+        if found:
+            return found
+    # Some site wrappers accept the short identifier. These are query probes,
+    # not assumed bindings: a successful result still must name QUEUE explicitly.
+    for rid in dict.fromkeys([*ids, QUEUE, RESERVATION]):
+        for flag in ('-f', '-F'):
+            args = ['qrstat', flag, rid]
+            if any(a.startswith(' '.join(args) + ':') for a in attempts):
+                continue
+            found = query(args)
+            if found:
+                return dict(found, reservation_id=found.get('reservation_id') or rid)
+    raise RuntimeError('Reservation lookup unavailable. ' + ' | '.join(attempts))
 
 
 def words(value):
@@ -195,7 +281,8 @@ def free_hosts(nodes_payload, reservation, queue):
             if row.get('queue') not in (None, '', QUEUE):
                 reasons.add('other_queue')
             # Belonging to THIS reservation is expected, not a rejection reason.
-            if any(r.split('.')[0] != QUEUE for r in words(row.get('resv'))):
+            own_reservations = {QUEUE, str(reservation.get('reservation_id') or '').split('.')[0]}
+            if any(r.split('.')[0] not in own_reservations for r in words(row.get('resv'))):
                 reasons.add('other_reservation')
         if cpus != 192 or gpus != 8:
             reasons.add('not_one_whole_gpu_host')
@@ -269,6 +356,7 @@ class Policy:
         self.root = Path(root).resolve()
         self.area = area(self.root)
         self.controls = controls(self.root)
+        self.reservation_id = None
 
     def jobs(self):
         payload = json.loads(command(['qstat', '-f', '-F', 'json']))
@@ -282,7 +370,8 @@ class Policy:
         return row
 
     def capacity(self, rows):
-        resv = attributes(command(['qrstat', '-f', RESERVATION]))
+        resv = reservation_for_queue(self.reservation_id)
+        self.reservation_id = resv.get('reservation_id')
         queue_text = command(['qstat', '-Qf', QUEUE])
         need(re.search(r'^Queue:\s*' + QUEUE + r'\s*$', queue_text, re.M), 'Unexpected queue response')
         nodes = json.loads(command(['pbsnodes', '-av', '-F', 'json']))
@@ -296,7 +385,8 @@ class Policy:
             occupied.update(hosts)
         occupied &= set(result['reserved_hosts'])
         need(not occupied.intersection(result['free_hosts']), 'Inconsistent qstat/pbsnodes snapshot; retry later')
-        result.update(owned_hosts=sorted(occupied), available_to_experiment=result['free_slots'] + len(occupied))
+        result.update(owned_hosts=sorted(occupied), available_to_experiment=result['free_slots'] + len(occupied),
+                      reservation_id=resv.get('reservation_id'))
         return result
 
     def set_hold(self, kind, job, allow, journal):
@@ -307,7 +397,7 @@ class Policy:
         receipt = folder / 'capacity_hold.json'
         if receipt.exists():
             marker = read(receipt)
-            need(marker['version'] == VERSION and marker['kind'] == kind
+            need(marker['version'] in SUPPORTED_VERSIONS and marker['kind'] == kind
                  and marker['script_sha256'] == sha(folder / 'stage.pbs'), 'Candidate hold receipt changed')
             # #PBS -h acquired this hold at initial submission, before any crash.
             if jid not in journal and 'u' in held:
@@ -341,7 +431,9 @@ class Policy:
         write(self.area / 'holds.json', journal)
 
     def reconcile(self, mutate=True):
-        with locked(self.area / 'policy.lock'):
+        # Read-only status never acquires the mutation lock. Each state file is
+        # atomically published; the report is observational, not a release permit.
+        with (locked(self.area / 'policy.lock') if mutate else nullcontext()):
             states = {k: read(p / 'state.json') for k, p in self.controls.items()}
             jobs, rows = self.jobs(), {}
             for kind, state in states.items():
@@ -359,6 +451,7 @@ class Policy:
             choices = {k: decision(k, states, rows, capacity) if capacity else (False, 'capacity_query_unknown')
                        for k in ROLES}
             report = dict(version=VERSION, at_utc=now().isoformat(), queue=QUEUE,
+                          read_only=not mutate,
                           capacity=capacity, query_error=error,
                           jobs={k: {role: dict(job_id=states[k].get(role, {}).get('job_id'),
                                       state=rows.get((k, role), {}).get('job_state'),
@@ -426,7 +519,11 @@ def install_hooks(root, kind):
         try:
             report = policy.reconcile()
             self.save(capacity_policy_version=VERSION, capacity_error=report['query_error'],
-                      capacity_decision=report['choices'][kind])
+                      capacity_decision=report['choices'][kind], capacity_policy_busy=False)
+        except BlockingIOError:
+            # The other owner is performing the same shared policy update.
+            # This is expected contention, not a resource query failure.
+            self.save(capacity_policy_busy=True)
         except Exception as exc:
             # Resource queries must never disable the existing single-owner retry loop.
             self.save(capacity_error=str(exc))
@@ -476,7 +573,8 @@ def validate_control(root, kind, control, allow_pending=False):
     text = (control / 'entry.py').read_text()
     if text != limits_entry(cfg):
         path = control / 'runtime_capacity/policy.py'
-        need(path.exists() and text == entry_text(path, sha(path)) and sha(path) == sha(__file__),
+        need(path.exists() and text == entry_text(path, sha(path))
+             and sha(path) in {sha(__file__), PREVIOUS_SHA256},
              'Unrecognized controller entry; no operational adapter overwritten')
     return state
 
@@ -531,15 +629,32 @@ def start_owner(root, path, target, python):
          'Actual running owner/deadline was not confirmed')
 
 
-def apply(root, hours, operation, python):
+def apply(root, hours, operation, python, upgrade=False):
     need(re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', operation), 'Invalid operation ID')
     owners = controls(root)
     record = area(root) / 'operations' / (operation + '.json')
     with locked(area(root) / 'install.lock'):
         if record.exists():
             op = read(record)
-            need(op['version'] == VERSION and op['extra_hours'] == hours, 'Operation ID reused with different options')
+            need(op['version'] in SUPPORTED_VERSIONS and (upgrade or op['extra_hours'] == hours),
+                 'Operation ID reused with different options')
+            need(upgrade or op['version'] == VERSION, 'Use upgrade to update the adapter while preserving its saved deadlines')
+            if upgrade:
+                states = {k: validate_control(root, k, p) for k, p in owners.items()}
+                outdated = any(not (p / 'runtime_capacity/policy.py').exists()
+                               or sha(p / 'runtime_capacity/policy.py') != sha(__file__) for p in owners.values())
+                if outdated or op['version'] != VERSION:
+                    for kind, state in states.items():
+                        # Never shorten a separately extended live owner either.
+                        old = dt.datetime.fromisoformat(op['targets'][kind])
+                        live = dt.datetime.fromisoformat(state['deadline_utc'])
+                        if (live - old).total_seconds() > 10:
+                            op['targets'][kind] = live.isoformat()
+                    op.update(previous_version=op['version'], version=VERSION, phase='PREPARED',
+                              upgrade_utc=now().isoformat(), deadline_extension_in_this_upgrade=0)
+                    write(record, op)
         else:
+            need(not upgrade, 'No saved extension operation exists; upgrade never creates a new 24-hour extension')
             states = {k: validate_control(root, k, p) for k, p in owners.items()}
             at = now()
             op = dict(version=VERSION, extra_hours=hours, phase='PREPARED', created_utc=at.isoformat(),
@@ -558,19 +673,27 @@ def apply(root, hours, operation, python):
                     validate_control(root, kind, path)
                 for kind, path in owners.items():
                     dest = path / 'runtime_capacity/policy.py'
-                    backup = area(root) / 'backups' / operation / kind
+                    backup = area(root) / 'backups' / operation / VERSION / kind
                     backup.mkdir(parents=True, exist_ok=True)
                     for name in ('entry.py', 'state.json', 'plan.json'):
                         if not (backup / name).exists():
                             shutil.copy2(path / name, backup / name)
+                    if dest.exists() and not (backup / 'policy.py').exists():
+                        shutil.copy2(dest, backup / 'policy.py')
                     atomic_text(dest, Path(__file__).read_text())
                     atomic_text(path / 'entry.py', entry_text(dest, sha(dest)))
             op['phase'] = 'INSTALLED'
             write(record, op)
-        errors = {}
+        errors, warnings = {}, {}
+        capacity_ready = False
         # Apply holds before either refreshed owner can release/start a candidate.
         try:
-            Policy(root).reconcile()
+            report = Policy(root).reconcile()
+            capacity_ready = report.get('capacity') is not None and not report.get('query_error')
+            if not capacity_ready:
+                warnings['capacity'] = report.get('query_error') or 'Capacity has not been observed'
+        except BlockingIOError:
+            warnings['capacity'] = 'The other owner is updating shared policy; status will query without taking its lock'
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             errors['capacity'] = str(exc)
         # Always attempt BOTH owners even if capacity information is unavailable.
@@ -579,7 +702,9 @@ def apply(root, hours, operation, python):
                 start_owner(root, path, op['targets'][kind], python)
             except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
                 errors[kind] = str(exc)
-        op.update(phase='RUNNING' if not errors else 'NEEDS_RETRY', errors=errors, updated_utc=now().isoformat())
+        phase = ('RUNNING' if capacity_ready else 'RUNNING_CAPACITY_WAIT') if not errors else 'NEEDS_RETRY'
+        op.update(phase=phase, errors=errors, warnings=warnings, capacity_ready=capacity_ready,
+                  monitors_verified=not any(k in errors for k in owners), updated_utc=now().isoformat())
         write(record, op)
         print(json.dumps(op, ensure_ascii=False, indent=2))
         need(not errors, 'Incomplete refresh; rerun the SAME operation ID after inspecting errors above')
@@ -592,16 +717,23 @@ def status(root):
         result[kind] = {key: state.get(key) for key in ('phase', 'controller_status', 'host', 'pid',
             'deadline_utc', 'single', 'dual', 'last_error', 'capacity_error', 'capacity_decision')}
         result[kind]['controller_active'] = active(path / 'controller.lock')
-    result['capacity_now'] = Policy(root).reconcile(mutate=False)
+    try:
+        result['capacity_now'] = Policy(root).reconcile(mutate=False)
+    except Exception as exc:
+        result['capacity_now'] = dict(read_only=True, capacity=None, query_error=str(exc))
     cap = result['capacity_now'].get('capacity')
     if cap:
         result['capacity_now']['capacity'] = {k: v for k, v in cap.items() if k not in ('hosts', 'reserved_hosts')}
+    result['monitoring_active'] = all(result[k]['controller_active'] and result[k]['controller_status'] == 'RUNNING'
+                                      for k in ROLES)
+    result['capacity_ready'] = cap is not None and not result['capacity_now'].get('query_error')
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('preflight', 'apply', 'status'))
+    parser.add_argument('action', choices=('preflight', 'apply', 'upgrade', 'status'))
     parser.add_argument('--root', type=Path, default=Path.cwd())
     parser.add_argument('--extra-hours', type=float, default=24)
     parser.add_argument('--operation', default='20261020-plus24')
@@ -614,8 +746,8 @@ def main():
         for kind, path in controls(root).items():
             validate_control(root, kind, path)
         status(root)
-    elif args.action == 'apply':
-        apply(root, args.extra_hours, args.operation, args.python)
+    elif args.action in ('apply', 'upgrade'):
+        apply(root, args.extra_hours, args.operation, args.python, upgrade=args.action == 'upgrade')
     else:
         status(root)
 
