@@ -23,14 +23,17 @@ import sys
 import time
 import uuid
 
-VERSION = '2026-10-20.capacity.2'
-PREVIOUS_VERSION = '2026-10-20.capacity.1'
-SUPPORTED_VERSIONS = {PREVIOUS_VERSION, VERSION}
+VERSION = '2026-10-20.capacity.3'
+PREVIOUS_VERSION = '2026-10-20.capacity.2'
+SUPPORTED_VERSIONS = {'2026-10-20.capacity.1', PREVIOUS_VERSION, VERSION}
 # Exact previously published adapter, accepted for an in-place operational upgrade.
-PREVIOUS_SHA256 = '7c490748fbf33183c89c632dd8be3d840586c8ef5aafed7f0f93774b77f71f22'
+PREVIOUS_SHA256 = '33631a32e4b184eef29c17579159d178c682cb4615da472bb50eb4bd45fa3579'
+LEGACY_SHA256 = '7c490748fbf33183c89c632dd8be3d840586c8ef5aafed7f0f93774b77f71f22'
 LIMITS_VERSION = '2026-10-19.monitor30-training24.1'
 BASE = 'qwen30b_d4_10k_uniform_ctx64k_seed42_v1'
 QUEUE = 'R9920261000'
+NODE_GROUP = 'nii'
+PROJECT = 'gcg51557'
 RESERVATION = QUEUE + '.pbs1'
 ROLES = {'domain': ('_db_n2_once_v1', 'd4_db_switch'),
          'random': ('_n2_once_v1', 'd4_managed_switch')}
@@ -101,13 +104,39 @@ def area(root):
     return Path(root) / 'outputs/multidomain' / (BASE + '_capacity')
 
 
-def command(args, root=None, timeout=20):
+def scheduler_env():
     env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
     env['LC_ALL'] = 'C'
-    result = subprocess.run(args, cwd=root, env=env, text=True, capture_output=True, timeout=timeout)
+    return env
+
+
+def command(args, root=None, timeout=20):
+    result = subprocess.run(args, cwd=root, env=scheduler_env(), text=True, capture_output=True, timeout=timeout)
     need(result.returncode == 0, '{}: exit status {}; stdout={!r}; stderr={!r}'.format(
         ' '.join(map(str, args)), result.returncode, result.stdout[:600], result.stderr[:600]))
     return result.stdout
+
+
+class SchedulerQueryError(RuntimeError):
+    """Unavailable observation, distinct from a failed mutation or source guard."""
+
+
+def registered_ids(states):
+    result = sorted({job['job_id'] for state in states.values() for role in ('single', 'dual')
+                     if (job := state.get(role))})
+    need(all(re.fullmatch(r'\d+(?:\.[\w.-]+)?', jid) for jid in result), 'Invalid registered PBS job ID')
+    return result
+
+
+def job_rows(text, ids):
+    try:
+        payload = json.loads(text)
+        jobs = payload.get('Jobs') if isinstance(payload, dict) else None
+        if not isinstance(jobs, dict) or not all(isinstance(jobs.get(jid), dict) for jid in ids):
+            raise ValueError('qstat omitted a registered job; its state is unknown')
+        return {jid: jobs[jid] for jid in ids}
+    except ValueError as exc:
+        raise SchedulerQueryError('Invalid targeted qstat response: ' + str(exc)) from exc
 
 
 def attributes(text):
@@ -237,17 +266,40 @@ def hosts_from_exec(value):
     return set(re.findall(r'(?:^|[+(])\s*(hnode\d+)(?:\[\d+\])?:', str(value or '')))
 
 
+def queue_pool_profile(queue):
+    """Validate the actual 0390 execution-queue profile, not its name as a Resv ID.
+
+    Uploaded queue/node snapshots bind R9920261000 to nii and authorize gcg51557.
+    This is an explicit site-specific profile, not a fallback to global free nodes.
+    PBS still decides placement; future/foreign reservations are excluded below.
+    """
+    need(queue.get('queue_type') == 'Execution' and queue.get('default_chunk.node_group') == NODE_GROUP,
+         'Expected reserved execution queue / nii node-group profile is unavailable')
+    need(queue.get('acl_group_enable', '').lower() == 'true' and PROJECT in words(queue.get('acl_groups')),
+         'Expected project authorization is missing from the queue profile')
+    need(number(queue.get('resources_available.ncpus')) > 0,
+         'Queue CPU capacity is missing; do not infer headroom from cluster totals')
+
+
 def free_hosts(nodes_payload, reservation, queue):
-    """Count physical reserved 192-CPU/8-GPU hosts, never NUMA vnodes."""
+    """Count eligible physical 192-CPU/8-GPU hosts, never NUMA vnodes.
+
+    reservation=None selects the audited execution-queue/node-group profile.
+    An explicit reservation record retains the stricter resv_nodes membership.
+    """
     nodes = nodes_payload.get('nodes')
     need(isinstance(nodes, dict) and nodes, 'pbsnodes returned no vnode mapping')
     need(queue.get('enabled', '').lower() == 'true'
          and queue.get('started', '').lower() == 'true', 'Reserved queue is not enabled/started')
-    need(reservation.get('queue') == QUEUE, 'Reservation does not bind the expected queue')
-    need(reservation.get('reserve_state') in ('RESV_RUNNING', '5', 'RN'),
-         'Reservation is not running')
-    reserved = set(re.findall(r'(hnode\d+(?:\[\d+\])?):', reservation.get('resv_nodes', '')))
-    need(reserved, 'Reservation has no parseable resv_nodes; do not infer capacity from cluster totals')
+    reserved = None
+    if reservation is None:
+        queue_pool_profile(queue)
+    else:
+        need(reservation.get('queue') == QUEUE, 'Reservation does not bind the expected queue')
+        need(reservation.get('reserve_state') in ('RESV_RUNNING', '5', 'RN'),
+             'Reservation is not running')
+        reserved = set(re.findall(r'(hnode\d+(?:\[\d+\])?):', reservation.get('resv_nodes', '')))
+        need(reserved, 'Reservation has no parseable resv_nodes; do not infer capacity from cluster totals')
     group = queue.get('default_chunk.node_group')
     need(group, 'Queue node_group is missing')
     groups = {}
@@ -257,7 +309,11 @@ def free_hosts(nodes_payload, reservation, queue):
             groups.setdefault(host, []).append(name)
     free, details = [], {}
     for host, names in groups.items():
-        if not any(n in reserved or host in reserved for n in names):
+        if reserved is not None:
+            if not any(n in reserved or host in reserved for n in names):
+                continue
+        elif not any(number(resource(nodes, n, 'resources_available', 'ncpus')) > 0
+                     and group in words(resource(nodes, n, 'resources_available', 'node_group')) for n in names):
             continue
         reasons, leaves, cpus, gpus = set(), [], 0, 0
         for name in names:
@@ -267,7 +323,7 @@ def free_hosts(nodes_payload, reservation, queue):
                 leaves.append(name)
                 cpus += ncpu
                 gpus += number(resource(nodes, name, 'resources_available', 'ngpus'))
-                if name not in reserved and host not in reserved:
+                if reserved is not None and name not in reserved and host not in reserved:
                     reasons.add('partially_reserved_host')
                 if group not in words(resource(nodes, name, 'resources_available', 'node_group')):
                     reasons.add('wrong_node_group')
@@ -281,7 +337,8 @@ def free_hosts(nodes_payload, reservation, queue):
             if row.get('queue') not in (None, '', QUEUE):
                 reasons.add('other_queue')
             # Belonging to THIS reservation is expected, not a rejection reason.
-            own_reservations = {QUEUE, str(reservation.get('reservation_id') or '').split('.')[0]}
+            own_reservations = ({QUEUE, str(reservation.get('reservation_id') or '').split('.')[0]}
+                                if reservation is not None else set())
             if any(r.split('.')[0] not in own_reservations for r in words(row.get('resv'))):
                 reasons.add('other_reservation')
         if cpus != 192 or gpus != 8:
@@ -298,7 +355,8 @@ def free_hosts(nodes_payload, reservation, queue):
                        - number(queue.get('resources_assigned.ncpus')))
     slots = len(free) if headroom is None else min(len(free), int(headroom // 192))
     return dict(free_hosts=free, free_slots=slots, hosts=details,
-                queue_ncpus_headroom=headroom, reserved_hosts=sorted(details))
+                queue_ncpus_headroom=headroom, pool_hosts=sorted(details), node_group=group,
+                capacity_source='reservation_nodes' if reservation is not None else 'queue_node_group')
 
 
 def validate_job(job, row, root, kind, role):
@@ -356,12 +414,16 @@ class Policy:
         self.root = Path(root).resolve()
         self.area = area(self.root)
         self.controls = controls(self.root)
-        self.reservation_id = None
 
-    def jobs(self):
-        payload = json.loads(command(['qstat', '-f', '-F', 'json']))
-        need(isinstance(payload, dict) and ('Jobs' in payload or 'pbs_server' in payload), 'Invalid qstat JSON')
-        return payload.get('Jobs', {})
+    def jobs(self, states):
+        ids = registered_ids(states)
+        if not ids:
+            return {}
+        try:
+            # Include finished tracked jobs, without enumerating server history.
+            return job_rows(command(['qstat', '-xf', '-F', 'json', *ids]), ids)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            raise SchedulerQueryError(str(exc)) from exc
 
     def observe(self, job, kind, role):
         result = json.loads(command(['qstat', '-xf', '-F', 'json', job['job_id']]))
@@ -370,12 +432,10 @@ class Policy:
         return row
 
     def capacity(self, rows):
-        resv = reservation_for_queue(self.reservation_id)
-        self.reservation_id = resv.get('reservation_id')
         queue_text = command(['qstat', '-Qf', QUEUE])
         need(re.search(r'^Queue:\s*' + QUEUE + r'\s*$', queue_text, re.M), 'Unexpected queue response')
         nodes = json.loads(command(['pbsnodes', '-av', '-F', 'json']))
-        result = free_hosts(nodes, resv, attributes(queue_text))
+        result = free_hosts(nodes, None, attributes(queue_text))
         occupied = set()
         for row in rows.values():
             if row.get('job_state') not in ('R', 'E', 'S', 'B'):
@@ -383,10 +443,9 @@ class Policy:
             hosts = hosts_from_exec(row.get('exec_vnode'))
             need(len(hosts) == int(row['Resource_List']['nodect']), 'Cannot identify current physical allocation')
             occupied.update(hosts)
-        occupied &= set(result['reserved_hosts'])
+        need(occupied <= set(result['pool_hosts']), 'A running controlled job is outside the observed queue node pool')
         need(not occupied.intersection(result['free_hosts']), 'Inconsistent qstat/pbsnodes snapshot; retry later')
-        result.update(owned_hosts=sorted(occupied), available_to_experiment=result['free_slots'] + len(occupied),
-                      reservation_id=resv.get('reservation_id'))
+        result.update(owned_hosts=sorted(occupied), available_to_experiment=result['free_slots'] + len(occupied))
         return result
 
     def set_hold(self, kind, job, allow, journal):
@@ -435,7 +494,12 @@ class Policy:
         # atomically published; the report is observational, not a release permit.
         with (locked(self.area / 'policy.lock') if mutate else nullcontext()):
             states = {k: read(p / 'state.json') for k, p in self.controls.items()}
-            jobs, rows = self.jobs(), {}
+            error, rows = None, {}
+            try:
+                jobs = self.jobs(states)
+            except SchedulerQueryError as exc:
+                jobs, error = {}, str(exc)
+            jobs_known = error is None
             for kind, state in states.items():
                 for role in ('single', 'dual'):
                     job = state.get(role)
@@ -443,16 +507,17 @@ class Policy:
                         row = jobs[job['job_id']]
                         validate_job(job, row, self.root, kind, role)
                         rows[kind, role] = row
-            error = None
-            try:
-                capacity = self.capacity(rows)
-            except Exception as exc:
-                capacity, error = None, str(exc)
+            capacity = None
+            if jobs_known:
+                try:
+                    capacity = self.capacity(rows)
+                except Exception as exc:
+                    error = str(exc)
             choices = {k: decision(k, states, rows, capacity) if capacity else (False, 'capacity_query_unknown')
                        for k in ROLES}
             report = dict(version=VERSION, at_utc=now().isoformat(), queue=QUEUE,
                           read_only=not mutate,
-                          capacity=capacity, query_error=error,
+                          capacity=capacity, query_error=error, jobs_known=jobs_known,
                           jobs={k: {role: dict(job_id=states[k].get(role, {}).get('job_id'),
                                       state=rows.get((k, role), {}).get('job_state'),
                                       hold=rows.get((k, role), {}).get('Hold_Types'),
@@ -466,7 +531,7 @@ class Policy:
                 for allow in (False, True):
                     for kind in ROLES:
                         state = states[kind]
-                        if state['phase'] not in PRE or not state.get('dual') or choices[kind][0] != allow:
+                        if not jobs_known or state['phase'] not in PRE or not state.get('dual') or choices[kind][0] != allow:
                             continue
                         self.set_hold(kind, state['dual'], allow, journal)
                 write(self.area / 'status.json', report)
@@ -574,7 +639,7 @@ def validate_control(root, kind, control, allow_pending=False):
     if text != limits_entry(cfg):
         path = control / 'runtime_capacity/policy.py'
         need(path.exists() and text == entry_text(path, sha(path))
-             and sha(path) in {sha(__file__), PREVIOUS_SHA256},
+             and sha(path) in {sha(__file__), PREVIOUS_SHA256, LEGACY_SHA256},
              'Unrecognized controller entry; no operational adapter overwritten')
     return state
 
@@ -710,12 +775,12 @@ def apply(root, hours, operation, python, upgrade=False):
         need(not errors, 'Incomplete refresh; rerun the SAME operation ID after inspecting errors above')
 
 
-def status(root):
+def status(root, emit=True):
     result = {}
     for kind, path in controls(root).items():
         state = read(path / 'state.json')
         result[kind] = {key: state.get(key) for key in ('phase', 'controller_status', 'host', 'pid',
-            'deadline_utc', 'single', 'dual', 'last_error', 'capacity_error', 'capacity_decision')}
+            'deadline_utc', 'single', 'dual', 'last_error', 'capacity_policy_version', 'capacity_error', 'capacity_decision')}
         result[kind]['controller_active'] = active(path / 'controller.lock')
     try:
         result['capacity_now'] = Policy(root).reconcile(mutate=False)
@@ -723,17 +788,41 @@ def status(root):
         result['capacity_now'] = dict(read_only=True, capacity=None, query_error=str(exc))
     cap = result['capacity_now'].get('capacity')
     if cap:
-        result['capacity_now']['capacity'] = {k: v for k, v in cap.items() if k not in ('hosts', 'reserved_hosts')}
+        result['capacity_now']['capacity'] = {k: v for k, v in cap.items() if k not in ('hosts', 'pool_hosts')}
     result['monitoring_active'] = all(result[k]['controller_active'] and result[k]['controller_status'] == 'RUNNING'
                                       for k in ROLES)
     result['capacity_ready'] = cap is not None and not result['capacity_now'].get('query_error')
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if emit:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
+
+
+def diagnostic_probe(args, env, timeout=10):
+    """Bounded read-only probe. Do not print the inherited environment."""
+    started = time.monotonic()
+    report = dict(command=args, executable=shutil.which(args[0]))
+    try:
+        result = subprocess.run(args, env=env, text=True, capture_output=True, timeout=timeout)
+        report.update(returncode=result.returncode, stdout=result.stdout[:6000], stderr=result.stderr[:2000])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        report.update(returncode=None, error=str(exc))
+    report['elapsed_seconds'] = round(time.monotonic() - started, 3)
+    return report
+
+
+def diagnose(root):
+    """Observe the live owners and compare the site command environments."""
+    report = dict(version=VERSION, read_only=True, status=status(root, emit=False))
+    report['queue_profile'] = diagnostic_probe(['qstat', '-Qf', QUEUE], scheduler_env())
+    report['qrstat_inherited_environment'] = diagnostic_probe(['qrstat'], dict(os.environ))
+    report['qrstat_controller_environment'] = diagnostic_probe(['qrstat'], scheduler_env())
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('preflight', 'apply', 'upgrade', 'status'))
+    parser.add_argument('action', choices=('preflight', 'apply', 'upgrade', 'status', 'diagnose'))
     parser.add_argument('--root', type=Path, default=Path.cwd())
     parser.add_argument('--extra-hours', type=float, default=24)
     parser.add_argument('--operation', default='20261020-plus24')
@@ -741,13 +830,15 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     if args.action == 'preflight':
-        for name in ('qstat', 'pbsnodes', 'qrstat', 'qhold', 'qrls'):
+        for name in ('qstat', 'pbsnodes', 'qhold', 'qrls'):
             need(shutil.which(name), 'Missing PBS command: ' + name)
         for kind, path in controls(root).items():
             validate_control(root, kind, path)
         status(root)
     elif args.action in ('apply', 'upgrade'):
         apply(root, args.extra_hours, args.operation, args.python, upgrade=args.action == 'upgrade')
+    elif args.action == 'diagnose':
+        diagnose(root)
     else:
         status(root)
 

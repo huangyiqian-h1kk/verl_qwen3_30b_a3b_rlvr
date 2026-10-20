@@ -9,18 +9,25 @@ and experiment contracts to remain valid. An unknown entry is rejected.
 
 ## Capacity and order
 
-Only queue `R9920261000` is considered. The actual reservation ID and server
-are discovered from `qrstat` and confirmed against a detailed record's `queue`
-attribute, rather than assuming the queue name plus `.pbs1` is the correct ID.
-The script reads `qrstat -f`/`-F`, `qstat -Qf`, `pbsnodes -av -F json`, and current
-`qstat -f -F json`. Two NUMA vnodes of one 192-CPU/8-GPU host count as **one**
-physical node. Being part of this reservation is allowed. Other reservations,
+Only queue `R9920261000` is considered. Version `capacity.3` uses this queue's
+observed execution profile: `default_chunk.node_group=nii`, enabled/started,
+group ACL including `gcg51557`, and a positive queue CPU capacity. It revalidates
+that profile using `qstat -Qf R9920261000` on every observation. This profile was
+present in the user's uploaded scheduler evidence; it is not inferred from the
+queue name or from free nodes elsewhere in the cluster.
+
+The script combines that profile with `pbsnodes -av -F json` and a targeted
+`qstat -xf -F json <registered job IDs>` query. Two NUMA vnodes of one
+192-CPU/8-GPU host count as **one** physical node. All CPU-bearing vnodes of the
+host must belong to `nii`. Reservation-marked nodes, other queue bindings,
 partial allocations, offline nodes, jobs on an apparently `free` vnode, and
 assigned resources prevent a host from being counted as free. No static host
-blacklist is added. PBS still chooses the actual hosts.
+blacklist is added. PBS still chooses the actual hosts, within the same queue.
+The reservation-record parser remains available separately; `qrstat` is no
+longer a prerequisite for this specific execution-queue profile.
 
 Available capacity means **free eligible whole nodes plus nodes occupied by
-these four registered jobs**, not the total reservation size, other users'
+these four registered jobs**, not the total node-pool size, other users'
 nodes, or number of queued jobs. Queue CPU headroom caps the free count.
 
 | Available capacity / state | Action |
@@ -133,9 +140,49 @@ The report now separates:
   unavailable or another owner is updating the policy. Check the warning/current
   status; do not create a new 24-hour operation to fix a query.
 
-If all documented query forms remain unavailable, dual release stays blocked
-and the single-node retry loops continue. The detailed error needs cluster-side
-inspection; mocked tests cannot establish why a live reservation command failed.
+In version 2, all documented reservation query forms still failed, and a
+server-wide `qstat -f -F json` request timed out after 20 seconds. Both owners
+were nevertheless confirmed restarted, with `monitors_verified=true` and the
+extended deadlines intact. Its final `NEEDS_RETRY` referred to the capacity
+refresh error; it was not evidence that both owners had stopped.
+
+## Queue-profile repair (capacity.1 / capacity.2 → capacity.3)
+
+Reviewing the scheduler evidence identified an execution-queue/node-group
+profile, rather than an accessible advance-reservation record. Requiring an
+independently queryable PBS advance-reservation record was an extra assumption
+unsupported by that configuration. An empty `qrstat` exit-1 response does not
+establish why that command is unavailable, nor does it mean no free nodes exist.
+
+Version 3 uses the validated queue profile above and no longer calls `qrstat`
+in its capacity loop. It also queries only the current registered jobs,
+including finished jobs, instead of enumerating every job on the server.
+A missing job, malformed reply, or timeout means **unknown**, not zero
+occupancy or successful completion. Such a query failure blocks candidate
+release and reports `RUNNING_CAPACITY_WAIT` while keeping both owners alive.
+Source-guard and hold/release failures remain errors requiring investigation.
+
+Use the same `upgrade --operation 20261020-plus24` command shown above, from the
+updated dedicated worktree. It accepts the exact published v1/v2 adapters and
+retains the saved deadlines; do not create a new operation to repair querying.
+`status` should show `monitoring_active=true`, `capacity_ready=true`, and
+`capacity_now.capacity.capacity_source="queue_node_group"` when the live
+queries succeed. A healthy query can still find zero free nodes.
+
+For additional read-only site diagnostics:
+
+```bash
+python -I scripts/multidomain/manage_training_capacity.py diagnose --root "$D4_ROOT"
+```
+
+This prints owner/capacity status, the queue profile, and bounded `qrstat`
+probes in inherited versus controller environments, without dumping environment
+variables, restarting owners, changing holds, or extending monitoring.
+
+An uploaded queue/node snapshot was replayed locally to check the distinction
+between CPU headroom and idle whole hosts. The public tests use synthetic
+resource counts; the operational snapshot and its other project details are
+not included. Historical replay is not a current capacity measurement.
 
 ## Validation and limitations
 
@@ -143,7 +190,9 @@ inspection; mocked tests cannot establish why a live reservation command failed.
 python -m unittest discover -s tests/multidomain -p test_training_capacity.py -v
 ```
 
-Tests cover physical-node counting, reservation membership, indirect resources,
+43 CPU/mock tests cover the actual queue profile, exclusion of other node groups
+and reservations, targeted queries and unknown replies, read-only diagnostics,
+physical-node counting, reservation membership, indirect resources,
 scarcity, queued-primary headroom, domain priority, the second handoff overlap,
 hold adoption/ownership, unknown-query behavior, preserved owner callbacks,
 initial-only held submission, deadline extension, repeat installation, and

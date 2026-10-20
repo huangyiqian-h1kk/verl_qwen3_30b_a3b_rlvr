@@ -37,6 +37,124 @@ def one_host(name='hnode001', busy=False):
     return nodes
 
 
+# Queue-profile shape; resource values are synthetic. Only this repository's
+# existing queue/project/node-group identifiers are retained.
+QUEUE_PROFILE = '''Queue: R9920261000
+    queue_type = Execution
+    acl_group_enable = True
+    acl_groups = gcg51557
+    default_chunk.node_group = nii
+    resources_available.ncpus = 1536
+    resources_assigned.ncpus = 0
+    enabled = True
+    started = True
+'''
+
+
+def pool_host(name='hnode001', busy=False):
+    nodes = one_host(name, busy)
+    for row in nodes.values():
+        row.pop('resv', None)
+    return nodes
+
+
+class QueuePoolTests(unittest.TestCase):
+    def test_queue_profile_without_qrstat_counts_only_eligible_nii_hosts(self):
+        nodes = {**pool_host(), **pool_host('hnode002', busy=True), **pool_host('hnode003'),
+                 **pool_host('hnode004'), **pool_host('hnode005')}
+        nodes['hnode003']['resources_available']['node_group'] = 'frai01'
+        nodes['hnode004[0]']['resv'] = 'R777.pbs1'
+        nodes['hnode005']['state'] = 'offline'
+        result = m.free_hosts({'nodes': nodes}, None, m.attributes(QUEUE_PROFILE))
+        self.assertEqual(result['capacity_source'], 'queue_node_group')
+        self.assertEqual(result['free_hosts'], ['hnode001'])
+        self.assertNotIn('hnode003', result['pool_hosts'])
+        self.assertIn('other_reservation', result['hosts']['hnode004'])
+
+    def test_pool_still_requires_whole_host_and_queue_cpu_headroom(self):
+        nodes = {**pool_host(), **pool_host('hnode002')}
+        nodes['hnode002[1]']['resources_available']['node_group'] = 'general'
+        queue = m.attributes(QUEUE_PROFILE)
+        result = m.free_hosts({'nodes': nodes}, None, queue)
+        self.assertEqual(result['free_slots'], 1)
+        self.assertIn('wrong_node_group', result['hosts']['hnode002'])
+        queue['resources_assigned.ncpus'] = '1400'
+        self.assertEqual(m.free_hosts({'nodes': nodes}, None, queue)['free_slots'], 0)
+
+    def test_unrecognized_queue_profile_is_not_a_global_pool_fallback(self):
+        for key, value in [('queue_type', 'Route'), ('acl_group_enable', 'False'),
+                           ('acl_groups', 'other'), ('default_chunk.node_group', 'general'),
+                           ('resources_available.ncpus', '0')]:
+            with self.subTest(key=key):
+                queue = dict(m.attributes(QUEUE_PROFILE), **{key: value})
+                with self.assertRaises(RuntimeError):
+                    m.free_hosts({'nodes': pool_host()}, None, queue)
+
+    def test_live_capacity_uses_only_queue_and_nodes_queries(self):
+        nodes = {**pool_host(), **pool_host('hnode002', busy=True)}
+        replies = {('qstat', '-Qf', m.QUEUE): QUEUE_PROFILE,
+                   ('pbsnodes', '-av', '-F', 'json'): json.dumps({'nodes': nodes})}
+        rows = {('domain', 'single'): dict(job_state='R', Resource_List={'nodect': 1},
+                exec_vnode='(hnode002[0]:ncpus=96+hnode002[1]:ncpus=96)')}
+        with tempfile.TemporaryDirectory() as temp, patch.object(m, 'command', side_effect=lambda args: replies[tuple(args)]), \
+                patch.object(m, 'reservation_for_queue', side_effect=AssertionError('qrstat must not gate this queue')):
+            result = m.Policy(temp).capacity(rows)
+            self.assertEqual(result['available_to_experiment'], 2)
+            self.assertEqual(result['owned_hosts'], ['hnode002'])
+
+
+class TargetedQueryTests(unittest.TestCase):
+    def test_only_registered_ids_are_queried_including_finished_jobs(self):
+        s = {'domain': {'single': {'job_id': '12.pbs1'}, 'dual': {'job_id': '13.pbs1'}},
+             'random': {'single': {'job_id': '14.pbs1'}, 'dual': None}}
+        jobs = {'12.pbs1': {'job_state': 'F'}, '13.pbs1': {'job_state': 'H'}, '14.pbs1': {'job_state': 'R'}}
+        with tempfile.TemporaryDirectory() as temp, patch.object(m, 'command', return_value=json.dumps({'Jobs': jobs})) as cmd:
+            self.assertEqual(m.Policy(temp).jobs(s), jobs)
+        cmd.assert_called_once_with(['qstat', '-xf', '-F', 'json', '12.pbs1', '13.pbs1', '14.pbs1'])
+
+    def test_omitted_or_invalid_job_is_unknown_not_finished(self):
+        for payload in ({'Jobs': {}}, {'Jobs': {'12.pbs1': None}}, {'Jobs': []}):
+            with self.assertRaises(m.SchedulerQueryError):
+                m.job_rows(json.dumps(payload), ['12.pbs1'])
+
+    def test_timeout_keeps_owners_reportable_without_releasing_candidates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for kind, path in m.controls(root).items():
+                s = states()[kind]
+                s['single']['job_id'] = ('12' if kind == 'domain' else '14') + '.pbs1'
+                s['dual']['job_id'] = ('13' if kind == 'domain' else '15') + '.pbs1'
+                m.write(path / 'state.json', s)
+            policy = m.Policy(root)
+            with patch.object(m, 'command', side_effect=subprocess.TimeoutExpired('qstat', 20)), \
+                    patch.object(policy, 'capacity') as cap, patch.object(policy, 'set_hold') as hold:
+                report = policy.reconcile()
+            cap.assert_not_called()
+            hold.assert_not_called()
+            self.assertFalse(report['jobs_known'])
+            self.assertIn('timed out', report['query_error'])
+            self.assertTrue(all(not v['allow'] for v in report['choices'].values()))
+
+    def test_diagnose_does_not_install_or_mutate_and_does_not_dump_environment(self):
+        calls = []
+        def run(args, **kwargs):
+            calls.append((args, kwargs['env']))
+            return subprocess.CompletedProcess(args, 1, stdout='', stderr='')
+        with patch.dict(m.os.environ, {'PRIVATE_TOKEN': 'do-not-print', 'PYTHONPATH': '/site/wrapper'}), \
+                patch.object(m, 'status', return_value={'monitoring_active': True}), \
+                patch.object(m.subprocess, 'run', side_effect=run), \
+                patch.object(m, 'write') as write, patch.object(m, 'stop_controls') as stop, \
+                redirect_stdout(io.StringIO()) as out:
+            report = m.diagnose(Path('/experiment'))
+        self.assertTrue(report['read_only'])
+        self.assertEqual([c[0][0] for c in calls], ['qstat', 'qrstat', 'qrstat'])
+        self.assertIn('PYTHONPATH', calls[1][1])
+        self.assertNotIn('PYTHONPATH', calls[2][1])
+        self.assertNotIn('do-not-print', out.getvalue())
+        write.assert_not_called()
+        stop.assert_not_called()
+
+
 class ResourceTests(unittest.TestCase):
     def setUp(self):
         self.q = dict(enabled='True', started='True', **{'default_chunk.node_group': 'nii'})
