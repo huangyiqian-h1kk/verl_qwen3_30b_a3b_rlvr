@@ -45,7 +45,7 @@ def status(root, query=True):
         keys = ("version", "operation", "kind", "phase", "promoted", "handoff_failed", "failure_reason",
                 "controller_status", "pid", "host", "heartbeat_utc", "deadline_utc", "previous_deadline_utc",
                 "extension_hours", "migration_complete", "candidate_admitted", "active", "candidate",
-                "old_candidate_retired", "pending", "retry_selection", "training_blocked", "last_error", "wait_reason")
+                "old_candidate", "old_candidate_retired", "pending", "retry_selection", "training_blocked", "last_error", "wait_reason")
         result = {k: state.get(k) for k in keys}
         result["controller_active"] = active(p["control"] / "controller.lock")
         result["deadline_beijing"] = datetime.fromisoformat(state["deadline_utc"]).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
@@ -55,7 +55,7 @@ def status(root, query=True):
                 if state.get(role):
                     try:
                         row = PBS().observe(state[role])
-                        result["pbs"][role] = {k: row.get(k) for k in ("Job_Name", "queue", "job_state", "Exit_status", "Hold_Types", "comment")}
+                        result["pbs"][role] = {k: row.get(k) for k in ("Job_Name", "queue", "job_state", "Exit_status", "Hold_Types", "Resource_List", "exec_vnode", "comment")}
                     except (Unknown, RuntimeError) as e:
                         result["pbs"][role] = dict(query_error=str(e))
         output[kind] = result
@@ -243,7 +243,7 @@ def daemon(root, kind):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "_run", "self-test"))
+    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "repair-cancellation", "_run", "self-test"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--operation")
     parser.add_argument("--extra-hours", type=float, default=24)
@@ -261,9 +261,15 @@ def main(argv=None):
     if args.action in ("apply", "extend"):
         need(args.operation, "A stable --operation ID is required")
         result = globals()[args.action](args.root, args.operation, args.extra_hours)
+    elif args.action == "repair-cancellation":
+        need(args.kind is not None, "repair-cancellation requires --kind random or --kind domain")
+        from .cancellation_repair import repair
+        result = repair(args.root, args.kind)
     elif args.action == "resume":
-        for kind in KINDS:
-            spawn(args.root, kind)
+        area = args.root / "outputs/multidomain/continuation_operations"
+        with locked(area / "apply.lock"):
+            for kind in KINDS:
+                spawn(args.root, kind)
         result = status(args.root)
     else:
         result = globals()[args.action](args.root)

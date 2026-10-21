@@ -17,8 +17,14 @@ class Unknown(RuntimeError):
     pass
 
 
+def finished(row):
+    """PBS has ended this job, even if it never ran and has no exit status."""
+    return row.get("job_state") in ("F", "C")
+
+
 def terminal(row):
-    return row.get("job_state") in ("F", "C") and re.fullmatch(r"-?\d+", str(row.get("Exit_status", ""))) is not None
+    """An ended job with an exit code usable for the training retry policy."""
+    return finished(row) and re.fullmatch(r"-?\d+", str(row.get("Exit_status", ""))) is not None
 
 
 def retryable(row):
@@ -134,9 +140,16 @@ class PBS:
 
     def cancel(self, job, journal):
         row = self.observe(job)
-        if terminal(row):
+        # observe() still verifies owner, queue, name and exact submission path.
+        # A queued/held job can be deleted without ever acquiring an exit code.
+        # Retiring that job must not depend on the stricter training retry gate.
+        if finished(row):
             return True
-        need(row.get("job_state") in ("Q", "H", "R", "E", "B", "S"), "Unknown PBS cancellation state")
+        if row.get("job_state") not in ("Q", "H", "R", "E", "B", "S"):
+            raise Unknown("Unknown PBS cancellation state: " + json.dumps({
+                "job_id": job["job_id"], "job_state": row.get("job_state"),
+                "substate": row.get("substate"), "Exit_status": row.get("Exit_status"),
+            }, sort_keys=True))
         # Reissuing qdel for the SAME verified job after an ambiguous return is safe.
         write(journal, dict(job=job, at_utc=now(), action="qdel", status="ATTEMPTED"))
         try:

@@ -175,6 +175,53 @@ run `resume` on a healthy login node. No external service or cron was installed.
 Do not restart the old ZIP/capacity/check owners after migration. New status and
 controller logs are the authoritative operational interface.
 
+## Repair an ended old candidate without an exit status
+
+A deleted held/queued PBS job can have `job_state=F` and no `Exit_status`.
+The initial controller incorrectly required a numeric exit code even when merely
+confirming that an old candidate had ended. This produced
+`Unknown PBS cancellation state`, leaving the new candidate unsubmitted while
+single-node monitoring continued. `QUALIFYING` with `candidate: null` does not
+mean a GPU qualification is running.
+
+Cancellation now accepts an identity-verified `F`/`C` observation without an exit
+code. The training retry policy still requires a numeric code and permits only
+271 or explicitly confirmed walltime -29. Missing records, query failures and
+unrecognized states remain unknown; they are not treated as successful cleanup.
+An unknown-state error now includes the actual job state and substate.
+
+Updating a Git checkout alone cannot fix an existing frozen owner. From the login
+host shown in that owner's `status`, use the patched operations checkout:
+
+```bash
+"$D4_PY" -I "$D4_SCRIPT" self-test
+"$D4_PY" -I "$D4_SCRIPT" repair-cancellation --root "$D4_ROOT" --kind random
+"$D4_PY" -I "$D4_SCRIPT" status --root "$D4_ROOT"
+```
+
+The repair stages a new template, changes **only `scheduler.py`** within that
+template, verifies all other hashes, and gracefully stops only the selected
+login-node controller. It requires the same host, process owner and exact command
+line, and uses a Linux pidfd to avoid signalling a reused PID. It never force-kills
+the controller. Under the controller's ownership lock it atomically updates the
+operation's plan pointer, then restarts the owner from the repaired snapshot.
+Existing submitted job snapshots and the original template are retained.
+
+Deadlines, submission journals, checkpoint authority and handoff failure latches
+are preserved. In particular a domain transition already marked `SINGLE_ONLY`
+after 271 is not rearmed by repairing random. The repair itself sends no PBS
+submission/cancellation commands; the restarted controller resumes its existing
+policy. Once old-candidate retirement succeeds, an admitted, never-submitted
+random candidate is submitted once, directly to the reserved queue.
+
+The command is repeatable after interruption. If graceful shutdown takes longer
+than its bounded wait, rerun the same command on that host. If restarting failed
+after plan publication, rerunning resumes the repaired snapshot. The result
+`REPAIRED_CONTROLLER_RUNNING` confirms the controller restart, not a candidate's
+qsub receipt or a successful training handoff. Inspect `candidate.job_id`,
+`old_candidate_retired`, `pbs`, and `promoted` separately. The scheduling policy
+and 24-hour training walltime are unchanged.
+
 ## Diagnostics and acceptance
 
 For each run, inspect `control/state.json`, `control/controller.log`,
@@ -189,7 +236,7 @@ never guesses that an absent/expired scheduler record means no job was submitted
 Inspect that pending folder and the scheduler before resolving an ambiguous ID;
 do not delete the intent to force a new submission.
 
-Local validation for this implementation: 40 new CPU fault/integration tests,
+Local validation for the initial implementation: 40 CPU fault/integration tests,
 13 existing audit-binding tests and 14 existing worker-repair tests passed.
 They cover queue policy, per-setup failure latches, fallback after qdel, five-phase
 evidence, exact save-before-sync order, source isolation, deadline idempotence,
@@ -197,3 +244,10 @@ submission ambiguity and durable commit recovery. PBS/GPU operations in these
 tests are synthetic. No ABCI submission or real 8↔16 checkpoint restore has been
 performed by the development environment; those are verified by the new candidate
 jobs before they can replace the current singles.
+
+The cancellation repair adds 13 regression/fault tests; all 53 continuation tests
+pass. They include the real PBS adapter's F-without-exit path, unchanged strict
+retry/identity checks, exactly-once candidate submission after cleanup, immutable
+snapshot publication, restart interruption/repetition, separate setup failure
+latches, and graceful controller lock handoff using a real local child process.
+No cluster job or GPU is used by these tests.
