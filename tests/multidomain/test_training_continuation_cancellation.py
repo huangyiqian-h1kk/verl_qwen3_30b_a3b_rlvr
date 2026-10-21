@@ -1,5 +1,6 @@
 """PBS F-without-exit regression and frozen-controller repair fault tests."""
 import copy
+import errno
 import getpass
 import json
 import os
@@ -15,7 +16,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from d4_training_continuation import cli, cancellation_repair as repair
+from d4_training_continuation import cli, cancellation_repair as repair, process_signal
 from d4_training_continuation.common import acquire, files, paths, read, sha, verify_files, write
 from d4_training_continuation.scheduler import PBS, Unknown, finished, retryable, terminal
 from test_training_continuation import Harness
@@ -210,13 +211,12 @@ class RepairTests(Harness):
             self.assertTrue(repair.repair(self.root, "random")["template_updated"])
 
     def test_foreign_login_host_is_never_signalled(self):
-        with patch.object(os, "pidfd_open") as open_pid:
+        with patch.object(process_signal, "open_process") as open_pid:
             with self.assertRaisesRegex(RuntimeError, "controller host"):
                 repair._signal_owner(dict(host="another-login.invalid", pid=42), Path("/entry"), self.root, "random")
         open_pid.assert_not_called()
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"), "Linux pidfd required")
-    def test_live_controller_stops_gracefully_and_exact_command_is_required(self):
+    def _live_controller_handoff(self):
         c, _ = self.frozen()
         entry = c.control / "operations/synthetic/controller_entry.py"
         entry.write_text(
@@ -254,6 +254,69 @@ class RepairTests(Harness):
                     acquire(c.control / "controller.lock")
         self.assertEqual(child.wait(timeout=3), 0)
         child.stdout.close(); child.stderr.close()
+
+    def test_live_controller_stops_gracefully_and_exact_command_is_required(self):
+        self._live_controller_handoff()
+
+    def test_live_controller_stops_when_python_pidfd_wrappers_are_missing(self):
+        with patch.object(os, "pidfd_open", None, create=True), \
+             patch.object(signal, "pidfd_send_signal", None, create=True), \
+             patch.object(os, "kill", side_effect=AssertionError("Numeric-PID fallback is forbidden")):
+            self._live_controller_handoff()
+
+    def test_kernel_probe_failure_leaves_live_owner_and_plan_unchanged(self):
+        c, _ = self.frozen()
+        original = read(c.control / "operations/synthetic/plan.json")
+        for error in (errno.ENOSYS, errno.EPERM):
+            with self.subTest(error=error), \
+                 patch.object(process_signal, "probe", side_effect=OSError(error, "kernel check failed")), \
+                 patch.object(repair, "stop_and_acquire") as stop, patch.object(cli, "spawn") as spawn:
+                with self.assertRaises(OSError):
+                    repair.repair(self.root, "random")
+                stop.assert_not_called(); spawn.assert_not_called()
+                self.assertEqual(read(c.control / "operations/synthetic/plan.json"), original)
+
+
+class ProcessSignalTests(unittest.TestCase):
+    def test_probe_without_python_bindings_uses_kernel_pidfd_and_signal_zero(self):
+        with patch.object(os, "pidfd_open", None, create=True), \
+             patch.object(signal, "pidfd_send_signal", None, create=True):
+            report = process_signal.probe()
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["open_backend"], "linux-syscall")
+        self.assertEqual(report["signal_backend"], "linux-syscall")
+
+    def test_each_python_wrapper_can_be_missing_independently(self):
+        for module, name in ((os, "pidfd_open"), (signal, "pidfd_send_signal")):
+            with self.subTest(name=name), patch.object(module, name, None, create=True):
+                self.assertEqual(process_signal.probe()["status"], "PASS")
+
+    def test_kernel_errors_propagate_without_numeric_pid_fallback(self):
+        for error in (errno.ENOSYS, errno.EPERM, errno.ESRCH):
+            with self.subTest(error=error), \
+                 patch.object(os, "pidfd_open", None, create=True), \
+                 patch.object(process_signal, "_syscall", side_effect=OSError(error, "kernel error")), \
+                 patch.object(os, "kill") as kill:
+                with self.assertRaises(OSError) as caught:
+                    process_signal.open_process(42)
+                self.assertEqual(caught.exception.errno, error)
+                kill.assert_not_called()
+
+    def test_unknown_architecture_is_rejected_before_any_native_call(self):
+        with patch.object(os, "pidfd_open", None, create=True), \
+             patch.object(process_signal.platform, "machine", return_value="unsupported"), \
+             patch.object(process_signal.ctypes, "CDLL") as libc:
+            with self.assertRaisesRegex(RuntimeError, "compatibility supports"):
+                process_signal.open_process(42)
+        libc.assert_not_called()
+
+    def test_probe_closes_descriptor_if_signal_check_fails(self):
+        with patch.object(process_signal, "open_process", return_value=123), \
+             patch.object(process_signal, "send_signal", side_effect=PermissionError(errno.EPERM, "denied")), \
+             patch.object(os, "close") as close:
+            with self.assertRaises(PermissionError):
+                process_signal.probe()
+        close.assert_called_once_with(123)
 
 
 if __name__ == "__main__":

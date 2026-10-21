@@ -13,6 +13,7 @@ import time
 import uuid
 
 from . import VERSION
+from . import process_signal
 from .common import acquire, active, atomic_text, below, files, locked, need, now, paths, read, safe_id, sha, verify_files, write
 
 REPAIR = "pbs-finished-without-exit-v1"
@@ -78,10 +79,8 @@ def _signal_owner(state, entry, root, kind):
          "Run repair on controller host " + host + "; no remote PID will be signalled")
     pid = state.get("pid")
     need(isinstance(pid, int) and pid > 1 and pid != os.getpid(), "Invalid controller PID")
-    need(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"),
-         "Safe local controller restart requires Linux pidfd support")
     try:
-        descriptor = os.pidfd_open(pid)
+        descriptor = process_signal.open_process(pid)
     except ProcessLookupError:
         return
     try:
@@ -93,7 +92,7 @@ def _signal_owner(state, entry, root, kind):
         expected = ["-I", str(entry), "_run", "--root", str(root), "--kind", kind]
         need(argv[1:] == expected, "Controller command line mismatch; no signal sent")
         try:
-            signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+            process_signal.send_signal(descriptor, signal.SIGTERM)
         except ProcessLookupError:
             pass
     finally:
@@ -129,6 +128,9 @@ def repair(root, kind):
         planfile, original, revised = prepare_template(root, kind)
         changed = original != revised
         if changed:
+            # A missing Python wrapper is supported. A missing kernel capability
+            # or denied permission still stops here, before signalling any owner.
+            capability = process_signal.probe()
             with stop_and_acquire(p["control"], p["root"], kind):
                 # Other deploy/resume commands use apply.lock; a raced plan edit
                 # is still rejected rather than overwritten.
@@ -139,6 +141,7 @@ def repair(root, kind):
                     repair=REPAIR, at_utc=now(), operation=revised["operation"],
                     original_template=original["template"], template=revised["template"],
                     scheduler_sha256=revised["template_files"][SCHEDULER],
+                    process_signal=capability,
                     deadline_utc=read(p["control"] / "state.json")["deadline_utc"],
                 ))
         # Also covers an interrupted run after publishing the new plan pointer.

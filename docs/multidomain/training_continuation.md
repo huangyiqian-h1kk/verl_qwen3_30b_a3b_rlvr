@@ -207,6 +207,16 @@ the controller. Under the controller's ownership lock it atomically updates the
 operation's plan pointer, then restarts the owner from the repaired snapshot.
 Existing submitted job snapshots and the original template are retained.
 
+Some Python builds omit `os.pidfd_open` and/or `signal.pidfd_send_signal` even
+though the running Linux kernel provides the operations. `process_signal.py`
+uses an available Python wrapper, otherwise the same kernel syscall through
+stdlib `ctypes` on Linux x86-64/AArch64 LP64. No Python/environment upgrade is
+needed. The syscall numbers are bound to the Linux UAPI sources linked in that
+module. There is no fallback to a plain numeric-PID kill or a process-group signal.
+Before stopping an owner, the repair probes opening its own pidfd and sending
+signal 0, which delivers no signal. If the kernel lacks support or access is
+denied, it stops before signalling an owner or publishing a replacement plan.
+
 Deadlines, submission journals, checkpoint authority and handoff failure latches
 are preserved. In particular a domain transition already marked `SINGLE_ONLY`
 after 271 is not rearmed by repairing random. The repair itself sends no PBS
@@ -251,3 +261,11 @@ retry/identity checks, exactly-once candidate submission after cleanup, immutabl
 snapshot publication, restart interruption/repetition, separate setup failure
 latches, and graceful controller lock handoff using a real local child process.
 No cluster job or GPU is used by these tests.
+
+The Python-binding compatibility follow-up expands the suite to 60 tests. The
+full suite passes both normally and with **both Python pidfd attributes removed**,
+without skips. It exercises real kernel pidfd operations and graceful local-child
+shutdown in the missing-wrapper case, as well as unsupported-kernel/permission
+errors that must leave the controller and operation plan intact. These local runs
+do not establish the target login host's kernel support; its self-test and the
+pre-stop capability probe check that host before deployment.
