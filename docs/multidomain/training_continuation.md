@@ -199,13 +199,24 @@ host shown in that owner's `status`, use the patched operations checkout:
 "$D4_PY" -I "$D4_SCRIPT" status --root "$D4_ROOT"
 ```
 
-The repair stages a new template, changes **only `scheduler.py`** within that
-template, verifies all other hashes, and gracefully stops only the selected
+The v2 repair stages a new template, changes **only `scheduler.py` and `cli.py`**
+within that template, verifies all other hashes, and gracefully stops only the selected
 login-node controller. It requires the same host, process owner and exact command
 line, and uses a Linux pidfd to avoid signalling a reused PID. It never force-kills
 the controller. Under the controller's ownership lock it atomically updates the
 operation's plan pointer, then restarts the owner from the repaired snapshot.
 Existing submitted job snapshots and the original template are retained.
+
+The first repair published a corrected scheduler but its launcher still imported
+`operation/template/runtime` instead of `plan["template"]/runtime`. A restarted
+process could therefore continue using the original scheduler. V2 fixes the
+entry path and adds a startup binding recorded by the new owner under its lease:
+actual imported module paths/hashes, template manifest digest, PID and host.
+Startup rejects a module loaded from another snapshot before any PBS action.
+`status.controller_runtime.verified` requires that binding to match the current
+plan and running owner; it is not inferred from a staged file hash or a lock alone.
+An unchanged plan with an old/unbound owner is also restarted. A repeated repair
+with a correctly bound running owner does not restart it again.
 
 Some Python builds omit `os.pidfd_open` and/or `signal.pidfd_send_signal` even
 though the running Linux kernel provides the operations. `process_signal.py`
@@ -227,10 +238,23 @@ random candidate is submitted once, directly to the reserved queue.
 The command is repeatable after interruption. If graceful shutdown takes longer
 than its bounded wait, rerun the same command on that host. If restarting failed
 after plan publication, rerunning resumes the repaired snapshot. The result
-`REPAIRED_CONTROLLER_RUNNING` confirms the controller restart, not a candidate's
-qsub receipt or a successful training handoff. Inspect `candidate.job_id`,
+`REPAIRED_CONTROLLER_RUNNING` now confirms the current process's runtime binding,
+not a candidate's qsub receipt or a successful training handoff. If the bounded
+startup wait ends without that proof, the result is `REPAIRED_CONTROLLER_UNVERIFIED`;
+inspect the reported binding reason and `controller.log`, then rerun the same
+repair. `controller_runtime.first_check_completed` distinguishes a completed
+new-owner polling pass from an error left over before restart. Inspect `candidate.job_id`,
 `old_candidate_retired`, `pbs`, and `promoted` separately. The scheduling policy
 and 24-hour training walltime are unchanged.
+
+The launch regression tests execute the real `python -I controller_entry.py`
+chain and daemon against local fixture PBS executables. They reproduce both the
+v1 updated-plan/stale-entry state and an already-current plan with an unbound
+owner, verify fresh module origins, retire an F/null-exit candidate, and record
+exactly one dual submission without cancelling either single. Repeating the
+repair preserves the PID, deadline, submission receipt and independent domain
+failure latch. A wrong import root is rejected before any PBS command. These
+are CPU/process integration checks, not GPU qualification.
 
 ## Diagnostics and acceptance
 

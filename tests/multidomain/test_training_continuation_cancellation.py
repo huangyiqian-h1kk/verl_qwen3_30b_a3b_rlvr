@@ -17,7 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from d4_training_continuation import cli, cancellation_repair as repair, process_signal
-from d4_training_continuation.common import acquire, files, paths, read, sha, verify_files, write
+from d4_training_continuation.common import acquire, digest, files, now, paths, read, sha, verify_files, write
 from d4_training_continuation.scheduler import PBS, Unknown, finished, retryable, terminal
 from test_training_continuation import Harness
 
@@ -119,23 +119,34 @@ class RepairTests(Harness):
         scheduler = template / repair.SCHEDULER
         scheduler.parent.mkdir(parents=True)
         scheduler.write_text("# Synthetic original frozen scheduler\n")
+        (template / repair.CLI).write_text("# Synthetic original frozen CLI\n")
         (scheduler.parent / "worker.py").write_text("# Training implementation must stay unchanged\n")
         (template / "sampling.json").write_text('{"plan": "unchanged"}\n')
         c.plan.update(template=str(template), template_files=files(template))
         write(operation / "plan.json", c.plan)
-        c.save(migration_complete=True, controller_status="STOPPED")
+        c.save(migration_complete=True, controller_status="STOPPED", pid=os.getpid(), host=socket.gethostname())
         self.old_patch = patch.object(repair, "ORIGINAL_SHA", sha(scheduler))
         self.old_patch.start()
         self.addCleanup(self.old_patch.stop)
+        cli_patch = patch.object(repair, "ORIGINAL_CLI_SHAS", {sha(template / repair.CLI)})
+        cli_patch.start()
+        self.addCleanup(cli_patch.stop)
         return c, template
 
     def spawn(self, root, kind):
         p = paths(root, kind)
         state = read(p["control"] / "state.json")
         state["controller_status"] = "RUNNING"
+        plan = read(p["control"] / "operations" / state["operation"] / "plan.json")
+        state["runtime_binding"] = dict(version=cli.RUNTIME_BINDING, pid=state["pid"], host=state["host"],
+            at_utc=now(), operation=state["operation"], template=plan["template"],
+            template_digest=digest(plan["template_files"]), modules={
+                "d4_training_continuation." + Path(relative).stem:
+                    dict(path=str(Path(plan["template"]) / relative), sha256=plan["template_files"][relative])
+                for relative in (repair.CLI, repair.SCHEDULER)})
         write(p["control"] / "state.json", state)
 
-    def test_repair_publishes_only_scheduler_change_and_repetition_preserves_state(self):
+    def test_repair_publishes_only_controller_changes_and_repetition_preserves_state(self):
         c, original = self.frozen()
         domain = self.controller("domain")
         domain.fail_candidate("Candidate ended before handoff commit: 271")
@@ -145,21 +156,23 @@ class RepairTests(Harness):
         job = c.p["run"] / "jobs/already_submitted/request.json"
         write(job, {"snapshot": "must remain immutable"})
         before_job = job.read_bytes()
-        with patch.object(cli, "spawn", side_effect=self.spawn) as spawn, patch.object(repair, "active", return_value=True):
+        with patch.object(cli, "spawn", side_effect=self.spawn) as spawn, patch.object(cli, "active", return_value=True):
             first = repair.repair(self.root, "random")
             second = repair.repair(self.root, "random")
         self.assertTrue(first["template_updated"])
         self.assertFalse(second["template_updated"])
         self.assertEqual(first["status"], "REPAIRED_CONTROLLER_RUNNING")
-        self.assertEqual(spawn.call_count, 2)
+        self.assertEqual(spawn.call_count, 1)
+        self.assertFalse(second["controller_restart_requested"])
         self.assertTrue(all(call.args[1] == "random" for call in spawn.call_args_list))
         plan = read(c.control / "operations/synthetic/plan.json")
         changed = {k for k in old_files if old_files[k] != plan["template_files"][k]}
-        self.assertEqual(changed, {repair.SCHEDULER})
+        self.assertEqual(changed, {repair.SCHEDULER, repair.CLI})
         verify_files(plan["template"], plan["template_files"])
         self.assertEqual(files(original), old_files)
         self.assertEqual(job.read_bytes(), before_job)
         after = read(c.control / "state.json")
+        after.pop("runtime_binding")
         after["controller_status"] = before["controller_status"]
         self.assertEqual(after, before)
         self.assertEqual(read(domain.control / "state.json"), domain_before)
@@ -167,7 +180,7 @@ class RepairTests(Harness):
     def test_failed_handoff_is_not_rearmed_even_when_repair_targets_it(self):
         c, _ = self.frozen("domain")
         c.fail_candidate("Candidate ended before handoff commit: 271")
-        with patch.object(cli, "spawn", side_effect=self.spawn), patch.object(repair, "active", return_value=True):
+        with patch.object(cli, "spawn", side_effect=self.spawn), patch.object(cli, "active", return_value=True):
             result = repair.repair(self.root, "domain")
         self.assertTrue(result["handoff_failed"])
         self.assertFalse(result["promoted"])
@@ -180,7 +193,7 @@ class RepairTests(Harness):
                 repair.repair(self.root, "random")
         first = read(c.control / "operations/synthetic/plan.json")
         self.assertNotEqual(first["template"], str(original))
-        with patch.object(cli, "spawn", side_effect=self.spawn), patch.object(repair, "active", return_value=True):
+        with patch.object(cli, "spawn", side_effect=self.spawn), patch.object(cli, "active", return_value=True):
             result = repair.repair(self.root, "random")
         self.assertFalse(result["template_updated"])
         self.assertEqual(first, read(c.control / "operations/synthetic/plan.json"))
@@ -207,7 +220,7 @@ class RepairTests(Harness):
                 repair.repair(self.root, "random")
         self.assertEqual(planfile.read_bytes(), before)
         self.assertEqual(sha(template / repair.SCHEDULER), repair.ORIGINAL_SHA)
-        with patch.object(cli, "spawn", side_effect=self.spawn), patch.object(repair, "active", return_value=True):
+        with patch.object(cli, "spawn", side_effect=self.spawn), patch.object(cli, "active", return_value=True):
             self.assertTrue(repair.repair(self.root, "random")["template_updated"])
 
     def test_foreign_login_host_is_never_signalled(self):

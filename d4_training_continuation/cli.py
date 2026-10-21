@@ -13,12 +13,70 @@ import sys
 import time
 from zoneinfo import ZoneInfo
 from . import VERSION
-from .common import acquire, active, extended_deadline, locked, need, now, paths, read, safe_id, verify_files, write
+from .common import acquire, active, atomic_text, below, digest, extended_deadline, locked, need, now, paths, read, safe_id, sha, verify_files, write
 from .source import inspect, prepare
 from .controller import Controller, authoritative_checkpoint
 from .scheduler import PBS, Unknown
 
 KINDS = ("domain", "random")
+RUNTIME_BINDING = "frozen-controller-runtime-v1"
+
+
+def capture_runtime_binding(plan):
+    """Attest imported controller modules in the new owner, before PBS actions."""
+    template = Path(plan["template"]).resolve()
+    verify_files(template, plan["template_files"])
+    modules = {}
+    for name, module in tuple(sys.modules.items()):
+        if name == "d4_training_continuation" or name.startswith("d4_training_continuation."):
+            source = below(module.__file__, template)
+            relative = str(source.relative_to(template))
+            checksum = sha(source)
+            need(relative.startswith("runtime/d4_training_continuation/")
+                 and plan["template_files"].get(relative) == checksum,
+                 "Loaded controller source does not match plan: " + name)
+            modules[name] = dict(path=str(source), sha256=checksum)
+    need(all("d4_training_continuation." + name in modules for name in ("cli", "scheduler")),
+         "Controller runtime binding is incomplete")
+    return dict(version=RUNTIME_BINDING, pid=os.getpid(), host=socket.gethostname(),
+                at_utc=now(), operation=plan["operation"], template=str(template),
+                template_digest=digest(plan["template_files"]), modules=modules)
+
+
+def runtime_status(root, kind, state=None):
+    """A staged hash or an old RUNNING state alone is not a loaded-code receipt."""
+    p = paths(root, kind)
+    state = state if state is not None else read(p["control"] / "state.json")
+    try:
+        binding = state.get("runtime_binding") or {}
+        need(isinstance(binding, dict), "runtime_binding_invalid")
+        need(binding.get("version") == RUNTIME_BINDING, "runtime_binding_missing")
+        need(isinstance(binding.get("pid"), int) and binding["pid"] > 1
+             and isinstance(binding.get("host"), str) and bool(binding["host"]), "runtime_binding_owner_invalid")
+        need(binding.get("pid") == state.get("pid") and binding.get("host") == state.get("host"),
+             "runtime_binding_owner_mismatch")
+        safe_id(state["operation"])
+        plan = read(p["control"] / "operations" / state["operation"] / "plan.json")
+        template = Path(plan["template"]).resolve()
+        need(binding.get("operation") == state["operation"] and binding.get("template") == str(template)
+             and binding.get("template_digest") == digest(plan["template_files"]),
+             "runtime_binding_plan_mismatch")
+        modules = binding.get("modules", {})
+        need(isinstance(modules, dict), "runtime_binding_modules_invalid")
+        for name in ("cli", "scheduler"):
+            relative = "runtime/d4_training_continuation/" + name + ".py"
+            expected = dict(path=str(template / relative), sha256=plan["template_files"][relative])
+            need(modules.get("d4_training_continuation." + name) == expected,
+                 "runtime_binding_module_mismatch: " + name)
+            need(sha(template / relative) == expected["sha256"], "runtime_source_changed: " + name)
+        need(state.get("controller_status") == "RUNNING" and active(p["control"] / "controller.lock"),
+             "controller_not_running")
+        return dict(verified=True, pid=binding["pid"], host=binding["host"], template=str(template),
+                    at_utc=binding["at_utc"], cli_sha256=modules["d4_training_continuation.cli"]["sha256"],
+                    scheduler_sha256=modules["d4_training_continuation.scheduler"]["sha256"],
+                    first_check_completed=(state.get("heartbeat_utc") or "") >= binding["at_utc"])
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+        return dict(verified=False, reason=str(error))
 
 
 def initial_state(plan, hours):
@@ -48,6 +106,7 @@ def status(root, query=True):
                 "old_candidate", "old_candidate_retired", "pending", "retry_selection", "training_blocked", "last_error", "wait_reason")
         result = {k: state.get(k) for k in keys}
         result["controller_active"] = active(p["control"] / "controller.lock")
+        result["controller_runtime"] = runtime_status(root, kind, state)
         result["deadline_beijing"] = datetime.fromisoformat(state["deadline_utc"]).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
         if query:
             result["pbs"] = {}
@@ -93,12 +152,13 @@ def spawn(root, kind):
     plan = read(operation / "plan.json")
     verify_files(plan["template"], plan["template_files"])
     entry = operation / "controller_entry.py"
-    entry.write_text("import sys\n" + f"sys.path.insert(0, {str(operation / 'template/runtime')!r})\n"
-                     "from d4_training_continuation.cli import main\nmain()\n")
+    runtime = Path(plan["template"]).resolve() / "runtime"
+    atomic_text(entry, "import sys\n" + f"sys.path.insert(0, {str(runtime)!r})\n"
+                "from d4_training_continuation.cli import main\nmain()\n")
     with (p["control"] / "controller.log").open("a") as out:
-        subprocess.Popen([sys.executable, "-I", str(entry), "_run", "--root", str(p["root"]), "--kind", kind],
-                         stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                         start_new_session=True, close_fds=True)
+        return subprocess.Popen([sys.executable, "-I", str(entry), "_run", "--root", str(p["root"]), "--kind", kind],
+                                stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                start_new_session=True, close_fds=True)
 
 
 def apply(root, operation, hours):
@@ -168,7 +228,9 @@ def daemon(root, kind):
     with ExitStack() as stack:
         stack.enter_context(locked(p["control"] / "controller.lock"))
         controller = Controller(root, kind)
-        controller.save(controller_status="ADOPTING", pid=os.getpid(), host=socket.gethostname())
+        binding = capture_runtime_binding(controller.plan)
+        controller.save(controller_status="ADOPTING", pid=os.getpid(), host=socket.gethostname(),
+                        runtime_binding=binding)
         # Spawn succeeded; old owner may now be asked to release its leases.
         for directory in (p["old_control"], p["monitor"]):
             (directory / "stop.request").touch()
