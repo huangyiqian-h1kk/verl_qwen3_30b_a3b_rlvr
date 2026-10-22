@@ -33,6 +33,7 @@ LEGACY = {"cli.py": {"27fdf7f11fe7fabefa00b9be42a8ef11e45ab36be416e87cf64c76afbe
 
 
 def prepare(root, kind):
+    from .save_policy_upgrade import PREVIOUS
     p = paths(root, kind)
     state = read(p["control"] / "state.json")
     need(state["version"] == VERSION and state.get("migration_complete"), "Expected adopted continuation owner")
@@ -50,7 +51,7 @@ def prepare(root, kind):
         if not relative.startswith(PREFIX):
             continue
         name = relative[len(PREFIX):]
-        allowed = {BASELINE.get(name), replacement.get(relative)} | LEGACY.get(name, set())
+        allowed = {BASELINE.get(name), PREVIOUS.get(name), replacement.get(relative)} | LEGACY.get(name, set())
         need(checksum in allowed and checksum is not None and relative in sources,
              "Unsupported frozen continuation source: " + relative)
     manifest = dict(original["template_files"], **replacement)

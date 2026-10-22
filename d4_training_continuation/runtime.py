@@ -14,6 +14,7 @@ from .common import digest, expired, locked, need, now, read, write
 from .source import topology_config, validate_request
 from .scheduler import PBS
 from . import checkpoints as ck
+from . import evaluation
 from .controller import authoritative_checkpoint
 
 
@@ -128,13 +129,19 @@ def phase(path, name):
     from multidomain.runtime_config import compose
     cfg_source = topology_config(r["config"], target_world // 8)
     cfg = compose(cfg_source, Path(r["data_dir"]), Path(r["run_dir"]), "train")
+    if r.get("training_policy"):
+        from .save_policy import POLICY
+        need(cfg.trainer.save_freq == POLICY["save_freq"] and cfg.trainer.test_freq == POLICY["test_freq"],
+             "Composed runtime lost the save5/eval25 policy")
     cfg.trainer.val_only = False
-    cfg.trainer.val_before_train = False
+    cfg.trainer.val_before_train = bool(r.get("training_policy") and
+                                       evaluation.due(resume["step"], cfg.trainer.test_freq))
     cfg.trainer.max_actor_ckpt_to_keep = None
     cfg.trainer.del_local_ckpt_after_load = False
     cfg.trainer.resume_mode = "resume_path"
     cfg.trainer.resume_from_path = resume["path"]
-    # Same existing save/evaluation frequency, plus mandatory qualification/catch-up saves.
+    # Replay/reuse a scheduled source evaluation before the next training update.
+    # Checkpoint persistence remains 5; validation remains 25.
     if r["kind"] == "domain":
         cfg.data.shuffle = False
     cfg.reward.custom_reward_function.path = r["reward"]["import_path"]

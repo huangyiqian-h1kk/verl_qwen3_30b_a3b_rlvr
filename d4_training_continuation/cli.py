@@ -28,6 +28,8 @@ def capture_runtime_binding(plan):
     verify_files(template, plan["template_files"])
     if plan.get("opportunistic"):
         from . import opportunities  # bind the admission/handoff code before any PBS action
+    if plan.get("training_policy"):
+        from . import checkpoint_restart, save_policy
     modules = {}
     for name, module in tuple(sys.modules.items()):
         if name == "d4_training_continuation" or name.startswith("d4_training_continuation."):
@@ -65,7 +67,11 @@ def runtime_status(root, kind, state=None):
              "runtime_binding_plan_mismatch")
         modules = binding.get("modules", {})
         need(isinstance(modules, dict), "runtime_binding_modules_invalid")
-        required = ("cli", "scheduler", "controller", "opportunities") if plan.get("opportunistic") else ("cli", "scheduler")
+        required = ["cli", "scheduler"]
+        if plan.get("opportunistic"):
+            required += ["controller", "opportunities"]
+        if plan.get("training_policy"):
+            required += ["controller", "source", "save_policy", "checkpoint_restart"]
         for name in required:
             relative = "runtime/d4_training_continuation/" + name + ".py"
             expected = dict(path=str(template / relative), sha256=plan["template_files"][relative])
@@ -107,12 +113,22 @@ def status(root, query=True):
                 "controller_status", "pid", "host", "heartbeat_utc", "deadline_utc", "previous_deadline_utc",
                 "extension_hours", "migration_complete", "candidate_admitted", "active", "candidate",
                 "old_candidate", "old_candidate_retired", "pending", "retry_selection", "training_blocked", "last_error", "wait_reason",
-                "opportunity", "opportunity_poll")
+                "opportunity", "opportunity_poll", "checkpoint_restart")
         result = {k: state.get(k) for k in keys}
         result["controller_active"] = active(p["control"] / "controller.lock")
         result["controller_runtime"] = runtime_status(root, kind, state)
         plan = read(p["control"] / "operations" / state["operation"] / "plan.json")
         result["opportunistic_policy"] = plan.get("opportunistic")
+        result["training_policy"] = plan.get("training_policy")
+        if state.get("active"):
+            try:
+                request = read(Path(state["active"]["folder"]) / "request.json")
+                training = request["config"]["training"]
+                result["active_job_policy"] = dict(job_id=state["active"]["job_id"],
+                    save_freq=training.get("save_freq"), test_freq=training.get("test_freq"),
+                    bound_policy=request.get("training_policy"), source="immutable_request_config")
+            except (OSError, KeyError, ValueError) as error:
+                result["active_job_policy"] = dict(read_error=str(error))
         result["deadline_beijing"] = datetime.fromisoformat(state["deadline_utc"]).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
         if query:
             result["pbs"] = {}
@@ -312,12 +328,16 @@ def daemon(root, kind):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "repair-cancellation", "enable-opportunistic", "_run", "self-test"))
+    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "repair-cancellation", "repair-save-policy", "enable-opportunistic", "_run", "self-test"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--operation")
     parser.add_argument("--extra-hours", type=float, default=24)
     parser.add_argument("--kind", choices=KINDS)
+    parser.add_argument("--restart-after-step", type=int,
+                        help="With repair-save-policy: one controlled restart after a full checkpoint >= this step")
     args = parser.parse_args(argv)
+    need(args.restart_after_step is None or args.action == "repair-save-policy",
+         "--restart-after-step is only supported by repair-save-policy")
     if args.action == "_run":
         need(args.kind is not None, "Missing setup")
         return daemon(args.root, args.kind)
@@ -337,6 +357,10 @@ def main(argv=None):
         need(args.kind is not None, "repair-cancellation requires --kind random or --kind domain")
         from .cancellation_repair import repair
         result = repair(args.root, args.kind)
+    elif args.action == "repair-save-policy":
+        need(args.kind == "random", "repair-save-policy requires --kind random")
+        from .save_policy_upgrade import repair
+        result = repair(args.root, args.kind, args.restart_after_step)
     elif args.action == "resume":
         area = args.root / "outputs/multidomain/continuation_operations"
         with locked(area / "apply.lock"):
@@ -347,6 +371,8 @@ def main(argv=None):
         result = globals()[args.action](args.root)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if args.action == "enable-opportunistic" and result["status"] != "OPPORTUNISTIC_MONITORS_RUNNING":
+        raise SystemExit(2)
+    if args.action == "repair-save-policy" and result["status"] != "SAVE_POLICY_MONITOR_RUNNING":
         raise SystemExit(2)
 
 

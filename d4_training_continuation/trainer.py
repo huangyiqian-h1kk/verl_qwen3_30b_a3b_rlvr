@@ -74,6 +74,9 @@ def trainer_class(base):
         def _validate(self, merged=False):
             previous, self.cont_validating = self.cont_validating, True
             try:
+                if self.cont_req.get("training_policy"):
+                    from . import evaluation
+                    return evaluation.validate(self, super()._validate, merged=merged)
                 return super()._validate(merged=merged)
             finally:
                 self.cont_validating = previous

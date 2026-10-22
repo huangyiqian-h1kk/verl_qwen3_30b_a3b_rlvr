@@ -7,6 +7,7 @@ import uuid
 from . import VERSION
 from .common import below, digest, files, need, paths, read, sha, verify_files, write
 from .scheduler import render_pbs
+from .save_policy import POLICY, training_config, check_request
 
 AUDIT_SHA = "59fddccb464acba7b2f58ed6113ca44fc74ea6af9e3a5ec65a54706b41d3fe8a"
 MANAGER_SHA = "f132242b728458748e9f0cf0b60375e2f2a4ea420c5b035e85054bfa8163a3b8"
@@ -114,7 +115,8 @@ def prepare(root, kind, operation):
     plan = dict(version=VERSION, kind=kind, root=str(p["root"]), operation=operation,
                 old_state=inspected["state"], old_request=old, acceptance=inspected["acceptance"],
                 root_files=roots, template=str(temp), template_files=files(temp),
-                single_lineage=uuid.uuid4().hex, candidate_lineage=uuid.uuid4().hex)
+                single_lineage=uuid.uuid4().hex, candidate_lineage=uuid.uuid4().hex,
+                training_policy=dict(POLICY))
     write(planfile, plan)
     return plan
 
@@ -153,13 +155,15 @@ def make_job(plan, role, nodes, authority, deadline):
     (folder / "node.sh").write_text(node)
     job_name = "0390_d4db_cont" if kind == "domain" else "0390_d4r_cont"
     (folder / "stage.pbs").write_text(render_pbs(root, folder, nodes, job_name))
-    cfg = topology_config(old["config"], nodes)
+    # Legacy random requests said 25 while the launcher actually applied 5.
+    # Preserve the established effective policy, not that stale request value.
+    cfg = topology_config(training_config(old["config"]), nodes)
     # Remaining topology-derived config values are set per phase, never batch/sampler changes.
     contract = dict(version=VERSION, kind=kind, operation=plan["operation"], lineage=lineage,
                     role=role, config=cfg, source=authority, bound_check=plan["acceptance"]["identity"],
                     base_config=old["info"]["base_config"], data_dir=old["data_dir"], sampling=old.get("sampling"),
                     template_digest=digest(plan["template_files"]), root_files=plan["root_files"],
-                    snapshot_files=files(folder))
+                    snapshot_files=files(folder), training_policy=dict(POLICY))
     if candidate and plan.get("opportunity_id"):
         contract["opportunity_id"] = plan["opportunity_id"]
     request = dict(version=VERSION, root=str(root), kind=kind, job_dir=str(folder),
@@ -167,7 +171,8 @@ def make_job(plan, role, nodes, authority, deadline):
                    stage="train", expected_nodes=nodes, job_name=job_name, lineage=lineage, role=role,
                    deadline_utc=deadline, contract=contract, identity=digest(contract), config=cfg,
                    data_dir=old["data_dir"], sampling=old.get("sampling"),
-                   reward=dict(import_path="pkg://" + reward_name), source=authority)
+                   reward=dict(import_path="pkg://" + reward_name), source=authority,
+                   training_policy=dict(POLICY))
     if contract.get("opportunity_id"):
         request["opportunity_id"] = contract["opportunity_id"]
     write(folder / "request.json", request)
@@ -179,6 +184,8 @@ def validate_request(path):
     r = read(path)
     need(path == Path(r["job_dir"]) / "request.json", "Wrong request path")
     need(digest(r["contract"]) == r["identity"] and r["config"] == r["contract"]["config"], "Request contract changed")
+    need(r.get("training_policy") == r["contract"].get("training_policy"), "Training policy contract changed")
+    check_request(r)
     for key in ("kind", "role", "lineage", "source"):
         need(r[key] == r["contract"][key], "Request field changed: " + key)
     need(r.get("opportunity_id") == r["contract"].get("opportunity_id"), "Opportunity identity changed")

@@ -54,6 +54,13 @@ class Controller:
         if role not in pending:
             if role == "formal":
                 record = authoritative_checkpoint(source, self.kind)
+                if self.plan.get("training_policy"):
+                    from .evaluation import import_legacy
+                    active = self.state.get("active")
+                    # This path is reached only after terminal observation/stage
+                    # fencing. Pins can be supplied by a controlled restart.
+                    if active and "record" not in source:
+                        import_legacy(active, record)
                 pinned = ck.pin(record, self.control / "resume_sources" / uuid.uuid4().hex)
                 source = dict(record=pinned, lineage=(self.state["authority"].get("lineage")
                              or self.plan["single_lineage"]))
@@ -266,6 +273,9 @@ class Controller:
 
     def tick(self):
         self.reconcile_commit()
+        from .checkpoint_restart import tick as restart_tick
+        if restart_tick(self):
+            return
         from .opportunities import Opportunities
         opportunities = Opportunities(self)
         if opportunities.owns_tick():
