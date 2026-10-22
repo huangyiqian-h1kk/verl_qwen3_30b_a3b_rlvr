@@ -79,7 +79,9 @@ def select_source(r, name):
     folder = Path(r["job_dir"])
     if name == "A":
         state = read(Path(r["control_dir"]) / "state.json")
-        need(state["operation"] == r["contract"]["operation"] and not state.get("promoted")
+        from .opportunities import authorized
+        admitted = authorized(state, r) if r.get("opportunity_id") else not state.get("promoted")
+        need(state["operation"] == r["contract"]["operation"] and admitted
              and not state.get("handoff_failed") and not expired(state["deadline_utc"]), "Candidate is no longer authorized")
         # Current formal single, captured at actual startup. A queued candidate
         # must not resume the stale checkpoint that existed at submission time.

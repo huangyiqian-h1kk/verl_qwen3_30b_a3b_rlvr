@@ -26,6 +26,8 @@ def capture_runtime_binding(plan):
     """Attest imported controller modules in the new owner, before PBS actions."""
     template = Path(plan["template"]).resolve()
     verify_files(template, plan["template_files"])
+    if plan.get("opportunistic"):
+        from . import opportunities  # bind the admission/handoff code before any PBS action
     modules = {}
     for name, module in tuple(sys.modules.items()):
         if name == "d4_training_continuation" or name.startswith("d4_training_continuation."):
@@ -63,7 +65,8 @@ def runtime_status(root, kind, state=None):
              "runtime_binding_plan_mismatch")
         modules = binding.get("modules", {})
         need(isinstance(modules, dict), "runtime_binding_modules_invalid")
-        for name in ("cli", "scheduler"):
+        required = ("cli", "scheduler", "controller", "opportunities") if plan.get("opportunistic") else ("cli", "scheduler")
+        for name in required:
             relative = "runtime/d4_training_continuation/" + name + ".py"
             expected = dict(path=str(template / relative), sha256=plan["template_files"][relative])
             need(modules.get("d4_training_continuation." + name) == expected,
@@ -103,10 +106,13 @@ def status(root, query=True):
         keys = ("version", "operation", "kind", "phase", "promoted", "handoff_failed", "failure_reason",
                 "controller_status", "pid", "host", "heartbeat_utc", "deadline_utc", "previous_deadline_utc",
                 "extension_hours", "migration_complete", "candidate_admitted", "active", "candidate",
-                "old_candidate", "old_candidate_retired", "pending", "retry_selection", "training_blocked", "last_error", "wait_reason")
+                "old_candidate", "old_candidate_retired", "pending", "retry_selection", "training_blocked", "last_error", "wait_reason",
+                "opportunity", "opportunity_poll")
         result = {k: state.get(k) for k in keys}
         result["controller_active"] = active(p["control"] / "controller.lock")
         result["controller_runtime"] = runtime_status(root, kind, state)
+        plan = read(p["control"] / "operations" / state["operation"] / "plan.json")
+        result["opportunistic_policy"] = plan.get("opportunistic")
         result["deadline_beijing"] = datetime.fromisoformat(state["deadline_utc"]).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
         if query:
             result["pbs"] = {}
@@ -279,7 +285,8 @@ def daemon(root, kind):
                     # the original single owner remains alive and visible.
                     controller.save(last_error=type(e).__name__ + ": " + str(e), heartbeat_utc=now())
                     controller.event("ERROR", error=str(e))
-                    if not controller.state.get("promoted") and controller.state.get("candidate"):
+                    if (not controller.state.get("promoted") and controller.state.get("candidate")
+                            and not controller.state.get("opportunity")):
                         controller.fail_candidate("Qualification/ownership error: " + str(e))
                 monitor = read(p["monitor"] / "state.json")
                 monitor.update(status="RUNNING", managed_by="d4_training_continuation", pid=os.getpid(),
@@ -305,7 +312,7 @@ def daemon(root, kind):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "repair-cancellation", "_run", "self-test"))
+    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "repair-cancellation", "enable-opportunistic", "_run", "self-test"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--operation")
     parser.add_argument("--extra-hours", type=float, default=24)
@@ -323,6 +330,9 @@ def main(argv=None):
     if args.action in ("apply", "extend"):
         need(args.operation, "A stable --operation ID is required")
         result = globals()[args.action](args.root, args.operation, args.extra_hours)
+    elif args.action == "enable-opportunistic":
+        from .opportunity_upgrade import enable
+        result = enable(args.root)
     elif args.action == "repair-cancellation":
         need(args.kind is not None, "repair-cancellation requires --kind random or --kind domain")
         from .cancellation_repair import repair
@@ -336,6 +346,8 @@ def main(argv=None):
     else:
         result = globals()[args.action](args.root)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.action == "enable-opportunistic" and result["status"] != "OPPORTUNISTIC_MONITORS_RUNNING":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

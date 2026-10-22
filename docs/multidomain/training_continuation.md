@@ -10,6 +10,14 @@ does not disable random, and random does not wait for domain to succeed.
 
 ## Operational contract
 
+The table below is the original default policy. The opt-in
+[`enable-opportunistic` upgrade](training_opportunities.md) additionally observes
+running singles and admits a fresh two-node candidate after two capacity checks.
+It can retry an administrator-interrupted qualification after cooldown; actual
+application/verification failures remain blocked. Existing duals and the formal
+termination/retry policy are preserved. Each new attempt has a separate journal
+and commit rather than overwriting the original handoff record.
+
 | Situation | Action |
 | --- | --- |
 | Initial migration | Adopt both existing singles; extend each deadline once by 24 hours; retire only the verified old candidates |

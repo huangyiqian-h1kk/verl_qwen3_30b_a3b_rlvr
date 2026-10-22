@@ -89,7 +89,7 @@ class Controller:
                   rollback_required=bool(self.state.get("single_fenced")))
         self.event("HANDOFF_FAILED_SINGLE_ONLY", reason=reason)
 
-    def monitor_formal(self, allow_submit=True):
+    def monitor_formal(self, allow_submit=True, force_single=False):
         s = self.state
         active = s.get("active")
         if active:
@@ -113,8 +113,9 @@ class Controller:
             return
         # No cancellation/requeue when an active job is Q/H/R. Only reached after
         # a positively confirmed terminal job, or an intentional rollback.
-        capacity = self.pbs.capacity() if s.get("promoted") else {}
-        nodes, reason = choose_nodes(s.get("promoted", False), capacity)
+        adaptive = s.get("promoted", False) and not force_single
+        capacity = self.pbs.capacity() if adaptive else {}
+        nodes, reason = choose_nodes(adaptive, capacity)
         self.save(retry_selection=dict(nodes=nodes, reason=reason, capacity=capacity, at_utc=now()))
         self.submit("formal", nodes, s["authority"])
         if active and Path(active["folder"]).parent == self.p["run"] / "jobs":
@@ -230,8 +231,9 @@ class Controller:
                 self.save(cleanup_error=str(e))
                 self.event("FALLBACK_CLEANUP_DEFERRED", error=str(e))
 
-    def retire_fallback(self, c):
-        if not self.state.get("fallback_retired"):
+    def retire_fallback(self, c, scope=None):
+        retired = (Path(scope) / "fallback_retired.json").exists() if scope else self.state.get("fallback_retired")
+        if not retired:
             previous = c.get("previous_authority")
             if previous:
                 need(terminal(self.pbs.observe(c["previous_job"])), "Previous writer is not terminal; retain fallback")
@@ -254,12 +256,20 @@ class Controller:
                             need(read(item / ck.MARKER)["lineage"] == previous["lineage"], "Foreign previous checkpoint")
                         self.event("RETIRE_PREVIOUS_CHECKPOINT", path=str(item), step=step)
                         shutil.rmtree(item)
-            for source in (self.control / "fallback").glob("*/source.json"):
+            for source in ((Path(scope) if scope else self.control) / "fallback").glob("*/source.json"):
                 ck.remove_pin(source.parent)
-            self.save(fallback_retired=True, cleanup_error=None)
+            if scope:
+                write(Path(scope) / "fallback_retired.json", dict(at_utc=now(), identity=c["identity"]))
+                self.save(cleanup_error=None)
+            else:
+                self.save(fallback_retired=True, cleanup_error=None)
 
     def tick(self):
         self.reconcile_commit()
+        from .opportunities import Opportunities
+        opportunities = Opportunities(self)
+        if opportunities.owns_tick():
+            return opportunities.tick()
         s = self.state
         deadline = expired(s["deadline_utc"])
         # Complete an acknowledged submission transaction before considering a

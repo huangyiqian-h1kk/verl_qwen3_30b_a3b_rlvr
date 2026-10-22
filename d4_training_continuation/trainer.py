@@ -162,7 +162,13 @@ def trainer_class(base):
         def wait_for(self, path):
             while not Path(path).exists():
                 state = read(Path(self.cont_req["control_dir"]) / "state.json")
-                need(not state.get("handoff_failed") and not expired(state["deadline_utc"]),
+                if self.cont_req.get("opportunity_id"):
+                    from .opportunities import authorized
+                    need(authorized(state, self.cont_req, allow_committed=True), "Opportunity is no longer authorized")
+                committed = (self.cont_req.get("opportunity_id")
+                             and state.get("opportunity", {}).get("id") == self.cont_req["opportunity_id"]
+                             and state["opportunity"]["phase"] == "COMMITTED")
+                need(committed or (not state.get("handoff_failed") and not expired(state["deadline_utc"])),
                      "Handoff expired or failed; candidate will not continue without release")
                 time.sleep(2)
             result = read(path)

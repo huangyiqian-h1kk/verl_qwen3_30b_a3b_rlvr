@@ -160,12 +160,16 @@ def make_job(plan, role, nodes, authority, deadline):
                     base_config=old["info"]["base_config"], data_dir=old["data_dir"], sampling=old.get("sampling"),
                     template_digest=digest(plan["template_files"]), root_files=plan["root_files"],
                     snapshot_files=files(folder))
+    if candidate and plan.get("opportunity_id"):
+        contract["opportunity_id"] = plan["opportunity_id"]
     request = dict(version=VERSION, root=str(root), kind=kind, job_dir=str(folder),
                    run_dir=str(p["run"] / "lineages" / lineage), control_dir=str(p["control"]),
                    stage="train", expected_nodes=nodes, job_name=job_name, lineage=lineage, role=role,
                    deadline_utc=deadline, contract=contract, identity=digest(contract), config=cfg,
                    data_dir=old["data_dir"], sampling=old.get("sampling"),
                    reward=dict(import_path="pkg://" + reward_name), source=authority)
+    if contract.get("opportunity_id"):
+        request["opportunity_id"] = contract["opportunity_id"]
     write(folder / "request.json", request)
     return dict(folder=str(folder), job_name=job_name)
 
@@ -177,6 +181,7 @@ def validate_request(path):
     need(digest(r["contract"]) == r["identity"] and r["config"] == r["contract"]["config"], "Request contract changed")
     for key in ("kind", "role", "lineage", "source"):
         need(r[key] == r["contract"][key], "Request field changed: " + key)
+    need(r.get("opportunity_id") == r["contract"].get("opportunity_id"), "Opportunity identity changed")
     for key in ("data_dir", "sampling"):
         need(r[key] == r["contract"][key], "Dataset/sampling contract changed: " + key)
     need(r["expected_nodes"] in (1, 2) and r["expected_nodes"] == r["config"]["training"]["train_nodes"], "Request topology changed")

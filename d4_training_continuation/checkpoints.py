@@ -89,14 +89,27 @@ def pin(record, destination):
     manifest = destination / "source.json"
     if manifest.exists():
         existing = validate(read(manifest))
-        need(existing["step"] == record["step"] and existing["files"] == record["files"],
+        need(all(existing.get(k) == record.get(k) for k in ("step", "world_size", "lineage", "files")),
              "Pin already belongs to another checkpoint")
         return existing
-    validate(record)
     destination.mkdir(parents=True, exist_ok=True)
+    intent = destination / "pin_intent.json"
+    target = destination / ("global_step_" + str(record["step"]))
+    if intent.exists():
+        need(read(intent) == record, "Pin intent belongs to another checkpoint")
+        if target.exists():
+            # Recover a crash between the atomic directory rename and source.json.
+            # The original writer may already have pruned its copy of this save.
+            pinned = dict(record, path=str(target), origin=record["path"], pinned_utc=now())
+            validate(pinned)
+            write(manifest, pinned)
+            return pinned
+    else:
+        need(not target.exists(), "Unjournaled pin exists")
+        write(intent, record)
+    validate(record)
     temp = destination / (".linking_" + uuid.uuid4().hex)
     temp.mkdir()
-    target = destination / ("global_step_" + str(record["step"]))
     try:
         names = list(record["files"])
         if record.get("lineage"):
