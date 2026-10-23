@@ -89,7 +89,7 @@ def select_source(r, name):
         source = authoritative_checkpoint(state["authority"], r["kind"])
         need(source["world_size"] == 8 and source["step"] + 5 <= TOTAL_STEPS, "Five qualification steps unavailable")
     elif name == "train":
-        need(r["role"] == "formal", "Wrong formal execution role")
+        need(r["role"] in ("formal", "evaluation"), "Wrong execution role")
         source = authoritative_checkpoint(r["source"], r["kind"])
     else:
         names = [x[0] for x in PHASES]
@@ -119,7 +119,8 @@ def phase(path, name):
     target_world = r["expected_nodes"] * 8 if name == "train" else dict((n, w) for n, _, w in PHASES)[name]
     if name != "train":
         need(resume["world_size"] == dict((n, w) for n, w, _ in PHASES)[name], "Wrong source world for phase")
-    need(0 < resume["step"] < TOTAL_STEPS, "No remaining training steps")
+    need(0 < resume["step"] <= TOTAL_STEPS and (name == "train" or resume["step"] < TOTAL_STEPS),
+         "Invalid continuation step")
     execution = dict(phase=name, token=uuid.uuid4().hex, identity=r["identity"], driver_pid=os.getpid(),
                      execution_id=read(folder / "allocation.json")["execution_id"],
                      source_world=resume["world_size"], target_world=target_world, source_step=resume["step"])
@@ -133,9 +134,14 @@ def phase(path, name):
         from .save_policy import POLICY
         need(cfg.trainer.save_freq == POLICY["save_freq"] and cfg.trainer.test_freq == POLICY["test_freq"],
              "Composed runtime lost the save5/eval25 policy")
-    cfg.trainer.val_only = False
-    cfg.trainer.val_before_train = bool(r.get("training_policy") and
-                                       evaluation.due(resume["step"], cfg.trainer.test_freq))
+    cfg.trainer.val_only = r["role"] == "evaluation" or resume["step"] == TOTAL_STEPS
+    if r["role"] == "evaluation":
+        # A historical point must not append a lower step into a live training
+        # tracking run. Console metrics plus checkpoint-bound receipts are kept.
+        cfg.trainer.logger = ["console"]
+        cfg.trainer.experiment_name = f"d4-{r['kind']}-validation-{resume['step']}"
+    cfg.trainer.val_before_train = bool(cfg.trainer.val_only or (r.get("training_policy") and
+                                       evaluation.due(resume["step"], cfg.trainer.test_freq)))
     cfg.trainer.max_actor_ckpt_to_keep = None
     cfg.trainer.del_local_ckpt_after_load = False
     cfg.trainer.resume_mode = "resume_path"
@@ -219,6 +225,16 @@ def run_trainer(config, request, phase_dir, resume, world):
                     return
             finally:
                 trainer._shutdown_dump_executor()
+            if config.trainer.val_only:
+                proof = read(phase_dir / f"validation_{resume['step']}.json")
+                need(trainer.global_steps == resume["step"] and trainer.cont_pending is None
+                     and trainer.cont_saved is None and proof["status"] == "PASS",
+                     "Evaluation-only execution changed training state")
+                ck.validate(resume)
+                write(phase_dir / "result.json", dict(status="PASS", evaluated_step=resume["step"],
+                      completed_step=resume["step"],
+                      optimizer_updates=0, checkpoints_written=0, validation=proof))
+                return
             need((phase_dir / "step_468.json").is_file(), "Training ended before the full step budget")
             write(phase_dir / "result.json", dict(status="PASS", completed_step=468))
     run_ppo(config, ContinuationRunner)

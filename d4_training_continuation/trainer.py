@@ -91,6 +91,7 @@ def trainer_class(base):
             return super()._get_gen_batch(batch)
 
         def _update_actor(self, batch):
+            need(self.cont_req["role"] != "evaluation", "Actor updates are forbidden in evaluation-only jobs")
             from d4_two_node_resumefix.trainer import summarize_batch
             summary = summarize_batch(batch)
             if self.cont_plan is not None:
@@ -130,13 +131,15 @@ def trainer_class(base):
             saved = torch.load(Path(source["path"]) / "data.pt", weights_only=False)
             if not boundary:
                 need(state_digest(saved) == state_digest(self.train_dataloader.state_dict()), "Dataloader state differs")
-            need(not boundary or self.cont_plan is None, "Unexpected domain epoch boundary")
+            need(not boundary or self.cont_plan is None or self.config.trainer.val_only,
+                 "Unexpected domain epoch boundary")
             write(self.cont_phase / "resume.json", dict(status="PASS", step=self.global_steps,
                   dataloader_restored=not boundary, epoch_boundary=boundary,
                   epoch_boundary_policy="pinned_verl_restart_exhausted_iterator" if boundary else None,
                   sampling_sha256=self.cont_plan.metadata()["plan_sha256"] if self.cont_plan is not None else None))
 
         def _save_checkpoint(self):
+            need(self.cont_req["role"] != "evaluation", "Checkpoint writes are forbidden in evaluation-only jobs")
             step = self.global_steps
             if self.cont_saved == step:
                 return

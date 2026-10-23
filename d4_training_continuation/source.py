@@ -125,6 +125,7 @@ def make_job(plan, role, nodes, authority, deadline):
     root, kind = Path(plan["root"]), plan["kind"]
     p = paths(root, kind)
     candidate = role == "candidate"
+    need(role in ("candidate", "formal", "evaluation"), "Unsupported execution role")
     lineage = plan["candidate_lineage"] if candidate else authority["lineage"]
     need(lineage, "Formal new job requires an explicit lineage")
     folder = p["run"] / "jobs" / (role + "_" + uuid.uuid4().hex)
@@ -154,6 +155,8 @@ def make_job(plan, role, nodes, authority, deadline):
     node = node.replace(original, '"$MD_PYTHON" -I ' + shlex.quote(str(folder / "entry.py")) + ' execute --request "$MD_REQUEST"')
     (folder / "node.sh").write_text(node)
     job_name = "0390_d4db_cont" if kind == "domain" else "0390_d4r_cont"
+    if role == "evaluation":
+        job_name = "0390_d4_val"
     (folder / "stage.pbs").write_text(render_pbs(root, folder, nodes, job_name))
     # Legacy random requests said 25 while the launcher actually applied 5.
     # Preserve the established effective policy, not that stale request value.
@@ -167,7 +170,7 @@ def make_job(plan, role, nodes, authority, deadline):
     if candidate and plan.get("opportunity_id"):
         contract["opportunity_id"] = plan["opportunity_id"]
     request = dict(version=VERSION, root=str(root), kind=kind, job_dir=str(folder),
-                   run_dir=str(p["run"] / "lineages" / lineage), control_dir=str(p["control"]),
+                   run_dir=str(folder / "evaluation" if role == "evaluation" else p["run"] / "lineages" / lineage), control_dir=str(p["control"]),
                    stage="train", expected_nodes=nodes, job_name=job_name, lineage=lineage, role=role,
                    deadline_utc=deadline, contract=contract, identity=digest(contract), config=cfg,
                    data_dir=old["data_dir"], sampling=old.get("sampling"),
@@ -175,6 +178,13 @@ def make_job(plan, role, nodes, authority, deadline):
                    training_policy=dict(POLICY))
     if contract.get("opportunity_id"):
         request["opportunity_id"] = contract["opportunity_id"]
+    if plan.get("validation_policy"):
+        from .validation_journal import POLICY as VALIDATION_POLICY
+        from .evaluation import semantics
+        need(plan["validation_policy"] == VALIDATION_POLICY, "Unknown validation plan")
+        request["validation_policy"] = contract["validation_policy"] = dict(VALIDATION_POLICY)
+        request["validation_semantics"] = contract["validation_semantics"] = semantics(request)
+        request["identity"] = digest(contract)
     write(folder / "request.json", request)
     return dict(folder=str(folder), job_name=job_name)
 
@@ -185,6 +195,8 @@ def validate_request(path):
     need(path == Path(r["job_dir"]) / "request.json", "Wrong request path")
     need(digest(r["contract"]) == r["identity"] and r["config"] == r["contract"]["config"], "Request contract changed")
     need(r.get("training_policy") == r["contract"].get("training_policy"), "Training policy contract changed")
+    for key in ("validation_policy", "validation_semantics"):
+        need(r.get(key) == r["contract"].get(key), "Validation contract changed: " + key)
     check_request(r)
     for key in ("kind", "role", "lineage", "source"):
         need(r[key] == r["contract"][key], "Request field changed: " + key)
@@ -193,8 +205,17 @@ def validate_request(path):
         need(r[key] == r["contract"][key], "Dataset/sampling contract changed: " + key)
     need(r["expected_nodes"] in (1, 2) and r["expected_nodes"] == r["config"]["training"]["train_nodes"], "Request topology changed")
     p = paths(r["root"], r["kind"])
-    need(path.parent.parent == p["run"] / "jobs" and Path(r["run_dir"]) == p["run"] / "lineages" / r["lineage"]
+    target = path.parent / "evaluation" if r["role"] == "evaluation" else p["run"] / "lineages" / r["lineage"]
+    need(r["role"] in ("formal", "candidate", "evaluation"), "Unknown execution role")
+    if r["role"] == "evaluation":
+        need(r.get("validation_policy") and r["source"].get("record"), "Unbound evaluation-only request")
+    need(path.parent.parent == p["run"] / "jobs" and Path(r["run_dir"]) == target
          and Path(r["control_dir"]) == p["control"], "Request run/control path changed")
     verify_files(path.parent, r["contract"]["snapshot_files"])
     verify_files(r["root"], r["contract"]["root_files"])
+    if r.get("validation_policy"):
+        from .validation_journal import POLICY as VALIDATION_POLICY
+        from .evaluation import semantics
+        need(r["validation_policy"] == VALIDATION_POLICY and r["validation_semantics"] == semantics(r),
+             "Validation semantics changed")
     return r

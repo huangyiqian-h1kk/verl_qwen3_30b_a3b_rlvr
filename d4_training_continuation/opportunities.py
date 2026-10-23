@@ -284,6 +284,11 @@ class Opportunities:
         return 0, priority
 
     def poll(self):
+        from .checkpoint_restart import DONE
+        restart = self.s.get("checkpoint_restart")
+        if restart and restart["phase"] not in DONE:
+            self.c.save(opportunity_poll=dict(at_utc=now(), consecutive=0, reason="checkpoint_restart_pending"))
+            return
         previous = self.s.get("opportunity_poll") or {}
         if previous.get("at_utc") and seconds_since(previous["at_utc"]) < self.policy["poll_seconds"]:
             return

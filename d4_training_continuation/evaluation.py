@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import uuid
 from . import checkpoints as ck
-from .common import below, digest, need, now, read, sha, write
+from .common import below, digest, locked, need, now, read, sha, write
 
 VERSION = "checkpoint-validation-v1"
 DOMAINS = ("math", "if", "conversational_pivot", "logic_algorithmic")
@@ -31,6 +31,8 @@ def checkpoint_key(record):
 
 
 def protocol(request):
+    if request.get("validation_semantics"):
+        return digest(request["validation_semantics"])
     config = request["config"]
     # Allocation/save frequency are deliberately absent; validation semantics
     # and the actual frozen reward source must still agree across attempts.
@@ -40,6 +42,28 @@ def protocol(request):
                        config={k: config.get(k) for k in ("data", "domains", "verifiers", "seed", "verl_commit")},
                        validation={k: config["training"].get(k) for k in ("model_path", "val_n", "val_temperature")},
                        reward=reward))
+
+
+def semantics(request):
+    """Stable scoring identity across frozen job directories, not across setups."""
+    config = request["config"]
+    folder = Path(request["job_dir"])
+    reward = {}
+    for relative, checksum in request["contract"]["snapshot_files"].items():
+        if relative.startswith("md_reward") and relative.endswith(".py"):
+            source = folder / relative
+            need(sha(source) == checksum, "Reward snapshot changed")
+            # Only the bound diagnostics directory changes on each new job.
+            reward[relative] = digest(source.read_text().replace(str(folder / "math_diagnostics"), "<diagnostics>"))
+        elif relative.startswith("runtime/d4_db_mathfix/"):
+            reward[relative] = checksum
+    need(reward, "Missing bound verifier snapshot")
+    return dict(kind=request["kind"], data_dir=request["data_dir"],
+                validation_parquet_sha256=sha(Path(request["data_dir"]) / "validation.parquet"),
+                config={k: config.get(k) for k in ("data", "domains", "verifiers", "seed", "verl_commit")},
+                validation={k: config["training"].get(k) for k in ("model_path", "val_n", "val_temperature")},
+                reward=reward, infrastructure={p: v for p, v in request["contract"]["root_files"].items()
+                    if p.startswith(("multidomain/", "config/multidomain/"))})
 
 
 def receipt_path(request, record):
@@ -67,7 +91,7 @@ def outputs(path, step):
     return dict(path=str(path), rows=count, sha256=sha(path))
 
 
-def completed(request, record):
+def completed(request, record, runtime=None):
     path = receipt_path(request, record)
     if not path.exists():
         return None
@@ -78,6 +102,12 @@ def completed(request, record):
     numeric_metrics(receipt["metrics"])
     artifact = receipt["outputs"]
     need(outputs(artifact["path"], record["step"]) == artifact, "Completed evaluation output changed")
+    proof = receipt.get("origin", {}).get("journal")
+    if proof:
+        manifest = read(Path(proof["path"]) / "manifest.json")
+        need(digest(manifest) == proof["manifest_sha256"], "Validation manifest changed")
+        if runtime is not None:
+            need(manifest["runtime"] == runtime, "Completed validation runtime/dataset changed")
     return receipt
 
 
@@ -91,7 +121,7 @@ def publish(request, record, metrics, output, origin):
     return receipt
 
 
-def import_legacy(job, record):
+def import_legacy(job, record, probe=False):
     """Called only after the old writer is fenced; absence means replay, not PASS."""
     if not job:
         return False
@@ -106,7 +136,11 @@ def import_legacy(job, record):
     need(request["identity"] == digest(request["contract"])
          and request["config"] == request["contract"]["config"], "Legacy evaluation request changed")
     below(record["path"], Path(request["run_dir"]) / "checkpoints")
-    if completed(request, record):
+    previous = completed(request, record)
+    if previous:
+        if not probe and not request.get("validation_semantics") and request["contract"].get("root_files"):
+            publish(dict(request, validation_semantics=semantics(request)), record, previous["metrics"],
+                    previous["outputs"]["path"], previous["origin"])
         return True
     output = Path(request["run_dir"]) / "generations/train" / (str(record["step"]) + ".jsonl")
     log = folder / "pbs.log"
@@ -130,8 +164,15 @@ def import_legacy(job, record):
         numeric_metrics(metrics)
     except (OSError, ValueError, KeyError, RuntimeError):
         return False
-    publish(request, record, metrics, output, dict(mode="legacy-complete", job=job,
-            log=str(log), metrics_line_digest=evidence))
+    if not probe:
+        publish(request, record, metrics, output, dict(mode="legacy-complete", job=job,
+                log=str(log), metrics_line_digest=evidence))
+        if request["contract"].get("root_files"):
+            # Bridge an old completed evaluation to the path-independent
+            # semantics used by new jobs. No incomplete output is imported.
+            bound = dict(request, validation_semantics=semantics(request))
+            publish(bound, record, metrics, output, dict(mode="legacy-complete", job=job,
+                    log=str(log), metrics_line_digest=evidence))
     return True
 
 
@@ -142,7 +183,12 @@ def validate(trainer, evaluate, merged=False):
     record = trainer.cont_resume if step == trainer.cont_resume["step"] else ck.latest(request["run_dir"], request["lineage"])
     need(record is not None and record["step"] == step, "Evaluation has no matching full checkpoint")
     ck.validate(record)
-    receipt = completed(request, record)
+    actual_runtime = None
+    if request.get("validation_policy"):
+        from .validation_journal import POLICY, runtime_contract
+        need(request["validation_policy"] == POLICY, "Unknown validation persistence policy")
+        actual_runtime = runtime_contract(trainer)
+    receipt = completed(request, record, runtime=actual_runtime)
     reused = receipt is not None
     if receipt is None:
         output = Path(trainer.config.trainer.validation_data_dir) / (str(step) + ".jsonl")
@@ -150,7 +196,21 @@ def validate(trainer, evaluate, merged=False):
             archive = output.parent / "replay_archive"
             archive.mkdir(exist_ok=True)
             output.rename(archive / (output.stem + "_" + uuid.uuid4().hex + ".jsonl"))
-        metrics = evaluate(merged=False)
+        journal_proof = None
+        if request.get("validation_policy"):
+            from .validation_journal import Journal, instrument
+            directory = Path(request["control_dir"]) / "validation_batches" / (
+                checkpoint_key(record) + "_" + protocol(request))
+            with locked(directory / "writer.lock"):
+                trainer.cont_journal = Journal(directory, dict(checkpoint=checkpoint_key(record),
+                    protocol=protocol(request)), actual_runtime)
+                try:
+                    metrics = instrument(evaluate)(merged=False)
+                    journal_proof = trainer.cont_journal.finish()
+                finally:
+                    del trainer.cont_journal
+        else:
+            metrics = evaluate(merged=False)
         # Upstream dumps validation asynchronously. Never publish PASS before
         # every output write finishes and the full 1,006-row artifact is checked.
         for future in trainer._dump_futures:
@@ -158,7 +218,8 @@ def validate(trainer, evaluate, merged=False):
         trainer._dump_futures.clear()
         need(trainer.global_steps == step, "Validation advanced the training step")
         receipt = publish(request, record, metrics, output,
-                          dict(mode="evaluation", job_dir=request["job_dir"], phase=trainer.cont_phase.name))
+                          dict(mode="evaluation", job_dir=request["job_dir"], phase=trainer.cont_phase.name,
+                               journal=journal_proof))
     write(trainer.cont_phase / ("validation_" + str(step) + ".json"),
           dict(status="PASS", step=step, reused=reused, receipt=str(receipt_path(request, record)),
                receipt_sha256=sha(receipt_path(request, record)), metrics=receipt["metrics"], at_utc=now()))

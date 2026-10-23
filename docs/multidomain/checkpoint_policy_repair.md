@@ -1,5 +1,11 @@
 # Random continuation: restore save5/eval25 and resume interrupted validation
 
+For the combined 2026-10-23 deployment (historical validation backfill, durable
+validation batches, both owner upgrades, opportunistic handoff and +24 hours),
+use [validation_recovery.md](validation_recovery.md). The standalone workflow
+below is retained for the earlier random-only repair; it does not perform that
+combined deployment.
+
 The legacy random request contained `save_freq=25`, but its recovery launcher
 overrode the effective setting to 5. Continuation copied the request instead of
 the effective setting. Both continuation singles and duals consequently saved

@@ -45,6 +45,7 @@ def stable(state):
 def prepare(root, kind="random"):
     need(kind == "random", "This deployed repair is scoped to random; domain already saves every 5 steps")
     from .opportunity_upgrade import BASELINE, LEGACY
+    from .validation_upgrade import PUBLISHED_SAVE5
     p = paths(root, kind)
     state = read(p["control"] / "state.json")
     need(state["version"] == VERSION, "Unsupported continuation owner version")
@@ -63,7 +64,7 @@ def prepare(root, kind="random"):
     for relative, checksum in original["template_files"].items():
         if relative.startswith(PREFIX):
             name = relative[len(PREFIX):]
-            allowed = {BASELINE.get(name), PREVIOUS.get(name), replacement.get(relative)} | LEGACY.get(name, set())
+            allowed = {BASELINE.get(name), PREVIOUS.get(name), PUBLISHED_SAVE5.get(name), replacement.get(relative)} | LEGACY.get(name, set())
             need(checksum is not None and checksum in allowed and relative in sources,
                  "Unsupported frozen continuation source: " + relative)
     manifest = dict(original["template_files"], **replacement)

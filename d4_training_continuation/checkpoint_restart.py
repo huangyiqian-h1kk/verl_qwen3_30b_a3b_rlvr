@@ -86,8 +86,18 @@ def tick(controller):
         if record["step"] < item["minimum_step"]:
             save(observed_checkpoint_step=record["step"], checked_utc=now())
             return False
+        if c.plan.get("validation_policy"):
+            from .evaluation import due, import_legacy, completed
+            request = read(Path(item["job"]["folder"]) / "request.json")
+            if due(record["step"], request["config"]["training"]["test_freq"]):
+                done = (completed(request, record) is not None if request.get("validation_policy")
+                        else import_legacy(item["job"], record, probe=True))
+                if not done:
+                    save(observed_checkpoint_step=record["step"], wait_reason="scheduled_validation_in_progress",
+                         checked_utc=now())
+                    return False
         need(record["step"] < 468, "Final checkpoint should finish its final evaluation")
-        save(phase="PINNING", checkpoint=record)
+        save(phase="PINNING", checkpoint=record, wait_reason=None)
     if item["phase"] == "PINNING":
         protected = ck.pin(item["checkpoint"], area / "before_cancel")
         save(phase="CANCELLING", protected=protected)

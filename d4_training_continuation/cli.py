@@ -30,6 +30,8 @@ def capture_runtime_binding(plan):
         from . import opportunities  # bind the admission/handoff code before any PBS action
     if plan.get("training_policy"):
         from . import checkpoint_restart, save_policy
+    if plan.get("validation_policy"):
+        from . import backfill, evaluation, validation_journal
     modules = {}
     for name, module in tuple(sys.modules.items()):
         if name == "d4_training_continuation" or name.startswith("d4_training_continuation."):
@@ -72,6 +74,8 @@ def runtime_status(root, kind, state=None):
             required += ["controller", "opportunities"]
         if plan.get("training_policy"):
             required += ["controller", "source", "save_policy", "checkpoint_restart"]
+        if plan.get("validation_policy"):
+            required += ["backfill", "evaluation", "validation_journal"]
         for name in required:
             relative = "runtime/d4_training_continuation/" + name + ".py"
             expected = dict(path=str(template / relative), sha256=plan["template_files"][relative])
@@ -120,13 +124,17 @@ def status(root, query=True):
         plan = read(p["control"] / "operations" / state["operation"] / "plan.json")
         result["opportunistic_policy"] = plan.get("opportunistic")
         result["training_policy"] = plan.get("training_policy")
+        result["validation_policy"] = plan.get("validation_policy")
+        if plan.get("validation_backfill"):
+            result["validation_backfill"] = read(Path(plan["validation_backfill"]) / "state.json")
         if state.get("active"):
             try:
                 request = read(Path(state["active"]["folder"]) / "request.json")
                 training = request["config"]["training"]
                 result["active_job_policy"] = dict(job_id=state["active"]["job_id"],
                     save_freq=training.get("save_freq"), test_freq=training.get("test_freq"),
-                    bound_policy=request.get("training_policy"), source="immutable_request_config")
+                    bound_policy=request.get("training_policy"), validation_policy=request.get("validation_policy"),
+                    source="immutable_request_config")
             except (OSError, KeyError, ValueError) as error:
                 result["active_job_policy"] = dict(read_error=str(error))
         result["deadline_beijing"] = datetime.fromisoformat(state["deadline_utc"]).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
@@ -304,6 +312,19 @@ def daemon(root, kind):
                     if (not controller.state.get("promoted") and controller.state.get("candidate")
                             and not controller.state.get("opportunity")):
                         controller.fail_candidate("Qualification/ownership error: " + str(e))
+                if kind == "domain" and controller.plan.get("validation_backfill"):
+                    try:
+                        from .backfill import tick as backfill_tick
+                        result = backfill_tick(controller.plan["validation_backfill"])
+                        controller.save(backfill_phase=result["phase"], backfill_error=None)
+                        if result["phase"] not in ("PASS", "BLOCKED", "EXPIRED"):
+                            from .common import expired
+                            if not expired(controller.state["deadline_utc"]):
+                                controller.save(monitoring_finished=False)
+                    except BlockingIOError:
+                        pass  # Foreground deployment is submitting the same campaign.
+                    except (OSError, RuntimeError, ValueError, KeyError) as error:
+                        controller.save(backfill_error=str(error))
                 monitor = read(p["monitor"] / "state.json")
                 monitor.update(status="RUNNING", managed_by="d4_training_continuation", pid=os.getpid(),
                                host=socket.gethostname(), deadline_utc=controller.state["deadline_utc"],
@@ -328,7 +349,7 @@ def daemon(root, kind):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "repair-cancellation", "repair-save-policy", "enable-opportunistic", "_run", "self-test"))
+    parser.add_argument("action", choices=("preflight", "apply", "status", "resume", "extend", "repair-cancellation", "repair-save-policy", "repair-validation", "enable-opportunistic", "_run", "self-test"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--operation")
     parser.add_argument("--extra-hours", type=float, default=24)
@@ -342,6 +363,8 @@ def main(argv=None):
         need(args.kind is not None, "Missing setup")
         return daemon(args.root, args.kind)
     if args.action == "self-test":
+        for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            os.environ[key] = "1"
         import unittest
         root = Path(__file__).resolve().parents[1]
         suite = unittest.defaultTestLoader.discover(str(root / "tests/multidomain"), pattern="test_training_continuation*.py")
@@ -350,6 +373,10 @@ def main(argv=None):
     if args.action in ("apply", "extend"):
         need(args.operation, "A stable --operation ID is required")
         result = globals()[args.action](args.root, args.operation, args.extra_hours)
+    elif args.action == "repair-validation":
+        need(args.operation, "A stable --operation ID is required")
+        from .validation_upgrade import deploy
+        result = deploy(args.root, args.operation, args.extra_hours)
     elif args.action == "enable-opportunistic":
         from .opportunity_upgrade import enable
         result = enable(args.root)
@@ -370,6 +397,8 @@ def main(argv=None):
     else:
         result = globals()[args.action](args.root)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.action == "repair-validation" and result["status"] != "RUNNING":
+        raise SystemExit(2)
     if args.action == "enable-opportunistic" and result["status"] != "OPPORTUNISTIC_MONITORS_RUNNING":
         raise SystemExit(2)
     if args.action == "repair-save-policy" and result["status"] != "SAVE_POLICY_MONITOR_RUNNING":

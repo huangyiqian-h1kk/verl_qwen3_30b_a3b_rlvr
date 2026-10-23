@@ -34,6 +34,7 @@ LEGACY = {"cli.py": {"27fdf7f11fe7fabefa00b9be42a8ef11e45ab36be416e87cf64c76afbe
 
 def prepare(root, kind):
     from .save_policy_upgrade import PREVIOUS
+    from .validation_upgrade import PUBLISHED_SAVE5
     p = paths(root, kind)
     state = read(p["control"] / "state.json")
     need(state["version"] == VERSION and state.get("migration_complete"), "Expected adopted continuation owner")
@@ -51,13 +52,13 @@ def prepare(root, kind):
         if not relative.startswith(PREFIX):
             continue
         name = relative[len(PREFIX):]
-        allowed = {BASELINE.get(name), PREVIOUS.get(name), replacement.get(relative)} | LEGACY.get(name, set())
+        allowed = {BASELINE.get(name), PREVIOUS.get(name), PUBLISHED_SAVE5.get(name), replacement.get(relative)} | LEGACY.get(name, set())
         need(checksum in allowed and checksum is not None and relative in sources,
              "Unsupported frozen continuation source: " + relative)
     manifest = dict(original["template_files"], **replacement)
     if original.get("opportunistic") == POLICY and original["template_files"] == manifest:
         return planfile, original, original
-    need(state["phase"] in ("ACTIVE", "SINGLE_ONLY"), "Finish the in-flight initial handoff before upgrading")
+    need(state["phase"] in ("ACTIVE", "SINGLE_ONLY", "EXPIRED", "DONE"), "Finish the in-flight initial handoff before upgrading")
     need(not state.get("pending") and not state.get("rollback_required"), "Resolve existing submission/rollback first")
     area = operation / "upgrades" / ("opportunities-" + digest(dict(files=manifest, policy=POLICY))[:16])
     target = area / "template"
