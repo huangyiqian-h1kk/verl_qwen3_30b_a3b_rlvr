@@ -22,6 +22,27 @@ KINDS = ("domain", "random")
 RUNTIME_BINDING = "frozen-controller-runtime-v1"
 
 
+def brief_backfill(state):
+    """Keep shard inventories in durable records, not thousands of status lines."""
+    result = dict(state)
+    result["sources"] = {kind: {key: cp.get(key) for key in ("step", "world_size", "lineage", "path")}
+                         for kind, cp in state.get("sources", {}).items()}
+    if state.get("observation"):
+        result["observation"] = {key: state["observation"].get(key) for key in (
+            "Job_Name", "queue", "job_state", "Exit_status", "comment", "resources_used")}
+    if state.get("result"):
+        result["result"] = {k: v for k, v in state["result"].items() if k != "evaluations"}
+        evaluations = {}
+        for kind, proof in state["result"].get("evaluations", {}).items():
+            row = {k: proof.get(k) for k in ("status", "evaluated_step", "optimizer_updates", "reused")}
+            validation = proof.get("validation") or {}
+            row["receipt"] = proof.get("receipt") or validation.get("receipt")
+            row["metrics"] = {k: v for k, v in validation.get("metrics", {}).items() if k.startswith("val-core/")}
+            evaluations[kind] = row
+        result["result"]["evaluations"] = evaluations
+    return result
+
+
 def capture_runtime_binding(plan):
     """Attest imported controller modules in the new owner, before PBS actions."""
     template = Path(plan["template"]).resolve()
@@ -126,7 +147,7 @@ def status(root, query=True):
         result["training_policy"] = plan.get("training_policy")
         result["validation_policy"] = plan.get("validation_policy")
         if plan.get("validation_backfill"):
-            result["validation_backfill"] = read(Path(plan["validation_backfill"]) / "state.json")
+            result["validation_backfill"] = brief_backfill(read(Path(plan["validation_backfill"]) / "state.json"))
         if state.get("active"):
             try:
                 request = read(Path(state["active"]["folder"]) / "request.json")
@@ -396,7 +417,12 @@ def main(argv=None):
         result = status(args.root)
     else:
         result = globals()[args.action](args.root)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    display = result
+    if args.action == "repair-validation":
+        display = dict(result)
+        display["protected_sources"] = brief_backfill({"sources": result.get("protected_sources", {})})["sources"]
+        display["backfill"] = brief_backfill(result["backfill"])
+    print(json.dumps(display, ensure_ascii=False, indent=2))
     if args.action == "repair-validation" and result["status"] != "RUNNING":
         raise SystemExit(2)
     if args.action == "enable-opportunistic" and result["status"] != "OPPORTUNISTIC_MONITORS_RUNNING":

@@ -28,7 +28,9 @@ BASELINE = {'__init__.py': 'a107d95b407454e8de1369501be73da50dd14d8240c9c5b83edd
  'worker.py': '4d10cd88fa55b60a852bbfe9b8cbbf16fa40f51c21eb2ef6755208eb19017ecc'}
 PREFIX = "runtime/d4_training_continuation/"
 LEGACY = {"cli.py": {"27fdf7f11fe7fabefa00b9be42a8ef11e45ab36be416e87cf64c76afbe97acdb",
-                     "b6a7e28dbfeb20e59ae2e0fea0c533c0f55f248ccd508a4a11bcb1347ac47d3b"},
+                     "b6a7e28dbfeb20e59ae2e0fea0c533c0f55f248ccd508a4a11bcb1347ac47d3b",
+                     "54e058ef1254e6e87b9f38d2aedda0efcc2e362fa496b49b2b6cd8cab3488dc7"},
+          "opportunity_upgrade.py": {"cfa7fb044db2967290f5b3b3df2f51d7d3d2d15466e6dc158edc7337b6de9171"},
           "scheduler.py": {"26d7baacdd5a3193d246028006ee31fc8172b114e916c7a7d113034da5f0dcad"}}
 
 
