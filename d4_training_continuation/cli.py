@@ -53,6 +53,8 @@ def capture_runtime_binding(plan):
         from . import checkpoint_restart, save_policy
     if plan.get("validation_policy"):
         from . import backfill, evaluation, validation_journal
+    if plan.get("best_checkpoint_policy"):
+        from . import best_checkpoints, best_archiver
     modules = {}
     for name, module in tuple(sys.modules.items()):
         if name == "d4_training_continuation" or name.startswith("d4_training_continuation."):
@@ -97,6 +99,8 @@ def runtime_status(root, kind, state=None):
             required += ["controller", "source", "save_policy", "checkpoint_restart"]
         if plan.get("validation_policy"):
             required += ["backfill", "evaluation", "validation_journal"]
+        if plan.get("best_checkpoint_policy"):
+            required += ["best_checkpoints", "best_archiver"]
         for name in required:
             relative = "runtime/d4_training_continuation/" + name + ".py"
             expected = dict(path=str(template / relative), sha256=plan["template_files"][relative])
@@ -146,6 +150,7 @@ def status(root, query=True):
         result["opportunistic_policy"] = plan.get("opportunistic")
         result["training_policy"] = plan.get("training_policy")
         result["validation_policy"] = plan.get("validation_policy")
+        result["best_checkpoint_policy"] = plan.get("best_checkpoint_policy")
         if plan.get("validation_backfill"):
             result["validation_backfill"] = brief_backfill(read(Path(plan["validation_backfill"]) / "state.json"))
         if state.get("active"):
@@ -155,6 +160,7 @@ def status(root, query=True):
                 result["active_job_policy"] = dict(job_id=state["active"]["job_id"],
                     save_freq=training.get("save_freq"), test_freq=training.get("test_freq"),
                     bound_policy=request.get("training_policy"), validation_policy=request.get("validation_policy"),
+                    best_checkpoint_policy=request.get("best_checkpoint_policy"),
                     source="immutable_request_config")
             except (OSError, KeyError, ValueError) as error:
                 result["active_job_policy"] = dict(read_error=str(error))

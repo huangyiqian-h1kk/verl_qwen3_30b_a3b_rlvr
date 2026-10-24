@@ -185,6 +185,11 @@ def make_job(plan, role, nodes, authority, deadline):
         request["validation_policy"] = contract["validation_policy"] = dict(VALIDATION_POLICY)
         request["validation_semantics"] = contract["validation_semantics"] = semantics(request)
         request["identity"] = digest(contract)
+    if plan.get("best_checkpoint_policy"):
+        from .best_checkpoints import POLICY as BEST_POLICY
+        need(plan["best_checkpoint_policy"] == BEST_POLICY, "Unknown best checkpoint policy")
+        request["best_checkpoint_policy"] = contract["best_checkpoint_policy"] = dict(BEST_POLICY)
+        request["identity"] = digest(contract)
     write(folder / "request.json", request)
     return dict(folder=str(folder), job_name=job_name)
 
@@ -195,9 +200,12 @@ def validate_request(path):
     need(path == Path(r["job_dir"]) / "request.json", "Wrong request path")
     need(digest(r["contract"]) == r["identity"] and r["config"] == r["contract"]["config"], "Request contract changed")
     need(r.get("training_policy") == r["contract"].get("training_policy"), "Training policy contract changed")
-    for key in ("validation_policy", "validation_semantics"):
+    for key in ("validation_policy", "validation_semantics", "best_checkpoint_policy"):
         need(r.get(key) == r["contract"].get(key), "Validation contract changed: " + key)
     check_request(r)
+    if r.get("best_checkpoint_policy"):
+        from .best_checkpoints import POLICY as BEST_POLICY
+        need(r["best_checkpoint_policy"] == BEST_POLICY, "Unknown best checkpoint policy")
     for key in ("kind", "role", "lineage", "source"):
         need(r[key] == r["contract"][key], "Request field changed: " + key)
     need(r.get("opportunity_id") == r["contract"].get("opportunity_id"), "Opportunity identity changed")

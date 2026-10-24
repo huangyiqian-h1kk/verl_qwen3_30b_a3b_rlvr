@@ -159,9 +159,11 @@ def trainer_class(base):
             if self.cont_plan is not None:
                 write(path / "sampling.json", self.cont_plan.metadata())
             execution = read(self.cont_phase / "phase.json")
-            ck.commit(path, req["run_dir"], step, execution["target_world"], req["lineage"], req["kind"],
+            committed = ck.commit(path, req["run_dir"], step, execution["target_world"], req["lineage"], req["kind"],
                       self.cont_resume, self.cont_phase.name)
             self.cont_saved = step
+            from .best_checkpoints import capture_saved
+            capture_saved(req, committed)
             ck.retain(req["run_dir"], req["lineage"], keep=2)
             shutil.rmtree(staging)
 

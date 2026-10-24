@@ -183,6 +183,8 @@ def validate(trainer, evaluate, merged=False):
     record = trainer.cont_resume if step == trainer.cont_resume["step"] else ck.latest(request["run_dir"], request["lineage"])
     need(record is not None and record["step"] == step, "Evaluation has no matching full checkpoint")
     ck.validate(record)
+    from .best_checkpoints import capture_saved
+    capture_saved(request, record)
     actual_runtime = None
     if request.get("validation_policy"):
         from .validation_journal import POLICY, runtime_contract
@@ -223,4 +225,6 @@ def validate(trainer, evaluate, merged=False):
     write(trainer.cont_phase / ("validation_" + str(step) + ".json"),
           dict(status="PASS", step=step, reused=reused, receipt=str(receipt_path(request, record)),
                receipt_sha256=sha(receipt_path(request, record)), metrics=receipt["metrics"], at_utc=now()))
+    from .best_checkpoints import capture_evaluation
+    capture_evaluation(request, record)
     return receipt["metrics"]
