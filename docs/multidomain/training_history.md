@@ -2,7 +2,7 @@
 
 `scripts/multidomain/collect_training_history.py` 使用 Python 标准库，读取所有历史训练作业，而非仅当前 job 或日志末尾。可以通过 `git show COMMIT:path | python -I -` 执行，无需切换或覆盖集群上的工作树。
 
-`2026-10-22.history.2` 默认覆盖以下六个 run，分别保留其身份：
+`2026-10-24.history.3` 默认覆盖以下六个 run，分别保留其身份，并合并独立补评任务：
 
 | 流 | run 后缀 |
 |---|---|
@@ -23,6 +23,11 @@ python3 -I scripts/multidomain/collect_training_history.py --root "$PWD"
 
 文件内容：
 
+- `training_dynamics.csv` / `.jsonl`：两套 setup 的训练指标统一表，覆盖 loss、reward、entropy、KL、学习率、输出长度、各域批次统计和计时等实际记录。`source_kind=console/structured` 区分日志与结构化证据，同一更新可能有两种观测，不能把两行相加为两步。`formal_attempt`、`step_usage`、job、phase、lineage 保留重跑和候选分支信息。
+- `validation_dynamics.csv` / `.jsonl`：统一 validation 表，包含训练内评估和历史补评。横坐标是被评 checkpoint 的 `step`，`at_utc` 是完成评估的时间。Random 125、domain 100 的补测归回 125/100，不放到补评提交时的最新训练步。保留四域 `val-core/*/acc/mean@1` 和全部现有 val-aux 指标。
+- `validation_backfills.json`：扫描 `outputs/multidomain/validation_backfills/*` 的 campaign 和全部 PBS 提交记录，并绑定两套 setup 各自的 evaluation 子目录。重复续投和复用已完成结果均保留来源。
+- `validation_progress.json`：新评估协议的已完成批次、行数与本进程复用批次数；只归档 manifest/progress，默认不重复打包大量 batch 缓存文本。
+- `job_timeline.csv`：训练与独立补评作业的 job ID、恢复起点、节点数、退出码、PBS comment、墙钟时长及 GPU 小时。一个补评 PBS allocation 下的两个子进程只计一次共享资源成本，放在 `summary.json.shared_backfill_accounting`，不分别加到两套训练成本中。
 - `summary.json`：`setups` 汇总 random/domain 正式训练 attempt 的已完成 step 和当前监护记录；`roles` 保留六个来源各自的 console update、结构化已完成 step、缺失／重复 step、validation、指标初末值、步骤耗时、PBS 占用时长和 GPU 小时。最大观测 step 不等于已经解析好回退关系的最终有效进度。
 - `metrics.jsonl`、`metrics_long.csv`：完整 console 指标，包括 loss、reward、entropy、KL、梯度、学习率、输出 token 长度／截断率、各域 validation、rollout／reward／update／save／validation 耗时；仅导出实际记录过的键。每条附 run、job、phase、文件、行号和重启 segment。
 - `step_records.jsonl`、`step_metrics_long.csv`：`step_<n>.json` 的完整结构化记录及数值，包括实际 prompt/response 数、各域 response 数、reward、response token 长度和 actor 指标。附 lineage、分配节点数、阶段训练 rank 数、execution ID、完成标记及交接分类。JSON 保留完整 prompt ID 列表与 actor 原始样本；只在 `status=PASS`、actor update 完成、weights 同步三个条件都满足时标记已完成 update。
@@ -36,6 +41,16 @@ python3 -I scripts/multidomain/collect_training_history.py --root "$PWD"
 - 压缩包的 `evidence/`：完整作业文本日志、配置、恢复／交接记录、相关 reward／sampler／trainer 源码快照和 checkpoint 元数据。
 
 Console 数值支持普通浮点数和 `np.float64(...)`、`numpy.int64(...)` 等数值标量表示；只按数值语法解析，不执行日志中的表达式，也不依赖 NumPy。
+
+补评验收与去重：
+
+- 新版 `control/evaluations/*.json` 的记录只有在 producer/consumer 请求身份、setup、lineage、评估 protocol、checkpoint 元数据或 phase proof、四域有限数值、完整 1006 行输出及 SHA256 均匹配时，才标记 `verified_complete`。有 journal 时也检查 manifest 绑定。这是评估证据校验，不读取或重新校验模型张量。
+- 已被滚动清理的训练 checkpoint 可以用仍保留的 `validation_<step>.json` 对 receipt 的 SHA256 绑定验收；不能因此宣称那个 checkpoint 的张量仍可恢复。
+- 同一 `(setup, checkpoint_key, protocol)` 的复用结果只保留一个评估点，保留 `consumer_jobs` 和重复来源。不同 verifier/protocol 或不同 checkpoint 的相同步数不自动合并、不平均。相互冲突的 receipt 标记 `conflicting_receipts`。
+- 老日志里的评估保留为 `console_reported`，不冒充完整输出验证。缺文件、SHA 不符、部分输出、protocol 不符等保留 `unverified_receipt` 和具体错误。原日志仍在原始 metrics 表和 evidence 内。
+- evaluation-only 子进程显式标为 `stage=evaluation`，其日志或 checkpoint step 不增加训练步数。`backfilled_validation_steps` 只列验收通过的补测；`scheduled_steps_without_observed_metrics` 表示采集证据缺口，不自动判定训练程序没有执行评估。
+
+这两个 dynamics CSV 是保留来源的观测表，可直接按 setup、step、metric 作后续分析；不是自动裁定过全部回退关系的唯一训练曲线。训练分析应选择明确的来源和正式分支，不能把 console 与 structured 指标、重复恢复 attempt 混为独立更新。
 
 结构化 actor 数值标量放在 `actor_recorded/` 下。若某个 actor 指标是数值列表，额外导出明确命名的 `actor_samples/<原键>/mean` 和 `/count`，均值为这些已记录样本的算术平均，不冒充按 token 加权的 console 指标。原列表完整保留。批次统计放在 `batch/` 下；例如 `batch/reward_mean`、`batch/response_length_mean`、`batch/response_domain_counts/math`。这两套指标表是同一步的不同证据来源，不能相加为两次训练。
 

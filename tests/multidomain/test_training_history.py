@@ -1,13 +1,16 @@
 """Regression tests for scientific accounting across interrupted D4 attempts."""
 import contextlib
+import csv
 import hashlib
 import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/multidomain/collect_training_history.py"
 SPEC = importlib.util.spec_from_file_location("training_history", SCRIPT)
@@ -252,6 +255,212 @@ class HistoryTests(unittest.TestCase):
         self.assertFalse(collector.step_records[0]["handoff_committed"])
         self.assertIsNone(summary["setups"]["random"]["max_completed_step_on_formal_attempts"])
         self.assertTrue(any("control record" in w.get("error", "") for w in collector.warnings))
+
+
+class ValidationHistoryTests(unittest.TestCase):
+    setUp = HistoryTests.setUp
+    write = HistoryTests.write
+    collect = HistoryTests.collect
+
+    def evaluation(self, kind="random", step=125, tag="first", protocol="v1", source_record=None):
+        run = self.root / "outputs/multidomain" / (m.BASE + m.RUNS[kind + "_continuation"])
+        folder = run / "jobs" / ("evaluation_" + tag)
+        cp = source_record or dict(step=step, world_size=16 if kind == "random" else 8,
+            lineage=kind + "_lineage", files={"actor/model.distcp": {"bytes": 123, "mtime_ns": 456}},
+            path=str(self.root / "outputs/multidomain/validation_backfill_sources" / kind / ("global_step_" + str(step))))
+        contract = dict(source={"record": cp}, role="evaluation", lineage=cp["lineage"],
+                        kind=kind, validation_semantics={"kind": kind, "verifier": protocol})
+        req = dict(contract, contract=contract, identity=m.identity(contract), stage="train",
+            expected_nodes=1, job_dir=str(folder), control_dir=str(run / "control"),
+            run_dir=str(folder / "evaluation"))
+        self.write(folder / "request.json", json.dumps(req))
+        output = folder / "evaluation/generations/train" / (str(step) + ".jsonl")
+        self.write(output, "".join(json.dumps(dict(step=step, input=f"q{i}", output="answer", score=i % 2)) + "\n"
+                                 for i in range(1006)))
+        key, proto = m.checkpoint_identity(cp), m.validation_protocol(req)
+        journal = run / "control/validation_batches" / (key + "_" + proto)
+        manifest = dict(version="2026-10-23.validation-batches.1", checkpoint=key, protocol=proto,
+                        runtime={"rows": 1006, "batches": 126})
+        self.write(journal / "manifest.json", json.dumps(manifest))
+        self.write(journal / "progress.json", json.dumps(dict(completed_batches=126, completed_rows=1006,
+                                                             cached_batches_this_process=107)))
+        self.write(journal / "batch_000001.json", '"DO NOT ARCHIVE LARGE CACHE OUTPUTS"')
+        receipt = dict(version="checkpoint-validation-v1", status="PASS", step=step, lineage=cp["lineage"],
+            checkpoint_key=key, protocol=proto, metrics={k: 0.5 for k in m.VAL_CORE}, at_utc="2026-10-24T02:00:00+00:00",
+            outputs=dict(path=str(output), rows=1006, sha256=hashlib.sha256(output.read_bytes()).hexdigest()),
+            origin=dict(job_dir=str(folder), phase="train", journal=dict(path=str(journal),
+                manifest_sha256=m.identity(manifest), reused_batches=107, batches=126)))
+        receipt_path = run / "control/evaluations" / (key + "_" + proto + ".json")
+        self.write(receipt_path, json.dumps(receipt))
+        self.reference(folder, receipt_path, step)
+        self.parent(tag, {kind: folder})
+        return folder, receipt_path, output
+
+    def reference(self, folder, receipt, step):
+        self.write(folder / "train" / f"validation_{step}.json", json.dumps(dict(status="PASS", step=step,
+            reused=True, receipt=str(receipt), receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())))
+
+    def parent(self, tag, children):
+        area = self.root / "outputs/multidomain/validation_backfills/test-operation"
+        folder = area / "jobs" / tag
+        jid = "9" + str(len(tag)) + ".pbs1"
+        child_records = {kind: dict(folder=str(child), request_sha256=hashlib.sha256((child / "request.json").read_bytes()).hexdigest())
+                         for kind, child in children.items()}
+        contract = dict(expected_nodes=1, children=child_records)
+        self.write(folder / "request.json", json.dumps(dict(contract, contract=contract, identity=m.identity(contract))))
+        self.write(folder / "job_id.txt", jid)
+        self.write(folder / "result.json", json.dumps(dict(status="PASS", evaluations={k: dict(status="PASS", evaluated_step=125 if k == "random" else 100,
+            optimizer_updates=0, checkpoints_written=0) for k in children})))
+        self.write(area / "state.json", json.dumps(dict(operation="test-operation", phase="PASS", attempts=2,
+                                                       job=dict(job_id=jid, folder=str(folder)))))
+        return folder, jid
+
+    def test_completed_backfills_are_evaluation_points_not_training_progress(self):
+        self.evaluation()
+        self.evaluation("domain", 100, "second")
+        collector, summary = self.collect()
+        self.assertEqual(summary["setups"]["random"]["backfilled_validation_steps"], [125])
+        self.assertEqual(summary["setups"]["domain"]["backfilled_validation_steps"], [100])
+        self.assertIsNone(summary["setups"]["random"]["max_completed_step_on_formal_attempts"])
+        self.assertIsNone(summary["roles"]["domain_continuation"]["max_logged_update_step"])
+        self.assertEqual(len(collector.validations), 2)
+        self.assertTrue(all(r["verified_complete"] for r in collector.validations))
+        self.assertEqual(collector.validations[0]["reused_batches"], 107)
+        with (collector.output / "training_dynamics.csv").open() as f:
+            self.assertEqual(list(csv.DictReader(f)), [])
+        with (collector.output / "validation_dynamics.csv").open() as f:
+            self.assertEqual({int(r["step"]) for r in csv.DictReader(f)}, {100, 125})
+
+    def test_reused_receipt_across_jobs_is_one_point_and_parent_time_is_once(self):
+        folder, receipt, _ = self.evaluation()
+        second = folder.parent / "evaluation_reuse"
+        request = json.loads((folder / "request.json").read_text())
+        request.update(job_dir=str(second), run_dir=str(second / "evaluation"))
+        self.write(second / "request.json", json.dumps(request))
+        self.reference(second, receipt, 125)
+        self.write(second / "pbs.log", "step:125 - val-core/math/acc/mean@1:0.5\n")
+        self.parent("reuse_job", {"random": second})
+        collector = m.Collector(self.root, self.root / "analysis", include_pbs=True)
+        def pbs(root, jid):
+            return dict(job_id=jid, job_state="F", Exit_status=0,
+                        resources_used={"walltime": "01:00:00"}, Resource_List={"ngpus": 8})
+        with patch.object(m, "pbs_job", side_effect=pbs), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            summary = collector.run()
+        self.assertEqual(len(collector.validations), 1)
+        self.assertEqual(len(collector.validations[0]["consumer_jobs"]), 2)
+        self.assertEqual(summary["shared_backfill_accounting"]["allocated_gpu_hours_known"], 16)
+        self.assertEqual(summary["roles"]["random_continuation"]["allocated_gpu_hours_known"], 0)
+        with (collector.output / "job_timeline.csv").open() as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 2)
+
+    def test_partial_or_tampered_outputs_are_not_verified(self):
+        _, _, output = self.evaluation()
+        output.write_text(output.read_text().replace('"answer"', '"tampered"', 1))
+        collector, summary = self.collect()
+        self.assertFalse(collector.validations[0]["verified_complete"])
+        self.assertEqual(summary["setups"]["random"]["backfilled_validation_steps"], [])
+        self.assertIn("output", collector.validations[0]["error"])
+
+    def test_1005_rows_even_with_matching_sha_are_incomplete(self):
+        folder, receipt_path, output = self.evaluation()
+        output.write_text("\n".join(output.read_text().splitlines()[:1005]) + "\n")
+        receipt = json.loads(receipt_path.read_text())
+        receipt["outputs"].update(rows=1005, sha256=hashlib.sha256(output.read_bytes()).hexdigest())
+        receipt_path.write_text(json.dumps(receipt))
+        self.reference(folder, receipt_path, 125)
+        collector, _ = self.collect()
+        self.assertFalse(collector.validations[0]["verified_complete"])
+
+    def test_different_protocol_at_same_step_is_not_averaged_or_deduplicated(self):
+        self.evaluation(tag="one", protocol="v1")
+        self.evaluation(tag="two", protocol="v2")
+        collector, _ = self.collect()
+        self.assertEqual(len(collector.validations), 2)
+        self.assertTrue(all(r["verified_complete"] for r in collector.validations))
+        self.assertEqual(len({r["protocol"] for r in collector.validations}), 2)
+
+    def test_receipt_wrong_checkpoint_is_rejected(self):
+        folder, path, _ = self.evaluation()
+        receipt = json.loads(path.read_text())
+        receipt["checkpoint_key"] = "wrong"
+        path.write_text(json.dumps(receipt))
+        self.reference(folder, path, 125)
+        collector, _ = self.collect()
+        self.assertIn("checkpoint digest", collector.validations[0]["error"])
+
+    def test_journal_corruption_is_rejected_and_cache_text_not_archived(self):
+        _, path, _ = self.evaluation()
+        receipt = json.loads(path.read_text())
+        manifest = Path(receipt["origin"]["journal"]["path"]) / "manifest.json"
+        manifest.write_text('{}')
+        collector, _ = self.collect()
+        self.assertFalse(collector.validations[0]["verified_complete"])
+        with tarfile.open(collector.output.with_suffix(".tar.gz")) as archive:
+            self.assertFalse(any(name.endswith("batch_000001.json") for name in archive.getnames()))
+            self.assertTrue(any(name.endswith("progress.json") for name in archive.getnames()))
+
+    def test_nonfinite_receipt_is_reported_without_breaking_collection(self):
+        folder, path, _ = self.evaluation()
+        receipt = json.loads(path.read_text())
+        receipt["metrics"][m.VAL_CORE[0]] = float("nan")
+        path.write_text(json.dumps(receipt))
+        self.reference(folder, path, 125)
+        collector, _ = self.collect()
+        self.assertFalse(collector.validations[0]["verified_complete"])
+        self.assertIn("nonfinite", collector.validations[0]["error"])
+
+    def test_console_only_validation_remains_distinct_from_complete_receipt(self):
+        HistoryTests.job(self, "random_single", "legacy_train", "1.pbs1",
+                        "step:25 - val-core/math/acc/mean@1:0.4\n")
+        collector, summary = self.collect()
+        self.assertEqual(collector.validations[0]["verification"], "console_reported")
+        self.assertEqual(summary["setups"]["random"]["validation_steps"], [25])
+        self.assertEqual(summary["setups"]["random"]["verified_validation_steps"], [])
+
+    def test_top_level_protocol_cannot_diverge_from_signed_request(self):
+        folder, _, _ = self.evaluation()
+        req = json.loads((folder / "request.json").read_text())
+        req["validation_semantics"]["verifier"] = "changed"
+        (folder / "request.json").write_text(json.dumps(req))
+        collector, _ = self.collect()
+        self.assertFalse(collector.validations[0]["verified_complete"])
+
+    def test_formal_validation_survives_pruned_checkpoint_with_phase_proof(self):
+        folder, path, output = self.evaluation()
+        req = json.loads((folder / "request.json").read_text())
+        req["role"] = req["contract"]["role"] = "formal"
+        req["source"]["record"]["step"] = req["contract"]["source"]["record"]["step"] = 120
+        req["identity"] = m.identity(req["contract"])
+        (folder / "request.json").write_text(json.dumps(req))
+        # Formal jobs own their PBS allocation, without a backfill envelope.
+        shutil.rmtree(self.root / "outputs/multidomain/validation_backfills")
+        self.write(folder / "job_id.txt", "123.pbs1")
+        collector, summary = self.collect()
+        self.assertTrue(collector.validations[0]["verified_complete"])
+        self.assertFalse(collector.validations[0]["is_backfill"])
+        self.assertEqual(collector.validations[0]["checkpoint_binding"], "phase_receipt_sha256")
+        self.assertEqual(summary["setups"]["random"]["verified_validation_steps"], [125])
+
+    def test_same_identity_conflicting_receipts_are_not_selected_by_filename(self):
+        folder, path, _ = self.evaluation()
+        changed = json.loads(path.read_text())
+        changed["metrics"][m.VAL_CORE[0]] = 0.9
+        self.write(path.parent / "duplicate.json", json.dumps(changed))
+        collector, _ = self.collect()
+        self.assertEqual(len(collector.validations), 2)
+        self.assertTrue(all(r["verification"] == "conflicting_receipts" for r in collector.validations))
+        self.assertTrue(all(not r["verified_complete"] for r in collector.validations))
+
+    def test_relocated_archive_resolves_only_its_output_tree(self):
+        self.evaluation()
+        with tempfile.TemporaryDirectory() as destination:
+            moved = Path(destination)
+            shutil.copytree(self.root / "outputs", moved / "outputs")
+            collector = m.Collector(moved, moved / "analysis", include_pbs=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                collector.run()
+            self.assertTrue(collector.validations[0]["verified_complete"])
+            self.assertTrue(all(p.is_relative_to(moved) for p in collector.generation_scan))
 
 
 if __name__ == "__main__":
