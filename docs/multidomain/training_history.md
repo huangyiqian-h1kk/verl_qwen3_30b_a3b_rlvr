@@ -2,7 +2,7 @@
 
 `scripts/multidomain/collect_training_history.py` 使用 Python 标准库，读取所有历史训练作业，而非仅当前 job 或日志末尾。可以通过 `git show COMMIT:path | python -I -` 执行，无需切换或覆盖集群上的工作树。
 
-`2026-10-24.history.3` 默认覆盖以下六个 run，分别保留其身份，并合并独立补评任务：
+`2026-10-25.history.4` 默认覆盖以下六个 run，分别保留其身份，并合并独立补评任务：
 
 | 流 | run 后缀 |
 |---|---|
@@ -23,6 +23,9 @@ python3 -I scripts/multidomain/collect_training_history.py --root "$PWD"
 
 文件内容：
 
+- `operational_status.json`：在完整历史扫描之前查询两套 setup 当前 active/candidate/opportunity/old_candidate 的 PBS 状态、退出码、分配节点、comment 和提交脚本，并记录监护锁、心跳、北京时间截止时间、机会式切换状态、重投选择和实际 job 冻结策略。锁只以只读方式探测，不新建锁、不向 PID 发信号。过期的 `RUNNING` 字段不能当作监护还活着；到达监护截止时间也不代表 PBS job 已结束。运行中的 PBS job 即使残留旧 Exit_status，`terminal_state_observed` 仍为 false。
+- `checkpoint_storage.json`：在已知 rolling checkpoint、各 job/phase 的固定恢复源、control 的 resume/fallback pin、补评保护源和最佳模型归档中，检查每一条已记录清单的文件是否仍存在、大小/mtime 是否一致；对小 JSON 也比较已记录 SHA256。分别汇报 model、optimizer、LR、RNG 和 data.pt，区分 `FULL_STATE_INVENTORY_MATCH`、`MODEL_INVENTORY_MATCH_FULL_STATE_UNAVAILABLE`、`PRESENT_UNVERIFIED`、`MISSING`、`INCOMPLETE_OR_CHANGED`。完整状态还需匹配完成记录和 domain 采样文件。检查不打开 `.pt`/`.distcp`、不加载模型，不等于 GPU 恢复测试。历史恢复源正常退休也会出现 MISSING，应结合引用角色和当前权威分支判断。
+- `best_checkpoint_archives.json`：每个 setup 的最佳模型 index、历史抢救结果、保留 hold、最近扫描错误、原生部署状态以及现存归档对象；真实文件状态与 `checkpoint_storage.json` 对照。归档服务锁/心跳/错误另在 `operational_status.json.archive_service`。`unverified_weights` 保持未验证，不会因为有 manifest 就升级为完整模型。
 - `training_dynamics.csv` / `.jsonl`：两套 setup 的训练指标统一表，覆盖 loss、reward、entropy、KL、学习率、输出长度、各域批次统计和计时等实际记录。`source_kind=console/structured` 区分日志与结构化证据，同一更新可能有两种观测，不能把两行相加为两步。`formal_attempt`、`step_usage`、job、phase、lineage 保留重跑和候选分支信息。
 - `validation_dynamics.csv` / `.jsonl`：统一 validation 表，包含训练内评估和历史补评。横坐标是被评 checkpoint 的 `step`，`at_utc` 是完成评估的时间。Random 125、domain 100 的补测归回 125/100，不放到补评提交时的最新训练步。保留四域 `val-core/*/acc/mean@1` 和全部现有 val-aux 指标。
 - `validation_backfills.json`：扫描 `outputs/multidomain/validation_backfills/*` 的 campaign 和全部 PBS 提交记录，并绑定两套 setup 各自的 evaluation 子目录。重复续投和复用已完成结果均保留来源。
@@ -86,3 +89,7 @@ python3 -m unittest discover -s tests/multidomain -p 'test_training_history.py' 
 ```
 
 脚本只查询 `qstat`，不提交、停止、修改或重启作业；不加载训练库或 GPU。`--no-pbs` 可跳过调度器查询。输出目录必须不存在，避免覆盖上次汇总。
+
+当前状态、历史日志和文件检查在不同时间读取，整个结果包不是原子快照。如果活跃源在扫描期间被正常清理，报告会记下文件缺失/变动，不能直接认定为存储损坏。`logical_bytes` 按路径统计逻辑大小，多个 hard link 可指向同一份数据块，不能相加当作实际磁盘占用。旧的只含日志/元数据的诊断包没有模型载荷；本地重放只能测试收集逻辑，不能据此判断 ABCI 上的 checkpoint 已丢失。
+
+本版本的更新仅涉及收集器、测试和本文档。通过 `git show` 运行即可；不必切换运维工作树，不会顺带延长监护、部署训练策略、停止 GPU job 或修改归档内容。

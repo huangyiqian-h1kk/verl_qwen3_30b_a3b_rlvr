@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import tarfile
@@ -461,6 +462,166 @@ class ValidationHistoryTests(unittest.TestCase):
                 collector.run()
             self.assertTrue(collector.validations[0]["verified_complete"])
             self.assertTrue(all(p.is_relative_to(moved) for p in collector.generation_scan))
+
+
+class OperationsStorageTests(unittest.TestCase):
+    setUp = HistoryTests.setUp
+    write = HistoryTests.write
+    collect = HistoryTests.collect
+
+    def checkpoint(self, kind="random", step=150):
+        run = self.root / "outputs/multidomain" / (m.BASE + m.RUNS[kind + "_continuation"])
+        cp = run / "lineages/lineage/checkpoints" / ("global_step_" + str(step))
+        contents = {k: dict(path=k + "/dist_ckpt", format="megatron_dist_checkpoint")
+                    for k in ("model", "optimizer", "lr_scheduler", "rng_state")}
+        for item in contents.values():
+            self.write(cp / "actor" / item["path"] / "__0_0.distcp", "tensor payload never opened")
+            self.write(cp / "actor" / item["path"] / ".metadata", "binary metadata")
+        self.write(cp / "actor/ckpt_contents.json", json.dumps(dict(schema_version=2, global_step=step,
+                   world_size=8, contents=contents)))
+        self.write(cp / "actor/transformer_config.json", '{}')
+        self.write(cp / "data.pt", 'dataloader binary')
+        if kind == "domain":
+            self.write(cp / "sampling.json", '{}')
+        inventory = {}
+        for path in cp.rglob("*"):
+            if path.is_file():
+                stat = path.stat()
+                inventory[str(path.relative_to(cp))] = dict(bytes=stat.st_size, mtime_ns=stat.st_mtime_ns,
+                    sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        record = dict(path=str(cp), step=step, world_size=8, lineage="lineage", files=inventory)
+        self.write(cp / "COMPLETE_CONTINUATION.json", json.dumps(record))
+        return run, cp, record
+
+    def test_full_checkpoint_stat_checks_never_open_tensor_payloads(self):
+        _, _, record = self.checkpoint()
+        real_open = Path.open
+        def guarded(path, *args, **kwargs):
+            self.assertNotIn(path.suffix, (".pt", ".distcp"))
+            return real_open(path, *args, **kwargs)
+        with patch.object(Path, "open", guarded):
+            collector, _ = self.collect()
+        row = collector.checkpoint_storage[0]
+        self.assertEqual(row["status"], "FULL_STATE_INVENTORY_MATCH")
+        self.assertTrue(row["model_inventory_matches"])
+        self.assertTrue(row["optimizer_inventory_matches"])
+        with tarfile.open(collector.output.with_suffix(".tar.gz")) as bundle:
+            self.assertFalse(any(name.endswith((".pt", ".distcp")) for name in bundle.getnames()))
+
+    def test_missing_optimizer_is_distinct_from_missing_model_shard(self):
+        _, cp, _ = self.checkpoint()
+        (cp / "actor/optimizer/dist_ckpt/__0_0.distcp").unlink()
+        (cp / "data.pt").unlink()
+        collector, _ = self.collect()
+        row = collector.checkpoint_storage[0]
+        self.assertEqual(row["status"], "MODEL_INVENTORY_MATCH_FULL_STATE_UNAVAILABLE")
+        self.assertFalse(row["optimizer_inventory_matches"])
+        (cp / "actor/model/dist_ckpt/__0_0.distcp").unlink()
+        collector = m.Collector(self.root, self.root / "again", include_pbs=False)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            collector.run()
+        self.assertFalse(collector.checkpoint_storage[0]["model_inventory_matches"])
+        self.assertEqual(collector.checkpoint_storage[0]["status"], "INCOMPLETE_OR_CHANGED")
+
+    def test_legacy_weights_without_recorded_inventory_are_unverified(self):
+        _, cp, _ = self.checkpoint()
+        (cp / "COMPLETE_CONTINUATION.json").unlink()
+        collector, _ = self.collect()
+        row = collector.checkpoint_storage[0]
+        self.assertEqual(row["status"], "PRESENT_UNVERIFIED")
+        self.assertGreater(row["components"]["model"]["present_payload_files"], 0)
+        self.assertFalse(row["model_inventory_matches"])
+
+    def test_symlinked_model_shard_and_stale_inventory_do_not_pass(self):
+        _, cp, _ = self.checkpoint()
+        shard = cp / "actor/model/dist_ckpt/__0_0.distcp"
+        external = self.write(self.root / "elsewhere.distcp", shard.read_text())
+        shard.unlink()
+        shard.symlink_to(external)
+        collector, _ = self.collect()
+        self.assertFalse(collector.checkpoint_storage[0]["model_inventory_matches"])
+        self.assertIn("Symlink", str(collector.checkpoint_storage[0]["file_failures"]))
+
+    def test_archive_payload_survives_deleted_origin_and_is_collected(self):
+        run, cp, record = self.checkpoint("domain", 100)
+        key = m.checkpoint_identity(record)
+        directory = run / "checkpoint_archive/objects" / key
+        payload = directory / "payload/global_step_100"
+        shutil.copytree(cp, payload, copy_function=os.link)
+        obj = dict(kind="domain", key=key, original=record, payload=str(payload), mode="full",
+                   step=100, lineage="lineage", inventory=record["files"], trusted_inventory=True, holds=["rescue"])
+        self.write(directory / "manifest.json", json.dumps(obj))
+        self.write(run / "checkpoint_archive/index.json", json.dumps(dict(cohorts={"v": dict(overall={"key": key, "step": 100})})))
+        shutil.rmtree(cp)
+        collector, _ = self.collect()
+        row = collector.checkpoint_storage[0]
+        self.assertEqual(row["status"], "FULL_STATE_INVENTORY_MATCH")
+        self.assertEqual(row["archive_holds"], ["rescue"])
+        self.assertEqual(collector.best_archives["domain"]["objects"][0]["key"], key)
+        with tarfile.open(collector.output.with_suffix(".tar.gz")) as bundle:
+            names = bundle.getnames()
+            self.assertTrue(any(x.endswith("manifest.json") and "/checkpoint_archive/" in x for x in names))
+            self.assertFalse(any("/payload/" in x and x.endswith(".distcp") for x in names))
+
+    def test_reduced_archive_reports_weights_without_claiming_full_state(self):
+        run, cp, record = self.checkpoint()
+        key = m.checkpoint_identity(record)
+        directory = run / "checkpoint_archive/objects" / key
+        payload = directory / "payload/global_step_150"
+        shutil.copytree(cp, payload, copy_function=os.link)
+        for name in ("optimizer", "lr_scheduler", "rng_state"):
+            shutil.rmtree(payload / "actor" / name)
+        (payload / "data.pt").unlink()
+        self.write(directory / "manifest.json", json.dumps(dict(kind="random", key=key, original=record,
+            payload=str(payload), mode="weights", step=150, trusted_inventory=True)))
+        collector, _ = self.collect()
+        row = next(x for x in collector.checkpoint_storage if x["archive_mode"] == "weights")
+        self.assertEqual(row["status"], "MODEL_INVENTORY_MATCH_FULL_STATE_UNAVAILABLE")
+        self.assertFalse(row["optimizer_inventory_matches"])
+
+    def test_read_only_lock_probe_missing_and_held(self):
+        lock = self.root / "does_not_exist/lock"
+        self.assertEqual(m.lock_observation(lock), dict(held=False, missing=True))
+        self.assertFalse(lock.parent.exists())
+        lock = self.write(self.root / "lease.lock", "")
+        with lock.open("rb") as handle:
+            m.fcntl.flock(handle, m.fcntl.LOCK_EX | m.fcntl.LOCK_NB)
+            self.assertTrue(m.lock_observation(lock)["held"])
+        self.assertFalse(m.lock_observation(lock)["held"])
+
+    def test_expired_supervisor_and_running_pbs_remain_separate(self):
+        run, _, _ = self.checkpoint()
+        folder = HistoryTests.job(self, "random_continuation", "formal_a", "123.pbs1", "step:150 - actor/pg_loss:0.1\n")
+        self.write(run / "control/state.json", json.dumps(dict(operation="op", phase="ACTIVE", controller_status="RUNNING",
+            heartbeat_utc="2020-01-01T00:00:00+00:00", deadline_utc="2020-01-02T00:00:00+00:00",
+            active=dict(job_id="123.pbs1", folder=str(folder)))))
+        self.write(run / "control/operations/op/plan.json", '{}')
+        calls = []
+        def query(argv, *args, **kwargs):
+            calls.append(argv)
+            self.assertEqual(argv[0], "qstat" if argv[0] != "git" else "git")
+            return dict(returncode=0, stdout=json.dumps({"Jobs": {"123.pbs1": dict(job_state="R", Exit_status=271,
+                Resource_List={"nodect": 2})}}), stderr="")
+        collector = m.Collector(self.root, self.root / "analysis", include_pbs=True)
+        with patch.object(m, "command", side_effect=query), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            collector.run()
+        op = collector.operations["setups"]["random"]
+        self.assertTrue(op["deadline"]["passed"])
+        self.assertFalse(op["controller_observed_running"])
+        self.assertEqual(op["jobs"]["active"]["pbs"]["job_state"], "R")
+        self.assertFalse(op["jobs"]["active"]["pbs"]["terminal_state_observed"])
+        self.assertEqual(collector.continuation["random"]["state.json"]["phase"], "ACTIVE")
+        self.assertTrue(all(c[0] in ("qstat", "git") for c in calls))
+
+    def test_broken_archive_does_not_hide_other_setup_or_training(self):
+        for setup in ("random", "domain"):
+            run, _, _ = self.checkpoint(setup)
+            if setup == "domain":
+                self.write(run / "checkpoint_archive/objects/bad/manifest.json", '{"broken":')
+        collector, _ = self.collect()
+        self.assertEqual(len(collector.checkpoint_storage), 2)
+        self.assertTrue(collector.best_archives["domain"]["errors"])
+        self.assertEqual(collector.best_archives["random"]["errors"], [])
 
 
 if __name__ == "__main__":

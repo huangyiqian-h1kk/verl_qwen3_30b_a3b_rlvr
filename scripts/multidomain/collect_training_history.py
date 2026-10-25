@@ -8,7 +8,8 @@ import argparse
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import stat as statmod
 import statistics
 import subprocess
 import sys
@@ -26,7 +28,7 @@ BASE = "qwen30b_d4_10k_uniform_ctx64k_seed42_v1"
 RUNS = {"random_single": "", "domain_single": "_db_v1",
         "random_dual": "_n2_once_v1", "domain_dual": "_db_n2_once_v1",
         "random_continuation": "_continuation_v1", "domain_continuation": "_db_continuation_v1"}
-VERSION = "2026-10-24.history.3"
+VERSION = "2026-10-25.history.4"
 VAL_DOMAINS = ("math", "if", "conversational_pivot", "logic_algorithmic")
 VAL_CORE = tuple("val-core/" + d + "/acc/mean@1" for d in VAL_DOMAINS)
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -37,7 +39,7 @@ STEP = re.compile(r"\bstep:\s*(\d+)\s+-\s+")
 SAMPLE = re.compile(r"sampling step\s+(\d+):\s*domain=([^,\s]+)")
 JOB_ID = re.compile(r"\d+(?:\.[A-Za-z0-9_.-]+)?\Z")
 PRUNE = {"checkpoints", "source", "runtime", "wandb", ".git", "__pycache__",
-         "huggingface", "actor", "optimizer", "data", "hf_home", "generations", "raw_generations", "validation_batches"}
+         "huggingface", "actor", "optimizer", "data", "hf_home", "generations", "raw_generations", "validation_batches", "payload"}
 TEXT_SUFFIXES = {".json", ".yaml", ".yml", ".pbs", ".txt", ".log", ".jsonl", ".out", ".err"}
 
 
@@ -173,12 +175,42 @@ def pbs_job(root, jid):
                     continue
                 for key, job in d.get("Jobs", {}).items():
                     if key == jid or ("." not in jid and key.split(".")[0] == jid):
-                        keep = ("Job_Name", "queue", "job_state", "Exit_status", "comment", "qtime",
-                                "stime", "obittime", "Resource_List", "resources_used", "run_count")
-                        return {"job_id": key, **{k: job[k] for k in keep if k in job}}
+                        keep = ("Job_Name", "Job_Owner", "queue", "job_state", "substate", "Exit_status", "comment", "qtime",
+                                "stime", "obittime", "Resource_List", "resources_used", "run_count", "Hold_Types",
+                                "exec_vnode", "Submit_arguments", "Output_Path", "Error_Path")
+                        return {"job_id": key, "queried_utc": now(), **{k: job[k] for k in keep if k in job},
+                                "terminal_state_observed": job.get("job_state") == "F"}
             except (ValueError, TypeError, AttributeError):
                 continue
     return {"job_id": jid, "query_error": result.get("error") or result.get("stderr") or "PBS history unavailable"}
+
+
+def lock_observation(path):
+    """Probe an EXISTING lease read-only; never create a lock or signal a PID."""
+    try:
+        if path.is_symlink():
+            return dict(held=None, error="Symlinked lock")
+        with path.open("rb") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return dict(held=True)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        return dict(held=False)
+    except FileNotFoundError:
+        return dict(held=False, missing=True)
+    except OSError as error:
+        return dict(held=None, error=str(error))
+
+
+def timestamp_observation(value):
+    try:
+        date = datetime.fromisoformat(value)
+        require(date.tzinfo is not None, "Timestamp lacks timezone")
+        return dict(beijing=date.astimezone(timezone(timedelta(hours=8))).isoformat(),
+                    seconds_ago=(datetime.now(timezone.utc) - date).total_seconds())
+    except (ValueError, TypeError) as error:
+        return dict(error=str(error))
 
 
 def seconds(value):
@@ -230,6 +262,8 @@ class Collector:
         self.metadata_cache, self.generation_scan, self.job_lookup = {}, {}, {}
         self.backfills, self.backfill_children, self.validation_refs = [], {}, []
         self.validations, self.validation_progress = [], []
+        self.operations, self.checkpoint_storage, self.best_archives = {}, [], {}
+        self.payload_seen = {}
 
     def relative(self, path):
         return str(path.relative_to(self.root))
@@ -258,6 +292,239 @@ class Collector:
             self.capture(path, parse)
         require(path in self.metadata_cache, "Metadata snapshot unavailable: " + str(path))
         return self.metadata_cache[path][0]
+
+    def collect_operations(self):
+        """Take current control/PBS observations before the slower historical scan."""
+        base = self.root / "outputs/multidomain"
+        self.operations = dict(at_utc=now(), non_atomic_snapshot=True, setups={})
+        if self.include_pbs:
+            self.operations["qstat"] = command(["qstat"], self.root)
+        queried = {}
+        for setup in ("random", "domain"):
+            control = base / (BASE + RUNS[setup + "_continuation"]) / "control"
+            result = dict(observed_utc=now(), controller_lock=lock_observation(control / "controller.lock"))
+            self.operations["setups"][setup] = result
+            try:
+                state = self.metadata(control / "state.json")
+                require(isinstance(state, dict), "Control state is not an object")
+                result["state"] = state
+                deadline = timestamp_observation(state.get("deadline_utc"))
+                result["deadline"] = dict(deadline, passed=deadline["seconds_ago"] >= 0 if "seconds_ago" in deadline else None)
+                result["heartbeat"] = timestamp_observation(state.get("heartbeat_utc"))
+                result["controller_observed_running"] = (state.get("controller_status") == "RUNNING"
+                    and result["controller_lock"]["held"] is True)
+                operation = state.get("operation")
+                require(isinstance(operation, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", operation), "Invalid operation")
+                plan = self.metadata(control / "operations" / operation / "plan.json")
+                require(isinstance(plan, dict), "Plan is not an object")
+                result["plan"] = {k: plan.get(k) for k in ("operation", "template", "template_files",
+                    "opportunistic", "training_policy", "validation_policy", "best_checkpoint_policy", "validation_backfill")}
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                result["read_error"] = str(error)
+            state = result.get("state") or {}
+            jobs = {k: state.get(k) for k in ("active", "candidate", "old_candidate")}
+            jobs["opportunity"] = object_or_empty(state.get("opportunity")).get("job")
+            result["jobs"] = {}
+            for role, job in jobs.items():
+                if not isinstance(job, dict) or not job.get("job_id"):
+                    continue
+                observed = dict(job=job)
+                result["jobs"][role] = observed
+                jid = job["job_id"]
+                if self.include_pbs and isinstance(jid, str) and JOB_ID.fullmatch(jid):
+                    if jid not in queried:
+                        queried[jid] = pbs_job(self.root, jid)
+                    observed["pbs"] = queried[jid]
+                try:
+                    folder = self.output_path(job["folder"])
+                    request = self.metadata(folder / "request.json")
+                    require(isinstance(request, dict), "Job request is not an object")
+                    observed["immutable_job_policy"] = dict(
+                        request_identity_valid=request_identity_valid(request),
+                        expected_nodes=request.get("expected_nodes"), role=request.get("role"), lineage=request.get("lineage"),
+                        source=object_or_empty(request.get("source")).get("record"),
+                        training=object_or_empty(request.get("config")).get("training"),
+                        training_policy=request.get("training_policy"), validation_policy=request.get("validation_policy"),
+                        best_checkpoint_policy=request.get("best_checkpoint_policy"))
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    observed["request_error"] = str(error)
+        directory = base / "checkpoint_archive_service"
+        service = small_json(directory / "state.json") if (directory / "state.json").exists() else {}
+        if not isinstance(service, dict):
+            service = dict(read_error="Archive service state is not an object")
+        lease = lock_observation(directory / "watch.lock")
+        heartbeat = timestamp_observation(service.get("heartbeat_utc"))
+        self.operations["archive_service"] = dict(state=service, lock=lease, heartbeat=heartbeat,
+            bridge_observed_running=(lease["held"] is True and service.get("status") == "RUNNING"
+                and 0 <= heartbeat.get("seconds_ago", -1) < 120))
+        for path in files_below(directory, max_depth=0):
+            if path.suffix in TEXT_SUFFIXES:
+                self.capture(path)
+        print("[0390] Current supervision observation (deadline expiry alone does not stop a PBS job):", file=sys.stderr)
+        for setup, row in self.operations["setups"].items():
+            state = row.get("state") or {}
+            pbs = object_or_empty(object_or_empty(row.get("jobs", {}).get("active")).get("pbs"))
+            print(json.dumps(dict(setup=setup, active=object_or_empty(state.get("active")).get("job_id"),
+                pbs_state=pbs.get("job_state"), exit_status=pbs.get("Exit_status"), comment=pbs.get("comment"),
+                phase=state.get("phase"), controller_status=state.get("controller_status"),
+                controller_lock=row["controller_lock"], deadline=row.get("deadline"),
+                training_blocked=state.get("training_blocked"), last_error=state.get("last_error")), ensure_ascii=False),
+                file=sys.stderr, flush=True)
+
+    def inspect_payload(self, setup, record, origin, path=None, archive_object=None):
+        """Stat every expected file. Never open .pt/.distcp or trust a directory alone."""
+        archive_object = archive_object or {}
+        path = self.output_path(path or record["path"])
+        key = (setup, str(path))
+        if key in self.payload_seen:
+            old = self.payload_seen[key]
+            old["references"].append(origin)
+            if old.get("record_identity") != checkpoint_identity(record):
+                old.setdefault("conflicting_records", []).append(origin)
+            return old
+        row = dict(setup=setup, path=str(path), step=record.get("step"), lineage=record.get("lineage"),
+            world_size=record.get("world_size"), references=[origin], observed_utc=now(),
+            record_identity=checkpoint_identity(record), archive_mode=archive_object.get("mode"),
+            archive_holds=archive_object.get("holds"), inventory_check="file size/mtime; JSON SHA256 where recorded; no tensor loading",
+            model_inventory_matches=False, optimizer_inventory_matches=False,
+            dataloader_inventory_matches=False, full_state_inventory_matches=False)
+        self.payload_seen[key] = row
+        self.checkpoint_storage.append(row)
+        expected = object_or_empty(record.get("files"))
+        observed, failures = {}, {}
+        # No recursive payload read: only stat inventoried files and bounded component directories.
+        def member(name):
+            rel = Path(name)
+            require(not rel.is_absolute() and ".." not in rel.parts and rel.parts, "Unsafe inventory member")
+            target = path / rel
+            for ancestor in (target, *target.parents):
+                if ancestor == self.root:
+                    break
+                require(not ancestor.is_symlink(), "Symlinked checkpoint member")
+            target.resolve().relative_to(path.resolve())
+            return target
+        for name, wanted in expected.items():
+            try:
+                target = member(name)
+                st = target.stat()
+                require(statmod.S_ISREG(st.st_mode) and st.st_size > 0, "Missing/empty regular file")
+                observed[name] = dict(bytes=st.st_size, mtime_ns=st.st_mtime_ns, links=st.st_nlink)
+                require(st.st_size == wanted["bytes"] and st.st_mtime_ns == wanted["mtime_ns"], "Size/mtime differs")
+                if wanted.get("sha256") and target.suffix == ".json" and st.st_size <= 1048576:
+                    require(hashlib.sha256(target.read_bytes()).hexdigest() == wanted["sha256"], "JSON checksum differs")
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                failures[name] = str(error)
+        row.update(path_exists=path.is_dir(), expected_files=len(expected), observed_files=len(observed),
+                   logical_bytes=sum(x["bytes"] for x in observed.values()) if expected else None, file_failures=failures)
+        # Keep specs in the evidence, never copy model or optimizer payloads.
+        try:
+            spec = self.metadata(member("actor/ckpt_contents.json"))
+            require(isinstance(spec, dict), "Checkpoint specification is not an object")
+            require(spec.get("schema_version") == 2 and spec.get("global_step") == record["step"]
+                    and spec.get("world_size") == record["world_size"], "Checkpoint schema/step/world differs")
+            sections = {}
+            trusted = bool(expected) and archive_object.get("trusted_inventory", True)
+            for section in ("model", "optimizer", "lr_scheduler", "rng_state"):
+                info = object_or_empty(object_or_empty(spec.get("contents")).get(section))
+                if not info.get("path"):
+                    sections[section] = dict(path=None, expected_files=0, present_payload_files=0,
+                                            inventory_matches=False, failed_files=[], status="not_declared")
+                    continue
+                rel = Path(info.get("path", ""))
+                require(info.get("path") and not rel.is_absolute() and ".." not in rel.parts, "Unsafe/missing component path")
+                prefix = "actor/" + rel.as_posix().rstrip("/") + "/"
+                names = [n for n in expected if n.startswith(prefix)]
+                component = member(prefix)
+                present = [p for p in files_below(component, max_depth=4, prune=set())
+                           if p.suffix in (".distcp", ".pt") or p.name == ".metadata"]
+                inventory_payload = any(n.endswith(".distcp") or (section == "rng_state" and n.endswith(".pt")) for n in names)
+                checked = (trusted and bool(names) and inventory_payload and prefix + ".metadata" in names
+                           and info.get("format") == "megatron_dist_checkpoint" and not any(n in failures for n in names))
+                sections[section] = dict(path=prefix, expected_files=len(names), present_payload_files=len(present),
+                    inventory_matches=checked, failed_files=[n for n in names if n in failures])
+            model_ok = sections["model"]["inventory_matches"] and all(
+                name in expected and name not in failures for name in ("actor/ckpt_contents.json", "actor/transformer_config.json"))
+            data_ok = trusted and "data.pt" in expected and "data.pt" not in failures
+            full_ok = model_ok and data_ok and not failures and all(x["inventory_matches"] for x in sections.values())
+            if setup == "domain":
+                full_ok = full_ok and "sampling.json" in expected and "sampling.json" not in failures
+            if record.get("lineage"):
+                marker = self.metadata(member("COMPLETE_CONTINUATION.json")) if member("COMPLETE_CONTINUATION.json").is_file() else {}
+                require(isinstance(marker, dict), "Checkpoint completion record is not an object")
+                row["completion_record_matches"] = all(marker.get(k) == record.get(k) for k in ("lineage", "step", "world_size", "files"))
+                full_ok = full_ok and row["completion_record_matches"]
+            full_ok = full_ok and archive_object.get("mode", "full") == "full"
+            row.update(components=sections, model_inventory_matches=bool(model_ok),
+                       optimizer_inventory_matches=bool(sections["optimizer"]["inventory_matches"]),
+                       dataloader_inventory_matches=bool(data_ok), full_state_inventory_matches=bool(full_ok))
+            row["status"] = ("FULL_STATE_INVENTORY_MATCH" if full_ok else "MODEL_INVENTORY_MATCH_FULL_STATE_UNAVAILABLE" if model_ok
+                else "PRESENT_UNVERIFIED" if not trusted and path.is_dir() else "MISSING" if not path.is_dir() else "INCOMPLETE_OR_CHANGED")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            row.update(status="MISSING" if not path.is_dir() else "INCOMPLETE_OR_CHANGED", metadata_error=str(error))
+        return row
+
+    def collect_storage(self):
+        """Rolling saves, pinned recovery sources, backfills and best archives."""
+        base = self.root / "outputs/multidomain"
+        errors = []
+        def inspect(setup, record, origin, **kwargs):
+            if not isinstance(record, dict) or not all(k in record for k in ("path", "step", "world_size", "lineage", "files")):
+                return
+            try:
+                self.inspect_payload(setup, record, origin, **kwargs)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                errors.append(dict(setup=setup, origin=origin, error=str(error)))
+        def inspect_record_file(setup, p):
+            try:
+                inspect(setup, self.metadata(p), self.relative(p))
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                errors.append(dict(setup=setup, origin=str(p), error=str(error)))
+        for cp in self.checkpoints:
+            spec = object_or_empty(cp["records"].get("actor/ckpt_contents.json"))
+            record = dict(step=cp["step"], world_size=spec.get("world_size"), lineage=cp["lineage"], files={})
+            record.update(object_or_empty(cp["records"].get("COMPLETE_CONTINUATION.json")))
+            inspect(cp["setup"], dict(record, path=str(self.root / cp["path"])), "rolling")
+        for job in self.jobs:
+            setup = job.get("setup")
+            if setup not in ("random", "domain"):
+                continue
+            folder = self.root / job["job_folder"]
+            inspect(setup, object_or_empty(job["request"].get("source")).get("record"), self.relative(folder / "request.json"))
+            for phase in ("train", "A", "B", "C", "D", "E", "evaluation", "first_update", "restored_update"):
+                for name in ("resume_source.json", "source/source.json"):
+                    p = folder / phase / name
+                    if p.is_file() and not p.is_symlink():
+                        inspect_record_file(setup, p)
+        for setup in ("random", "domain"):
+            run = base / (BASE + RUNS[setup + "_continuation"])
+            for pattern in ("control/resume_sources/*/source.json", "control/fallback/*/source.json"):
+                for p in run.glob(pattern):
+                    if not p.is_symlink():
+                        inspect_record_file(setup, p)
+            for p in (base / "validation_backfill_sources").glob(setup + "_step_*/source.json"):
+                inspect_record_file(setup, p)
+            directory = run / "checkpoint_archive"
+            result = dict(path=str(directory), objects=[], errors=[])
+            self.best_archives[setup] = result
+            for p in files_below(directory, max_depth=2):
+                if p.suffix == ".json":
+                    self.capture(p)
+            for name in ("index", "rescue_report", "last_scan", "deployment"):
+                p = directory / (name + ".json")
+                result[name] = small_json(p) if p.exists() else None
+            for p in sorted((directory / "objects").glob("*/manifest.json")):
+                try:
+                    obj = self.metadata(p)
+                    require(isinstance(obj, dict), "Archive manifest is not an object")
+                    require(obj["kind"] == setup and obj["key"] == checkpoint_identity(obj["original"]), "Archive identity/setup mismatch")
+                    require(obj["key"] == p.parent.name, "Archive folder/key mismatch")
+                    payload = self.output_path(obj["payload"])
+                    payload.relative_to(p.parent / "payload")
+                    inspect(setup, obj["original"], self.relative(p), path=payload, archive_object=obj)
+                    result["objects"].append({k: obj.get(k) for k in ("key", "step", "lineage", "mode", "payload", "holds", "trusted_inventory", "full_error")})
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    result["errors"].append(dict(path=str(p), error=str(error)))
+        self.operations["storage_collection_errors"] = errors
 
     def capture(self, path, parser=None):
         """Read a fixed byte prefix, hash and parse that exact snapshot, then archive."""
@@ -291,6 +558,14 @@ class Collector:
                 if parser:
                     snap.seek(0)
                     parser(snap, digest)
+                elif path.suffix == ".json" and size <= 8 * 1024 * 1024:
+                    # Later checkpoint/receipt inspection must use this exact
+                    # archived snapshot, even if capture() saw it before metadata().
+                    snap.seek(0)
+                    try:
+                        self.metadata_cache[path] = (json.load(snap), digest)
+                    except ValueError:
+                        pass
                 snap.seek(0)
                 info = tarfile.TarInfo("evidence/" + self.relative(path))
                 info.size, info.mtime, info.mode = size, int(stat.st_mtime), 0o600
@@ -661,12 +936,13 @@ class Collector:
         for name in ("state.json", "handoff_commit.json"):
             path = run / "control" / name
             if role.endswith("_continuation") and path.is_file():
-                def parse_control(handle, checksum, name=name):
-                    value = json.load(handle)
+                try:
+                    value = self.metadata(path)
                     if not isinstance(value, dict):
                         raise ValueError("control record is not a JSON object")
                     self.continuation.setdefault(setup, {})[name] = value
-                self.capture(path, parse_control)
+                except (OSError, ValueError) as error:
+                    self.warnings.append(dict(path=str(path), error=str(error)))
         job_contexts = {}
         for folder in sorted((run / "jobs").glob("*")):
             if not folder.is_dir() or folder.is_symlink():
@@ -865,7 +1141,7 @@ class Collector:
             "All attempts are retained. A repeated global step is not another unit of net progress.",
             "Single and dual curves are separate; a qualification candidate is not automatically formal training.",
             "Maximum logged update step is evidence of a logged update, not proof of a durable checkpoint.",
-            "Checkpoint metadata is inventoried without opening tensors or validating shard completeness.",
+            "checkpoint_storage.json checks recorded file inventories without opening tensor payloads; it is not a GPU restore test.",
             "Metric endpoints/min/max include observed attempts; disputed steps require lineage review.",
             "PBS allocated hours include startup, validation and failed work; cput is never treated as walltime.",
             "Missing historical PBS jobs make allocated-time totals incomplete. No unrecorded metric is invented.",
@@ -958,11 +1234,13 @@ class Collector:
         started = now()
         with tarfile.open(archive_path, "w:gz", compresslevel=3) as archive:
             self.archive = archive
+            self.collect_operations()
             with (self.output / "generation_rows.jsonl").open("w") as stats, (self.output / "output_samples.jsonl").open("w") as samples:
                 self.collect_backfills()
                 for role, suffix in RUNS.items():
                     self.collect_run(role, suffix, stats, samples)
                 self.collect_validations(stats, samples)
+            self.collect_storage()
             self.enrich_metrics()
             ids = sorted({j["job_id"] for j in self.jobs if isinstance(j.get("job_id"), str) and JOB_ID.fullmatch(j["job_id"])})
             if self.include_pbs:
@@ -1004,7 +1282,9 @@ class Collector:
             for name, value in (("summary.json", summary), ("jobs.json", self.jobs), ("checkpoints.json", self.checkpoints),
                                 ("generation_summary.json", self.generation_stats), ("manifest.json", self.manifest), ("warnings.json", self.warnings),
                                 ("continuation_status.json", self.continuation), ("validation_backfills.json", self.backfills),
-                                ("validation_progress.json", self.validation_progress)):
+                                ("validation_progress.json", self.validation_progress),
+                                ("operational_status.json", self.operations), ("checkpoint_storage.json", self.checkpoint_storage),
+                                ("best_checkpoint_archives.json", self.best_archives)):
                 dump(self.output / name, value)
             dump(self.output / "collection.json", {"version": VERSION, "started_utc": started, "finished_utc": now(), "root": str(self.root),
                  "host": socket.gethostname(), "non_atomic_snapshot": True, "full_generations": self.full_generations,
@@ -1014,6 +1294,25 @@ class Collector:
                      "| Setup | Max completed step on formal attempts | Validation steps | Current job | Phase |", "|---|---:|---|---|---|"]
             for setup, r in summary["setups"].items():
                 lines.append(f"| {setup} | {r['max_completed_step_on_formal_attempts']} | {r['validation_steps']} | {r['current_job']} | {r['phase']} |")
+            lines += ["", "Current PBS / monitor observation: operational_status.json; recorded RUNNING alone is not a live controller.", "",
+                      "| Setup | Active PBS job | PBS state | Requested nodes | Controller state | Lease held | Deadline Beijing | Deadline passed |",
+                      "|---|---|---|---:|---|---|---|---|"]
+            for setup, row in self.operations["setups"].items():
+                state = row.get("state") or {}
+                pbs = object_or_empty(object_or_empty(row.get("jobs", {}).get("active")).get("pbs"))
+                values = [setup, object_or_empty(state.get("active")).get("job_id"), pbs.get("job_state"),
+                    object_or_empty(pbs.get("Resource_List")).get("nodect"), state.get("controller_status"),
+                    row["controller_lock"]["held"], object_or_empty(row.get("deadline")).get("beijing"),
+                    object_or_empty(row.get("deadline")).get("passed")]
+                lines.append("| " + " | ".join(str(x) for x in values) + " |")
+            lines += ["", "Checkpoint paths (deduplicated per path, not per shared hard-link inode):", "",
+                      "| Setup | Full state inventory match | Model inventory match / full unavailable | Present unverified | Missing or changed |",
+                      "|---|---:|---:|---:|---:|"]
+            for setup in ("random", "domain"):
+                counts = Counter(x.get("status") for x in self.checkpoint_storage if x["setup"] == setup)
+                lines.append("| " + " | ".join(map(str, [setup, counts['FULL_STATE_INVENTORY_MATCH'],
+                    counts['MODEL_INVENTORY_MATCH_FULL_STATE_UNAVAILABLE'], counts['PRESENT_UNVERIFIED'],
+                    counts['MISSING'] + counts['INCOMPLETE_OR_CHANGED']])) + " |")
             lines += ["",
                      "| Role | Max logged update step | Distinct update steps | Validation steps | PBS allocated hours (known jobs) |", "|---|---:|---:|---|---:|"]
             for role, r in summary["roles"].items():
@@ -1025,6 +1324,9 @@ class Collector:
                       "job_timeline.csv separates shared backfill allocations from training cost. See validation_backfills.json for retries.", "",
                       "generation_rows.jsonl contains all recorded numeric output fields; output_samples.jsonl contains bounded examples.", "",
                       "Evidence contains full job logs, configuration/recovery records and checkpoint metadata. Tensor weights are not read.", "",
+                      "checkpoint_storage.json separates model, optimizer, LR/RNG and data-loader inventory checks. Historical retired sources can be missing normally.",
+                      "best_checkpoint_archives.json includes rescue results, winners, holds and actual payload observations in checkpoint_storage.json.",
+                      "Snapshots are non-atomic; files can be retired during collection. Recheck a changed live source before treating it as corruption.", "",
                       "Check warnings.json and manifest.json for missing/partial data. Unknown token counts are not inferred from text.", ""]
             lines += ["| Backfill setup | Checkpoint step | Verification | Rows | Math | IF | Conversation | Logic |",
                       "|---|---:|---|---:|---:|---:|---:|---:|"]
