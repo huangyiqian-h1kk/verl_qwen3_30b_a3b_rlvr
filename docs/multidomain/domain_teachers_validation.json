@@ -1,0 +1,59 @@
+{
+  "status": "PASS",
+  "scope": "Local CPU integration and fault injection; no ABCI jobs or GPU training executed",
+  "at_utc": "2026-10-26T19:51:19.326889+00:00",
+  "python": "3.12.14",
+  "dependencies": {
+    "torch": "2.14.1",
+    "torchdata": "0.11.0",
+    "numpy": "2.3.5",
+    "pyarrow": "26.0.0",
+    "omegaconf": "2.4.0"
+  },
+  "checks": [
+    {
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/multidomain",
+        "-p",
+        "test_domain_teachers.py",
+        "-q"
+      ],
+      "returncode": 0,
+      "tests": 27,
+      "elapsed_seconds": 2.897,
+      "status": "PASS"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/multidomain",
+        "-p",
+        "test_training_continuation*.py",
+        "-q"
+      ],
+      "returncode": 0,
+      "tests": 167,
+      "elapsed_seconds": 36.559,
+      "status": "PASS"
+    }
+  ],
+  "static_checks": [
+    "ruff check --select F: PASS",
+    "ruff format: applied",
+    "git diff --check: PASS"
+  ],
+  "pending_cluster_checks": [
+    "Pinned ABCI CPU preflight with actual data/verifier archive",
+    "Eight-GPU training and full Megatron checkpoint restore",
+    "Selected HF export, fresh-process load/forward, final cross-domain tests"
+  ]
+}

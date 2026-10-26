@@ -1,4 +1,12 @@
-# 0390：四域单节点 GRPO
+# 0390：独立 domain teachers
+
+本分支新增四个独立单域 teacher：每个一节点八 GPU、最多 200 步，每 5 步保存，step 0 / 每 10 步 / 结束时做完整本域 validation。入口为 `scripts/domain_teachers.py`。
+
+**安装、启动、监护恢复、停止、best 导出及最终四域 test：见 [domain teacher 操作说明](docs/multidomain/domain_teachers.md)。**
+
+以下保留原四域实验说明。
+
+# 0390：原四域单节点 GRPO
 
 本分支使用 `math`、`if`、`conversational_pivot`、`logic_algorithmic`，各占训练集的 25%。关闭 science 和 swe_pivot，关闭 science judge。
 

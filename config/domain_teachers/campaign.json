@@ -1,0 +1,20 @@
+{
+  "version": "d4-domain-teachers-v1",
+  "campaign": "qwen30b_d4_teachers_seed42_v1",
+  "seed": 42,
+  "max_concurrent_jobs": 4,
+  "max_no_progress_retries": 3,
+  "poll_seconds": 30,
+  "max_steps": 200,
+  "save_every": 5,
+  "validate_every": 10,
+  "early_stop_min_step": 50,
+  "early_stop_patience_steps": 25,
+  "retain_full_during_training": 2,
+  "retain_full_after_training": 1,
+  "auto_export": true,
+  "auto_test": true,
+  "parent_root": "/groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d",
+  "parent_data": "data/multidomain/four_domains_10k_v1",
+  "source_request": "outputs/multidomain/qwen30b_d4_10k_uniform_ctx64k_seed42_v1_db_continuation_v1/jobs/formal_4f2e239caeda4a178315ef9ad0899af0/request.json"
+}
