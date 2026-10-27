@@ -160,6 +160,7 @@ def main(argv=None):
             "evaluate",
             "collect",
             "storage",
+            "repair-retries",
         ),
     )
     p.add_argument(
@@ -207,6 +208,10 @@ def main(argv=None):
         result = controller.status(a.campaign)
     elif a.action == "storage":
         result = allocated_storage(a.campaign)
+    elif a.action == "repair-retries":
+        from .retry_repair import repair
+
+        result = repair(a.campaign)
     else:
         result = collect(a.campaign)
     print(json.dumps(result, ensure_ascii=False, indent=2))

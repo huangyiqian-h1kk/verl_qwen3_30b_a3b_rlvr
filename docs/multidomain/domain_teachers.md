@@ -76,7 +76,24 @@ CPU `preflight` 检查 pinned verl、数据、tokenizer、模型资产 inventory
 
 监护无固定截止时间，使用共享文件系统 flock；heartbeat 显示主机、时间及 stale 状态，不按另一主机上的 PID 杀进程。Q/R job 被接管，H 保持原 job 并显示 `BLOCKED_HELD`。qstat 不明或 qsub 结果不明时保留 intent/job，不再盲投；修复 PBS 可观测性后 `resume` 会重新核实。
 
-只有已观察到 walltime exceeded（`-29` 且对应 comment）或管理员终止（`271`）才自动续投；应用错误会阻塞该 teacher。连续无新完整 checkpoint/已完成 eval rows 的失败最多累计 3 次；有进展会清零。一个 teacher 被阻塞时，其他 teacher 继续。后台进程退出或异常请查看 `guardian.log` 和 `status`。
+只有已观察到 walltime exceeded（`-29` 且对应 comment）或管理员终止（`271`）才自动续投；应用错误会阻塞该 teacher。沿用旧 4-domain 正式训练的规则：即使中断前没有新增完整 checkpoint/已完成 eval rows，符合这两种原因仍会续投，没有“三次无进度即停止”的上限。`no_progress_retries` 只作为诊断计数，有进展会清零；旧 campaign 合同中冻结的 `max_no_progress_retries` 字段不再作为续投限制，无需修改合同。一个 teacher 被阻塞时，其他 teacher 继续。后台进程退出或异常请查看 `guardian.log` 和 `status`。
+
+### 修复已经启动的旧监护器
+
+初始 teacher 实现额外加入的三次上限偏离了旧 4-domain 正式训练规则。更新 Git checkout 本身不会更新 campaign 内冻结的监护器。更新本分支后，在 `heartbeat.json` 显示的 guardian 主机上运行：
+
+```bash
+"$teacher_python" -I scripts/domain_teachers.py repair-retries --campaign "$teacher_campaign"
+"$teacher_python" -I scripts/domain_teachers.py status --campaign "$teacher_campaign"
+```
+
+该命令先验证冻结合同和 CPU preflight，在独立 `controller_revisions/` 下生成并校验监护代码副本；取得 launch/control 锁后，在旧监护器不处于 PBS 事务中的时刻，用 pidfd 验证并终止本用户、本主机、准确命令行的登录节点监护进程。它不调用 `qdel`，不修改训练数据、冻结 template、campaign identity、已有 job request、checkpoint 或评估 journal。
+
+修复会为每个 `BLOCKED_RETRIES` 重新查询其 `previous_job`，校验 owner/queue/name/提交路径以及 campaign/domain/phase，只有确认 271 或 walltime -29、且没有 job/pending 或显式 stop fence 时才改回 READY。应用错误、未知结束状态和显式停止保持阻塞。READY 的任务由新监护器按原并发上限续投，从最新完整 checkpoint 恢复；日志中尚未保存的步数不作为恢复点。修复之前的 state/PBS 证据保存在 `repairs/four-domain-retries-v1/`。
+
+`REPAIRED_GUARDIAN_RUNNING` 表示已确认新监护代码持锁且完成第一次 tick；另看 `recovered` 是否为 `REARMED`，以及对应 `states` 中的新 job ID，不能把监护正常等同于所有 teacher 都正常。`REPAIR_INSTALLED_CHECK_GUARDIAN` 表示尚未获得第一次 tick 的确认，应检查 status/guardian.log。心跳中的 `retry_policy` 应为 `four-domain-external-interruption-v1`。重复执行同一修复不会重新提交已有 job，也不会重启已验证的新监护器。启动入口会持续指向校验过的修复副本，旧的 start/resume 入口也不能重新启动旧策略。
+
+已有本域训练完成但四域 test 出错的 teacher 不会被此命令解除应用错误阻塞；应保留导出模型，收集 `collect` 诊断包定位 verifier 错误后再恢复评估。
 
 ## 评估恢复、导出和保存空间
 
@@ -108,8 +125,10 @@ validation/test 的每个完成 batch 都原子写入 journal，绑定 model/che
 ## 本地验证
 
 ```bash
-python -m unittest discover -s tests/multidomain -p test_domain_teachers.py -v
+python -m unittest discover -s tests/multidomain -p 'test_domain_teachers*.py' -v
 python -m unittest discover -s tests/multidomain -p 'test_training_continuation*.py' -q
 ```
 
 新增测试需要 PyArrow、NumPy、PyTorch 和 torchdata（正式环境已经安装）。覆盖实际 Parquet 分片、实际 torchdata cursor、固定 pinned validator 的中断恢复、模型选择与 hardlink retention、PBS intent/stop/held/unknown/retry/concurrency 故障。GPU Megatron 保存/恢复、HF 导出和完整训练仍需在 ABCI 正式执行时取得证据。
+
+2026-10-28 续投修复验证：42 项 teacher 测试（含新增 15 项修复测试）和 167 项 continuation 回归全部通过。修复测试运行真实隔离 Python 子进程、pidfd/SIGTERM 和文件锁，验证旧监护接替、缺少 Python pidfd wrapper 时的内核兼容路径、错误主机/命令行拒绝、停止优先、旧 start/resume 入口、发布中断恢复、准确一次续投，以及训练合同/数据/checkpoint/已有 request 不变。PBS 命令和权重 payload 使用本地 fixture；这些结果不代表已经在 ABCI 部署或恢复 GPU 训练。

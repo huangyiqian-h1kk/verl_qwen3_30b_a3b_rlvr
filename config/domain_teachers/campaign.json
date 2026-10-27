@@ -3,7 +3,6 @@
   "campaign": "qwen30b_d4_teachers_seed42_v1",
   "seed": 42,
   "max_concurrent_jobs": 4,
-  "max_no_progress_retries": 3,
   "poll_seconds": 30,
   "max_steps": 200,
   "save_every": 5,

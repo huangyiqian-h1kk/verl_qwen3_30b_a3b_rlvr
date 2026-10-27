@@ -393,7 +393,9 @@ class GuardianFaults(TestCase):
         self.assertEqual(len(self.pbs.submissions), 4)
         self.assertIsNotNone(read(controller.state_path(self.c, "math"))["pending"])
 
-    def test_only_observed_admin_or_walltime_retry_and_no_progress_is_bounded(self):
+    def test_admin_and_walltime_retries_continue_without_durable_progress(self):
+        # A previously frozen v1 policy must no longer veto eligible retries.
+        self.c["policy"]["max_no_progress_retries"] = 3
         s = self.tick()
         math = s["math"]["job"]
         other = s["if"]["job"]
@@ -406,13 +408,17 @@ class GuardianFaults(TestCase):
         s = self.tick()
         self.assertEqual(s["if"]["status"], "BLOCKED_APPLICATION")
         self.assertEqual(s["math"]["status"], "QUEUED")
-        for i in range(2):
+        for i in range(8):
             self.pbs.rows[s["math"]["job"]["job_id"]] = {
                 "job_state": "F",
-                "Exit_status": "271",
+                "Exit_status": "271" if i % 2 == 0 else "-29",
+                "comment": "walltime exceeded"
+                if i % 2
+                else "terminated by root@login1",
             }
             s = self.tick()
-        self.assertEqual(s["math"]["status"], "BLOCKED_RETRIES")
+            self.assertEqual(s["math"]["status"], "QUEUED")
+        self.assertEqual(s["math"]["no_progress_retries"], 9)
 
     def test_stop_during_qsub_cancels_exact_job_and_waits_for_terminal(self):
         self.pbs.after_submit = lambda: write(self.root / "STOP.json", {})

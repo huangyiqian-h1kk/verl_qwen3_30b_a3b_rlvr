@@ -5,13 +5,24 @@ from pathlib import Path
 import socket
 import time
 from . import DOMAINS
-from .common import active, age_seconds, is_fenced, lock, need, now, read, write
+from .common import (
+    active,
+    age_seconds,
+    file_sha,
+    is_fenced,
+    lock,
+    need,
+    now,
+    read,
+    write,
+)
 from .source import load_campaign, make_job
 from .exporting import manifest, validate_export
 from d4_training_continuation import checkpoints as ck
 from d4_training_continuation.scheduler import PBS, Unknown, finished, retryable
 
 TASKS = (*DOMAINS, "base")
+RETRY_POLICY = "four-domain-external-interruption-v1"
 TERMINAL = {
     "DONE",
     "STOPPED",
@@ -103,6 +114,10 @@ def reconcile(c, domain, state, pbs):
             return
         row = pbs.observe(job)
         state["pbs"] = row
+        if state.get("error"):
+            state["previous_error"] = dict(
+                message=state.pop("error"), observed_utc=state.get("observed_utc")
+            )
         if is_fenced(c["path"], domain):
             if pbs.cancel(job, folder / "cancel.json"):
                 state.update(status="STOPPED", previous_job=job, job=None)
@@ -150,9 +165,10 @@ def reconcile(c, domain, state, pbs):
                 no_progress_retries=count,
                 previous_job=job,
                 job=None,
-                status="BLOCKED_RETRIES"
-                if count >= c["policy"]["max_no_progress_retries"]
-                else "READY",
+                # Match the original 4-domain formal-training retry policy.
+                # Lost work before a durable save is not an application failure.
+                # Keep the counter as telemetry, never as a retry veto.
+                status="READY",
             )
         else:
             state.update(
@@ -226,6 +242,9 @@ def tick(c, pbs=None):
             at_utc=now(),
             host=socket.gethostname(),
             pid=os.getpid(),
+            retry_policy=RETRY_POLICY,
+            controller_file=str(Path(__file__).resolve()),
+            controller_sha256=file_sha(__file__),
             states={d: s["status"] for d, s in states.items()},
         ),
     )
@@ -242,6 +261,17 @@ def guardian(path):
         "Run CPU preflight first",
     )
     with lock(Path(path) / "guardian.lock"):
+        write(
+            Path(path) / "guardian_runtime.json",
+            dict(
+                at_utc=now(),
+                host=socket.gethostname(),
+                pid=os.getpid(),
+                retry_policy=RETRY_POLICY,
+                controller_file=str(Path(__file__).resolve()),
+                controller_sha256=file_sha(__file__),
+            ),
+        )
         while True:
             with lock(Path(path) / "control.lock", wait=60):
                 states = tick(c)

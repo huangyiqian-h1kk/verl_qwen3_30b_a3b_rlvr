@@ -20,7 +20,6 @@ def load(path=DEFAULT):
         "early_stop_min_step",
         "early_stop_patience_steps",
         "max_concurrent_jobs",
-        "max_no_progress_retries",
         "poll_seconds",
     ):
         need(type(c[k]) is int and c[k] >= 0, "Invalid integer: " + k)
