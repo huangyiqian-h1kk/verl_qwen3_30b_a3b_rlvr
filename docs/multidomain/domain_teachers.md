@@ -93,6 +93,8 @@ CPU `preflight` 检查 pinned verl、数据、tokenizer、模型资产 inventory
 
 已经运行的旧代码尚不支持共享请求，首次迁移会自动使用有超时的非交互 SSH 连接记录中的 `loginN`，在该节点验证用户、准确命令行和 pidfd 后停止旧监护器，再由当前节点取得共享锁。SSH 保留正常主机密钥校验；不把远端 PID 当成本机 PID 使用。节点间 SSH 若因认证、主机密钥或网络问题不可用，会报告具体错误；只要原锁仍被持有，就不会启动第二个 guardian，也不会解除 CP 阻塞或新增投递。已完成远端停止但回执丢失时，以实际共享锁是否释放为准。交接证据保存在 `repairs/guardian_handoffs/`；正常交接不改变已提交 GPU job。新版 guardian 的 `guardian_runtime.json` 包含 `handoff_policy` 和每次启动唯一的 `incarnation`。
 
+首次 SSH 连接使用 `StrictHostKeyChecking=accept-new`：将首次见到的节点密钥记录到正常的 known_hosts，之后仍拒绝密钥不匹配。原来的 `BatchMode=yes` 配合默认 `ask` 无法进行首次确认，会直接报 `Host key verification failed`。单凭这行错误不能断定是首次连接还是密钥冲突；此修复只处理首次记录，不删除或覆盖已有信任记录，也不关闭主机密钥检查。该选项仅用于旧 guardian 的一次性 SSH 交接，不修改全局 SSH 配置。若仍报密钥变化或 public-key 认证失败，应依据具体错误核实节点身份或认证条件；此时不会提交替代 job。
+
 修复会为每个 `BLOCKED_RETRIES` 重新查询其 `previous_job`，校验 owner/queue/name/提交路径以及 campaign/domain/phase，只有确认 271 或 walltime -29、且没有 job/pending 或显式 stop fence 时才改回 READY。仍持有 job/pending 的 `BLOCKED_UNKNOWN` 由新监护正常重查：确认 271/walltime 后续投，确认 Q/R 则接管原 job，确认应用错误则保持应用阻塞；未知状态本身不授予续投权限。显式停止始终优先。READY 的任务由新监护器按原并发上限续投，从最新完整 checkpoint 恢复；日志中尚未保存的步数不作为恢复点。修复之前的 state/PBS 证据保存在 `repairs/four-domain-retries-v1/`。
 
 `REPAIRED_GUARDIAN_RUNNING` 表示已确认新监护代码持锁且完成第一次 tick；旧重试上限的恢复另看 `recovered` 是否为 `REARMED`，以及对应 `states` 中的新 job ID。对于持有 job 的 `BLOCKED_UNKNOWN`，`recovered` 可以为空，应检查 `states` 的实际状态和 job ID，不能把监护正常等同于所有 teacher 都正常。`REPAIR_INSTALLED_CHECK_GUARDIAN` 表示尚未获得第一次 tick 的确认，PBS 连续超时可能使首次 tick 超过命令的 20 秒等待窗口，应检查后续 status/guardian.log。心跳中的 `retry_policy` 应为 `four-domain-external-interruption-v1`，`observation_policy` 应为 `persistent-pbs-observation-v1`。重复执行同一修复不会重新提交已有 job，也不会重启已验证的新监护器。启动入口会持续指向校验过的修复副本，旧的 start/resume 入口也不能重新启动旧策略。
@@ -164,3 +166,5 @@ python -m unittest discover -s tests/multidomain -p 'test_training_continuation*
 2026-10-29 Math final-test 修复验证：57 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。新增 8 项测试覆盖真实隔离评分子进程中的原错误复现、正确/错误答案及原 13 项 selfcheck、preflight 失败不改变作业、监护交接、重复修复不重复投递、271 后保留修复评分版本、不同 verifier 缓存隔离、stop/作业身份限制和混合评分版本的汇总标记。另以用户提供的完整失败输入在相同五个依赖版本的隔离子进程重放：原版报同一异常，修复版正常比较并返回 0 分。公开 fixture 仅包含通用合成输入和原评分源码，不包含该完整诊断或模型输出。生产部署会在 ABCI 使用原始冻结 ZIP 再次执行 preflight；本地结果不代表已提交或完成 GPU test。
 
 2026-10-30 跨登录节点交接验证：63 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。使用真实旧版 controller 子进程、文件锁、pidfd 和隔离远端 helper，验证从其他节点自动迁移旧 guardian、新版共享请求交接、请求端退出/过期/错误实例拒绝、SSH 失败不改变原 owner/job、SSH 回执丢失后以共享锁为准，以及重复修复不重复投递。CP 修复集成测试也通过同一远端 helper 完成 CPU preflight、交接和 test 恢复，并验证 271 续投保留评分器版本。测试中的 SSH/PBS 传输和主机名使用 fixture；尚未在 ABCI 验证实际节点间 SSH 连通性或提交新 GPU job。
+
+2026-10-30 首次 SSH 主机信任修复验证：6 项监护交接回归通过；另用真实 OpenSSH 客户端和仅监听回环地址的临时 SSH 协议服务器验证四种情况：旧 BatchMode 调用拒绝未知主机、修复后首次连接记录密钥并成功、重复连接成功、同一地址更换主机密钥时拒绝远端命令且保留原 known_hosts。临时服务器使用内存中生成的测试密钥，不执行请求中的命令；不修改系统 SSH 配置，生产无需新增 Python 依赖。此验证覆盖主机密钥处理，不证明 ABCI 实际账户认证已成功。

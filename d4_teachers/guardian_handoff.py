@@ -119,7 +119,8 @@ def pause(root, runtime, seconds):
 def remote_signal(root, request, timeout):
     # Bootstrap old frozen controllers, which cannot read the new mailbox.
     # Route only to an internal ABCI login hostname; never interpret host text
-    # or campaign paths as shell syntax, and keep normal SSH host-key checking.
+    # or campaign paths as shell syntax. Record first-use host keys, but reject
+    # changed keys; BatchMode cannot answer the default first-use confirmation.
     host = str(request["owner"]["value"]["host"]).split(".")[0]
     need(re.fullmatch(r"login[1-9][0-9]*", host), "Invalid guardian login hostname")
     command = shlex.join(
@@ -136,6 +137,7 @@ def remote_signal(root, request, timeout):
             "ssh",
             "-T",
             "-oBatchMode=yes",
+            "-oStrictHostKeyChecking=accept-new",
             "-oConnectTimeout=8",
             "-oConnectionAttempts=1",
             "-oServerAliveInterval=5",
