@@ -32,6 +32,11 @@ ORIGINAL_SOURCES = {
     "controller.py": "6ea0f1110b3cc73ad16ba1d5f30d3a00ffe6bc46b984900be59db2e637eff3ef",
     "cli.py": "4a41847623814d848ca621afdede506f130095017559806fcba2a59a1f12a329",
 }
+# Campaigns prepared after the first retry repair froze this published version.
+# Accept it as well as the initial and current sources; never edit the template.
+PREVIOUS_CONTROLLER_SHA = (
+    "03463b5f3e9d01d9d64e30d0bd4210dad683b74f9135384a2235f6577c07076e"
+)
 ORIGINAL_ENTRY = (
     "from pathlib import Path\nimport sys\n"
     "sys.path.insert(0,str(Path(__file__).resolve().parent/'template/runtime'))\n"
@@ -84,8 +89,11 @@ def prepare_revision(c):
         for name in (*ORIGINAL_SOURCES, "retry_repair.py")
     }
     for name, original in ORIGINAL_SOURCES.items():
+        accepted = {original, file_sha(replacements[name])}
+        if name == "controller.py":
+            accepted.add(PREVIOUS_CONTROLLER_SHA)
         need(
-            file_sha(source / name) in (original, file_sha(replacements[name])),
+            file_sha(source / name) in accepted,
             "Unsupported frozen controller source: " + name,
         )
     expected = {
@@ -138,6 +146,7 @@ def runtime_status(c, revision):
         and runtime.get("controller_file") == str(expected)
         and runtime.get("controller_sha256") == checksum
         and runtime.get("retry_policy") == controller.RETRY_POLICY
+        and runtime.get("observation_policy") == controller.OBSERVATION_POLICY
     )
     completed = bool(
         verified
@@ -345,6 +354,7 @@ def repair(path, pbs=None, wait_seconds=20):
                             controller_restart_required=restart,
                             campaign_identity=c["identity"],
                             retry_policy=controller.RETRY_POLICY,
+                            observation_policy=controller.OBSERVATION_POLICY,
                         ),
                     )
                 finally:
@@ -363,6 +373,7 @@ def repair(path, pbs=None, wait_seconds=20):
             if binding["first_tick_completed"]
             else "REPAIR_INSTALLED_CHECK_GUARDIAN",
             retry_policy=controller.RETRY_POLICY,
+            observation_policy=controller.OBSERVATION_POLICY,
             campaign_identity=c["identity"],
             controller_revision=revision["identity"],
             controller_runtime=binding,

@@ -95,6 +95,7 @@ class RetryRepair(fixtures.TestCase):
             "with (root/'pbs_calls.jsonl').open('a') as f: f.write(json.dumps([name]+sys.argv[1:])+'\\n')\n"
             "rows=json.loads((root/'pbs_rows.json').read_text())\n"
             "if name=='qstat':\n"
+            "    if (root/'pbs_unavailable').exists(): raise SystemExit(1)\n"
             f"    print({queue!r} if '-Qf' in sys.argv else json.dumps({{'Jobs':rows}}))\n"
             "elif name=='qsub':\n"
             "    request=json.loads((Path(sys.argv[1]).parent/'request.json').read_text())\n"
@@ -411,6 +412,152 @@ class RetryRepair(fixtures.TestCase):
 
     def test_old_start_resume_entry_cannot_resurrect_retry_cap(self):
         self.handoff(legacy_resume=True)
+
+    def previous_observer(self):
+        """Install the published retry fix with its original guardian-exit bug."""
+        current = repair.prepare_revision(self.c)
+        previous = (
+            Path(__file__).parent
+            / "fixtures/domain_teachers/controller_before_liveness.py"
+        )
+        self.assertEqual(file_sha(previous), repair.PREVIOUS_CONTROLLER_SHA)
+        payload = {k: v for k, v in current.items() if k != "identity"}
+        payload["files"] = dict(payload["files"])
+        payload["files"]["d4_teachers/controller.py"] = file_sha(previous)
+        revision = dict(payload, identity=digest(payload))
+        revisions = self.campaign / "controller_revisions"
+        target = revisions / revision["identity"]
+        shutil.copytree(revisions / current["identity"] / "runtime", target / "runtime")
+        shutil.copy2(previous, target / "runtime/d4_teachers/controller.py")
+        self.assertEqual(files(target / "runtime"), revision["files"])
+        write(target / "manifest.json", revision)
+        write(self.campaign / "controller_revision.json", revision)
+        (self.campaign / "control.py").write_text(repair.ENTRY)
+        return revision
+
+    def test_deployed_observer_upgrade_survives_pbs_outage_and_retries_once(self):
+        for domain in ("math", "if"):
+            state = read(controller.state_path(self.c, domain))
+            state.update(status="DONE", phase="test", job=None)
+            write(controller.state_path(self.c, domain), state)
+        state = self.state()
+        state.update(status="QUEUED", job=self.jobs["logic_algorithmic"])
+        write(controller.state_path(self.c, "logic_algorithmic"), state)
+        previous = self.previous_observer()
+        unavailable = self.root / "pbs_unavailable"
+        unavailable.touch()
+        with (self.campaign / "guardian.log").open("a") as stream:
+            old = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    str(self.campaign / "control.py"),
+                    "guardian",
+                    "--campaign",
+                    str(self.campaign),
+                ],
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+            )
+        self.children.append(old)
+        # This is the production failure: the installed observer exits normally.
+        self.assertEqual(old.wait(timeout=10), 0)
+        self.assertFalse(active(self.campaign / "guardian.lock"))
+        self.assertEqual(self.state()["status"], "BLOCKED_UNKNOWN")
+        preserved = {
+            "campaign.json": file_sha(self.campaign / "campaign.json"),
+            "template": files(self.campaign / "template"),
+            "data": files(self.campaign / "data"),
+            "checkpoints": files(self.campaign / "runs/logic_algorithmic/checkpoints"),
+            "requests": {
+                d: file_sha(Path(j["folder"]) / "request.json")
+                for d, j in self.jobs.items()
+            },
+        }
+        unavailable.unlink()
+        popen = subprocess.Popen
+
+        def record(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            self.children.append(child)
+            return child
+
+        with patch.object(subprocess, "Popen", side_effect=record):
+            result = repair.repair(self.campaign, wait_seconds=10)
+            self.assertEqual(result["status"], "REPAIRED_GUARDIAN_RUNNING", result)
+            self.assertNotEqual(result["controller_revision"], previous["identity"])
+            self.assertEqual(
+                result["observation_policy"], controller.OBSERVATION_POLICY
+            )
+            self.assertEqual(
+                result["recovered"], {}
+            )  # Normal reconciliation owns this job.
+            self.assertEqual(self.state()["status"], "QUEUED")
+            new_job = self.state()["job"]
+            self.assertNotEqual(
+                new_job["job_id"], self.jobs["logic_algorithmic"]["job_id"]
+            )
+            unavailable.touch()
+            self.wait_for(lambda: self.state()["status"] == "BLOCKED_UNKNOWN")
+            beat = read(self.campaign / "heartbeat.json")
+            self.wait_for(
+                lambda: (
+                    read(self.campaign / "heartbeat.json")["at_utc"] != beat["at_utc"]
+                )
+            )
+            self.assertTrue(active(self.campaign / "guardian.lock"))
+            self.assertEqual(self.state()["job"], new_job)
+            unavailable.unlink()
+            self.wait_for(lambda: self.state()["status"] == "QUEUED")
+            repeated = repair.repair(self.campaign, wait_seconds=2)
+            self.assertEqual(
+                repeated["controller_runtime"]["runtime"]["pid"],
+                result["controller_runtime"]["runtime"]["pid"],
+            )
+        self.assertEqual([x[0] for x in self.calls()].count("qsub"), 1)
+        self.assertFalse(any(x[0] == "qdel" for x in self.calls()))
+        self.assertEqual(self.state()["job"], new_job)
+        self.assertEqual(
+            read(controller.state_path(self.c, "conversational_pivot"))["status"],
+            "BLOCKED_APPLICATION",
+        )
+        self.assertEqual(
+            file_sha(self.campaign / "campaign.json"), preserved["campaign.json"]
+        )
+        for name in ("template", "data"):
+            self.assertEqual(files(self.campaign / name), preserved[name])
+        self.assertEqual(
+            files(self.campaign / "runs/logic_algorithmic/checkpoints"),
+            preserved["checkpoints"],
+        )
+        self.assertEqual(
+            {
+                d: file_sha(Path(j["folder"]) / "request.json")
+                for d, j in self.jobs.items()
+            },
+            preserved["requests"],
+        )
+
+    def test_campaign_prepared_with_previous_controller_is_supported_without_template_edit(
+        self,
+    ):
+        previous = (
+            Path(__file__).parent
+            / "fixtures/domain_teachers/controller_before_liveness.py"
+        )
+        shutil.copy2(
+            previous, self.campaign / "template/runtime/d4_teachers/controller.py"
+        )
+        self.c["contract"]["template_files"] = files(self.campaign / "template")
+        self.c["identity"] = digest(self.c["contract"])
+        write(self.campaign / "campaign.json", self.c)
+        before = files(self.campaign / "template")
+        revision = repair.prepare_revision(source.load_campaign(self.campaign))
+        self.assertEqual(files(self.campaign / "template"), before)
+        self.assertEqual(
+            revision["files"]["d4_teachers/controller.py"],
+            file_sha(controller.__file__),
+        )
 
     def test_launcher_rejects_modified_controller_snapshot(self):
         revision = repair.prepare_revision(self.c)

@@ -23,13 +23,14 @@ from d4_training_continuation.scheduler import PBS, Unknown, finished, retryable
 
 TASKS = (*DOMAINS, "base")
 RETRY_POLICY = "four-domain-external-interruption-v1"
+OBSERVATION_POLICY = "persistent-pbs-observation-v1"
+# Unknown observations and held jobs still need their existing owner. They must
+# keep this loop alive even when every other teacher has already finished/failed.
 TERMINAL = {
     "DONE",
     "STOPPED",
     "BLOCKED_APPLICATION",
-    "BLOCKED_HELD",
     "BLOCKED_RETRIES",
-    "BLOCKED_UNKNOWN",
     "BLOCKED_ARTIFACT",
 }
 
@@ -243,13 +244,14 @@ def tick(c, pbs=None):
             host=socket.gethostname(),
             pid=os.getpid(),
             retry_policy=RETRY_POLICY,
+            observation_policy=OBSERVATION_POLICY,
             controller_file=str(Path(__file__).resolve()),
             controller_sha256=file_sha(__file__),
             states={d: s["status"] for d, s in states.items()},
         ),
     )
     # A blocked teacher is independent; the other teachers continue. Unknown and
-    # held jobs remain owned, and can be re-observed with an explicit resume.
+    # held jobs remain owned and are re-observed on every subsequent poll.
     return states
 
 
@@ -268,6 +270,7 @@ def guardian(path):
                 host=socket.gethostname(),
                 pid=os.getpid(),
                 retry_policy=RETRY_POLICY,
+                observation_policy=OBSERVATION_POLICY,
                 controller_file=str(Path(__file__).resolve()),
                 controller_sha256=file_sha(__file__),
             ),

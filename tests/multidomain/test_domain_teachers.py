@@ -24,6 +24,7 @@ from d4_teachers import (
 )
 from d4_teachers import exporting, trainer as teacher_trainer
 from d4_teachers.common import (
+    active,
     digest,
     file_sha,
     files,
@@ -392,6 +393,175 @@ class GuardianFaults(TestCase):
         self.tick()
         self.assertEqual(len(self.pbs.submissions), 4)
         self.assertIsNotNone(read(controller.state_path(self.c, "math"))["pending"])
+
+    def last_teacher(self):
+        """Reproduce two completed teachers, a failed CP test and unfinished Logic."""
+        self.c["identity"] = "guardian-loop-fixture"
+        write(
+            self.root / "preflight.json",
+            dict(status="PASS", campaign_identity=self.c["identity"]),
+        )
+        for domain in ("math", "if"):
+            state = read(controller.state_path(self.c, domain))
+            state.update(status="DONE", phase="test")
+            write(controller.state_path(self.c, domain), state)
+        state = read(controller.state_path(self.c, "conversational_pivot"))
+        job = dict(self.make(self.c, "conversational_pivot", "test"), job_id="cp")
+        state.update(status="BLOCKED_APPLICATION", phase="test", job=job)
+        write(controller.state_path(self.c, "conversational_pivot"), state)
+        self.pbs.rows["cp"] = dict(job_state="F", Exit_status=1)
+        checkpoint(
+            self.root / "runs/logic_algorithmic/checkpoints/global_step_10",
+            10,
+            lineage="logic_algorithmic",
+        )
+        state = read(controller.state_path(self.c, "logic_algorithmic"))
+        state.update(last_progress=1000000, no_progress_retries=3)
+        write(controller.state_path(self.c, "logic_algorithmic"), state)
+        return self.tick()["logic_algorithmic"]
+
+    def run_guardian(self, between_polls):
+        with (
+            patch.object(controller, "load_campaign", return_value=self.c),
+            patch.object(controller, "PBS", return_value=self.pbs),
+            patch.object(controller.time, "sleep", side_effect=between_polls) as sleep,
+        ):
+            states = controller.guardian(self.root)
+        self.assertFalse(active(self.root / "guardian.lock"))
+        return states, sleep.call_count
+
+    def test_guardian_survives_repeated_unknown_then_retries_271_once(self):
+        original = self.last_teacher()["job"]
+        self.pbs.unknown = True
+        polls = []
+
+        def between_polls(seconds):
+            state = read(controller.state_path(self.c, "logic_algorithmic"))
+            polls.append(state["status"])
+            self.assertTrue(active(self.root / "guardian.lock"))
+            beat = read(self.root / "heartbeat.json")
+            self.assertEqual(beat["states"]["logic_algorithmic"], state["status"])
+            self.assertEqual(seconds, self.c["policy"]["poll_seconds"])
+            if len(polls) <= 2:
+                self.assertEqual(state["status"], "BLOCKED_UNKNOWN")
+                self.assertEqual(state["job"], original)
+                self.assertEqual(len(self.pbs.submissions), 1)
+                if len(polls) == 2:
+                    self.pbs.unknown = False
+                    self.pbs.rows[original["job_id"]] = dict(
+                        job_state="F", Exit_status=271
+                    )
+            elif len(polls) == 3:
+                self.assertEqual(state["status"], "QUEUED")
+                self.assertNotEqual(state["job"]["job_id"], original["job_id"])
+                self.assertEqual(state["previous_job"], original)
+                self.assertEqual(state["no_progress_retries"], 4)
+                self.assertNotIn("error", state)
+                self.assertIn("qstat", state["previous_error"]["message"])
+                self.pbs.rows[state["job"]["job_id"]] = dict(job_state="R")
+            elif len(polls) == 4:
+                self.assertEqual(state["status"], "RUNNING")
+                self.assertEqual(len(self.pbs.submissions), 2)
+                self.pbs.rows[state["job"]["job_id"]] = dict(
+                    job_state="F", Exit_status=1
+                )
+            else:
+                self.fail("Guardian must exit after confirmed application failures")
+
+        states, count = self.run_guardian(between_polls)
+        self.assertEqual(count, 4)
+        self.assertEqual(len(self.pbs.submissions), 2)
+        self.assertFalse(self.pbs.cancellations)
+        self.assertEqual(
+            states["conversational_pivot"]["status"], "BLOCKED_APPLICATION"
+        )
+        self.assertEqual(states["logic_algorithmic"]["status"], "BLOCKED_APPLICATION")
+
+    def test_guardian_observes_held_job_until_released_without_resubmitting(self):
+        job = self.last_teacher()["job"]
+        self.pbs.rows[job["job_id"]] = dict(job_state="H")
+        observed = []
+
+        def between_polls(_seconds):
+            state = read(controller.state_path(self.c, "logic_algorithmic"))
+            observed.append(state["status"])
+            self.assertEqual(state["job"], job)
+            self.assertTrue(active(self.root / "guardian.lock"))
+            self.assertEqual(len(self.pbs.submissions), 1)
+            rows = [
+                dict(job_state="Q"),
+                dict(job_state="R"),
+                dict(job_state="F", Exit_status=1),
+            ]
+            self.assertLessEqual(len(observed), len(rows))
+            self.pbs.rows[job["job_id"]] = rows[len(observed) - 1]
+
+        self.run_guardian(between_polls)
+        self.assertEqual(observed, ["BLOCKED_HELD", "QUEUED", "RUNNING"])
+
+    def test_guardian_keeps_ambiguous_intent_until_same_job_is_recovered(self):
+        self.pbs.ambiguous = True
+        state = self.last_teacher()
+        pending = state["pending"]
+        observed = []
+
+        def between_polls(_seconds):
+            state = read(controller.state_path(self.c, "logic_algorithmic"))
+            observed.append(state["status"])
+            self.assertEqual(len(self.pbs.submissions), 1)
+            self.assertTrue(active(self.root / "guardian.lock"))
+            if len(observed) <= 2:
+                self.assertEqual(state["pending"], pending)
+                self.assertIsNone(state["job"])
+                if len(observed) == 2:
+                    (Path(pending["folder"]) / "job_id.txt").write_text("recovered")
+                    self.pbs.rows["recovered"] = dict(job_state="Q")
+            elif len(observed) == 3:
+                self.assertIsNone(state["pending"])
+                self.assertEqual(state["job"]["folder"], pending["folder"])
+                self.assertEqual(state["job"]["job_id"], "recovered")
+                self.pbs.rows["recovered"] = dict(job_state="F", Exit_status=1)
+            else:
+                self.fail("Guardian failed to stop after the recovered job failed")
+
+        self.run_guardian(between_polls)
+        self.assertEqual(observed, ["BLOCKED_UNKNOWN", "BLOCKED_UNKNOWN", "QUEUED"])
+
+    def test_guardian_keeps_stop_fence_during_unknown_and_never_retries_271(self):
+        job = self.last_teacher()["job"]
+        write(self.root / "STOP.json", {})
+        self.pbs.unknown = True
+        observed = []
+
+        def between_polls(_seconds):
+            state = read(controller.state_path(self.c, "logic_algorithmic"))
+            observed.append(state["status"])
+            self.assertTrue(active(self.root / "guardian.lock"))
+            self.assertEqual(len(self.pbs.submissions), 1)
+            if len(observed) == 1:
+                self.assertFalse(self.pbs.cancellations)
+                self.pbs.unknown = False
+                self.pbs.rows[job["job_id"]] = dict(job_state="R")
+            elif len(observed) == 2:
+                self.assertEqual(self.pbs.cancellations, [job["job_id"]])
+                self.pbs.rows[job["job_id"]] = dict(job_state="F", Exit_status=271)
+            else:
+                self.fail("Confirmed stopped jobs must release the guardian")
+
+        states, _ = self.run_guardian(between_polls)
+        self.assertEqual(observed, ["BLOCKED_UNKNOWN", "STOPPING"])
+        self.assertEqual(states["logic_algorithmic"]["status"], "STOPPED")
+        self.assertIsNone(states["logic_algorithmic"]["job"])
+        self.assertTrue(is_fenced(self.root))
+
+    def test_guardian_exits_for_confirmed_application_failure_with_waiting_base(self):
+        job = self.last_teacher()["job"]
+        self.pbs.rows[job["job_id"]] = dict(job_state="F", Exit_status=1)
+        states, count = self.run_guardian(lambda _seconds: self.fail("Unexpected poll"))
+        self.assertEqual(count, 0)
+        self.assertEqual(states["logic_algorithmic"]["status"], "BLOCKED_APPLICATION")
+        self.assertEqual(states["base"]["status"], "READY")
+        self.assertEqual(len(self.pbs.submissions), 1)
 
     def test_admin_and_walltime_retries_continue_without_durable_progress(self):
         # A previously frozen v1 policy must no longer veto eligible retries.
