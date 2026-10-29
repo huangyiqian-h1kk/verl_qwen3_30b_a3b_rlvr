@@ -161,6 +161,7 @@ def main(argv=None):
             "collect",
             "storage",
             "repair-retries",
+            "repair-math-test",
         ),
     )
     p.add_argument(
@@ -173,14 +174,21 @@ def main(argv=None):
     p.add_argument("--domain", choices=(*DOMAINS, "base"))
     p.add_argument("--max-concurrent", type=int, choices=range(1, 5))
     p.add_argument("--background", action="store_true")
+    p.add_argument("--diagnostic", type=Path)
     a = p.parse_args(argv)
     need(
         a.max_concurrent is None or a.action == "prepare",
         "Set --max-concurrent at prepare time",
     )
     need(
-        a.domain is None or a.action in ("stop", "reenable", "export-best", "evaluate"),
-        "--domain is supported for stop, reenable, export-best and evaluate",
+        a.domain is None
+        or a.action
+        in ("stop", "reenable", "export-best", "evaluate", "repair-math-test"),
+        "--domain is supported for stop, reenable, export-best, evaluate and repair-math-test",
+    )
+    need(
+        a.diagnostic is None or a.action == "repair-math-test",
+        "--diagnostic is only supported for repair-math-test",
     )
     a.campaign = a.campaign.resolve()
     if a.action == "prepare":
@@ -212,6 +220,14 @@ def main(argv=None):
         from .retry_repair import repair
 
         result = repair(a.campaign)
+    elif a.action == "repair-math-test":
+        from .math_test_repair import repair
+
+        need(
+            a.domain in DOMAINS and a.diagnostic is not None,
+            "repair-math-test requires --domain and --diagnostic",
+        )
+        result = repair(a.campaign, a.domain, a.diagnostic)
     else:
         result = collect(a.campaign)
     print(json.dumps(result, ensure_ascii=False, indent=2))

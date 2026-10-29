@@ -238,6 +238,11 @@ def make_job(c, domain, role):
     text = reward.read_text()
     need(text.count(before) == 1, "Unknown Math diagnostics binding")
     reward.write_text(text.replace(before, repr(str(folder / "math_diagnostics"))))
+    test_revision = None
+    if role == "test":
+        from .math_test_repair import apply_to_job
+
+        test_revision = apply_to_job(c, folder)
     cfg = teacher_config(
         c["contract"]["base_config"],
         c["policy"],
@@ -293,7 +298,7 @@ def make_job(c, domain, role):
         data_manifest=read(campaign / "data/manifest.json"),
         base_model=c["contract"]["base_model"],
         base_identity=c["contract"]["base_identity"],
-        verifier_identity=c["contract"]["verifier_identity"],
+        verifier_identity=test_revision or c["contract"]["verifier_identity"],
         reward=dict(import_path="pkg://md_reward_roundoff_0390"),
         snapshot_files=files(folder),
     )
@@ -309,6 +314,8 @@ def make_job(c, domain, role):
         from .exporting import evaluation_model
 
         contract["evaluation_model"] = evaluation_model(c, domain)
+        if test_revision:
+            contract["test_verifier_revision"] = test_revision
     write(
         folder / "request.json",
         dict(contract, contract=contract, identity=digest(contract)),

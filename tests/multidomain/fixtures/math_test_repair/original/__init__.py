@@ -1,0 +1,5 @@
+"""Isolated math scoring repair for the existing one-domain-per-batch run."""
+VERSION = "2026-10-19.domain-math.2"
+RUN_ID = "qwen30b_d4_10k_uniform_ctx64k_seed42_v1_db_v1"
+SOURCE_JOB = "2703450.pbs1"
+POLICY = "math-verify-0.9-isolated-exact-product-timeout-zero-v2"

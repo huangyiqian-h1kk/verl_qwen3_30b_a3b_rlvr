@@ -203,7 +203,7 @@ def manifest(campaign):
     from .evaluation import read_receipt
 
     root = Path(campaign["path"])
-    teachers, matrix = {}, {}
+    teachers, matrix, test_verifiers = {}, {}, {}
     for domain in DOMAINS:
         run = root / "runs" / domain
         if not (run / "export.json").exists():
@@ -227,15 +227,31 @@ def manifest(campaign):
                 "Test used different weights",
             )
             matrix[domain] = {d: receipt["scores"][d] for d in DOMAINS}
+            test_verifiers[domain] = receipt["binding"]["verifier"]
     base = root / "runs/base/test.json"
+    base_receipt = read_receipt(base) if base.exists() else None
+    if base_receipt:
+        test_verifiers["base"] = base_receipt["binding"]["verifier"]
+    from .math_test_repair import active_revision
+
+    revision = active_revision(campaign)
+    expected_verifier = (
+        revision["identity"] if revision else campaign["contract"]["verifier_identity"]
+    )
+    complete = len(matrix) == 4 and base.exists()
+    current = all(v == expected_verifier for v in test_verifiers.values())
     result = dict(
         version="domain-teachers-manifest-v1",
         campaign_identity=campaign["identity"],
         teachers=teachers,
         test_matrix=matrix,
         test_columns=list(DOMAINS),
-        base_test=read_receipt(base)["scores"] if base.exists() else None,
-        tests_complete=len(matrix) == 4 and base.exists(),
+        base_test=base_receipt["scores"] if base_receipt else None,
+        tests_complete=complete,
+        test_verifier_identities=test_verifiers,
+        expected_test_verifier=expected_verifier,
+        tests_use_current_verifier=current,
+        comparable_tests_complete=complete and current,
         at_utc=now(),
     )
     write(root / "teachers.json", result)

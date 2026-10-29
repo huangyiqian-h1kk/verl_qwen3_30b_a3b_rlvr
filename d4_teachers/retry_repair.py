@@ -37,6 +37,7 @@ ORIGINAL_SOURCES = {
 PREVIOUS_CONTROLLER_SHA = (
     "03463b5f3e9d01d9d64e30d0bd4210dad683b74f9135384a2235f6577c07076e"
 )
+PREVIOUS_CLI_SHA = "d54d27ded81160c317fb656d6d82b95add93de989226235d3c3d3c7d1d7605da"
 ORIGINAL_ENTRY = (
     "from pathlib import Path\nimport sys\n"
     "sys.path.insert(0,str(Path(__file__).resolve().parent/'template/runtime'))\n"
@@ -86,12 +87,21 @@ def prepare_revision(c):
     source = root / "template/runtime/d4_teachers"
     replacements = {
         name: Path(__file__).with_name(name)
-        for name in (*ORIGINAL_SOURCES, "retry_repair.py")
+        for name in (
+            *ORIGINAL_SOURCES,
+            "retry_repair.py",
+            "source.py",
+            "exporting.py",
+            "math_test_repair.py",
+            "math_and_compat.py",
+        )
     }
     for name, original in ORIGINAL_SOURCES.items():
         accepted = {original, file_sha(replacements[name])}
         if name == "controller.py":
             accepted.add(PREVIOUS_CONTROLLER_SHA)
+        if name == "cli.py":
+            accepted.add(PREVIOUS_CLI_SHA)
         need(
             file_sha(source / name) in accepted,
             "Unsupported frozen controller source: " + name,
@@ -308,7 +318,7 @@ def recover_blocks(c, pbs):
     return results
 
 
-def repair(path, pbs=None, wait_seconds=20):
+def repair(path, pbs=None, wait_seconds=20, install_under_lease=None):
     from .cli import start
 
     root = Path(path).resolve()
@@ -330,12 +340,14 @@ def repair(path, pbs=None, wait_seconds=20):
                 need(not is_fenced(root), "Campaign stopped during repair")
                 binding = runtime_status(c, revision)
                 current = pointer.exists() and read(pointer) == revision
-                restart = not (
+                restart = install_under_lease is not None or not (
                     current
                     and binding["verified"]
                     and (root / "control.py").read_text() == ENTRY
                 )
                 lease = stop_and_acquire(root) if restart else None
+                install_error = None
+                installed = None
                 try:
                     # Preserve campaign.json, data, template, checkpoints, jobs and journals.
                     backup = root / "repairs" / REPAIR / "control.before.py"
@@ -344,6 +356,13 @@ def repair(path, pbs=None, wait_seconds=20):
                     atomic_text(root / "control.py", ENTRY)
                     write(pointer, revision)
                     recovered = recover_blocks(c, pbs or PBS())
+                    if install_under_lease is not None:
+                        try:
+                            installed = install_under_lease(c)
+                        except Exception as error:
+                            # Restore monitoring of other teachers even if the
+                            # guarded test repair lost fresh PBS evidence.
+                            install_error = error
                     write(
                         root / "repairs" / REPAIR / "latest.json",
                         dict(
@@ -355,12 +374,20 @@ def repair(path, pbs=None, wait_seconds=20):
                             campaign_identity=c["identity"],
                             retry_policy=controller.RETRY_POLICY,
                             observation_policy=controller.OBSERVATION_POLICY,
+                            installed=installed,
+                            installation_error=str(install_error)
+                            if install_error
+                            else None,
                         ),
                     )
                 finally:
                     if lease is not None:
                         lease.close()
         launch = start(root, True)
+        if install_error is not None:
+            raise RuntimeError(
+                "Test repair failed; guardian restart attempted: " + str(install_error)
+            ) from install_error
         until = time.monotonic() + wait_seconds
         while True:
             binding = runtime_status(c, revision)
@@ -379,6 +406,7 @@ def repair(path, pbs=None, wait_seconds=20):
             controller_runtime=binding,
             recovered=recovered,
             launch=launch,
+            installed=installed,
             states={
                 d: dict(
                     status=s["status"],

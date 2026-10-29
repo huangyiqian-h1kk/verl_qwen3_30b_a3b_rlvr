@@ -95,6 +95,28 @@ CPU `preflight` 检查 pinned verl、数据、tokenizer、模型资产 inventory
 
 已有本域训练完成但四域 test 出错的 teacher 不会被此命令解除应用错误阻塞；应保留导出模型，收集 `collect` 诊断包定位 verifier 错误后再恢复评估。
 
+### 修复 CP 最终 test 的 And/Equality 评分器错误
+
+已确认的错误是 `AttributeError: 'Equality' object has no attribute '_unsorted_args'`：冻结的 `latex2sympy2_extended==1.11.0` 在构造 `And` 时，无条件给返回值写入参数顺序元数据；SymPy 可能把该表达式化简成 `Equality` 或布尔值，导致比较过程异常。修复只在返回值仍为该 `And` 类型时设置元数据，保留原化简和数学比较，不把基础设施异常直接记为零分。
+
+更新 checkout 后，在当前 guardian 所在登录节点执行（若锁已释放，任一登录节点均可）。`teacher_diagnostic` 指向失败 test 作业的原始 `math_diagnostics/*.json` 或其完整副本：
+
+```bash
+"$teacher_python" -I scripts/domain_teachers.py repair-math-test --campaign "$teacher_campaign" --domain conversational_pivot --diagnostic "$teacher_diagnostic"
+"$teacher_python" -I scripts/domain_teachers.py status --campaign "$teacher_campaign"
+qstat -u "$USER"
+```
+
+该命令会执行部署并恢复投递，不只是诊断。先确认 frozen request、原始诊断哈希、Math test sample ID 和 PBS 已结束且 exit 1，再用本 campaign 原始 pinned ZIP，在 CPU 隔离子进程中重现错误、验证修复后的正常评分，运行原有 13 项 Math selfcheck 和 4 项正负比较检查。检查失败时不停止 guardian、不解除 CP 阻塞、不提交新 job；不需要修改共享 conda 环境或安装依赖。
+
+CPU 检查通过后，命令使用与 `repair-retries` 相同的锁和主机/PID 校验交接监护器，同时包含此前的持续观察和 271/walltime 续投修复。取得独占权后再次确认原失败作业，发布 `test_verifier_revision.json`，仅把该 teacher 的 **test** 阶段改回 READY，由 guardian 按原并发上限提交。已导出的 best HF 模型直接复用；CP 选择 step 50，训练完成步数仍为 80。不会重新训练、重新导出、清除 stop fence 或取消已有 GPU 作业。Logic 的已有作业由 guardian 正常观察，只有确认 271/walltime 才按既定规则续投。
+
+修复代码存放在独立的 `test_verifier_revisions/`，原 template、campaign identity、训练/validation 评分器和已有 job request 保持原样。补丁只注入未来 **final test** 的隔离 Math worker；CP、后续 Logic/base test 和这些 test 的 271/walltime 续投都使用此版本。新 verifier identity 使 CP 新建完整的 994-row test journal，旧 216 条已完成记录保留但不复用，避免新旧评分混用。Math/IF 已完成的旧 test 不会自动重跑。
+
+`MATH_TEST_REPAIR_INSTALLED` 表示补丁已安装，另看 `guardian.status`、实时 status 和新 CP test job ID 判断投递/排队/运行；它不代表 test 已完成。命令返回 `ALREADY_INSTALLED` 时不会再次解除状态，也不会重复提交已拥有的 job。`REPAIR_INSTALLED_CHECK_GUARDIAN` 表示 20 秒内尚未确认新监护器第一次 tick，应继续检查心跳和日志。CPU preflight 保存在 revision 目录，交接证据保存在 `repairs/math-test-and-typeguard-v1/`。其他应用错误仍按原规则阻塞，需要诊断。
+
+`teachers.json` 增加 `test_verifier_identities`、`expected_test_verifier`、`tests_use_current_verifier` 和 `comparable_tests_complete`。`tests_complete` 仍只表示四个 teacher 加 base 的结果均已完成；当 Math/IF 保留旧评分器结果时，不能把它当作统一评分版本的最终矩阵，`comparable_tests_complete` 为 false。若后续需要统一比较，应使用新版本显式重评旧结果。
+
 ## 评估恢复、导出和保存空间
 
 validation/test 的每个完成 batch 都原子写入 journal，绑定 model/checkpoint、数据、verifier、依赖版本、生成参数和顺序。重启先恢复当前 checkpoint 上未完成的 validation，再进入下一个训练 update；已完成 batch 不重新生成。收据核对完整 ID 集和输出哈希。validation 的 attempted/completed 耗时保存在 `evaluations/*/attempts`；训练及保存耗时保存在 `jobs/*/train/step_*.json`。不会依据这些耗时修改 eval interval。
@@ -129,8 +151,10 @@ python -m unittest discover -s tests/multidomain -p 'test_domain_teachers*.py' -
 python -m unittest discover -s tests/multidomain -p 'test_training_continuation*.py' -q
 ```
 
-新增测试需要 PyArrow、NumPy、PyTorch 和 torchdata（正式环境已经安装）。覆盖实际 Parquet 分片、实际 torchdata cursor、固定 pinned validator 的中断恢复、模型选择与 hardlink retention、PBS intent/stop/held/unknown/retry/concurrency 故障。GPU Megatron 保存/恢复、HF 导出和完整训练仍需在 ABCI 正式执行时取得证据。
+新增测试需要 PyArrow、NumPy、PyTorch 和 torchdata。Math 修复的本地测试另需 `math-verify==0.9.0`、`latex2sympy2_extended==1.11.0`、`sympy==1.14.0`、`mpmath==1.3.0` 和 `antlr4-python3-runtime==4.13.2`，测试会将这五个版本打包成独立 ZIP，并与生产使用的原始 ZIP 哈希区分；ABCI 部署直接使用冻结 ZIP，无需安装这些包。覆盖实际 Parquet 分片、实际 torchdata cursor、固定 pinned validator 的中断恢复、模型选择与 hardlink retention、PBS intent/stop/held/unknown/retry/concurrency 故障。GPU Megatron 保存/恢复、HF 导出和完整训练仍需在 ABCI 正式执行时取得证据。
 
 2026-10-28 续投修复验证：42 项 teacher 测试（含新增 15 项修复测试）和 167 项 continuation 回归全部通过。修复测试运行真实隔离 Python 子进程、pidfd/SIGTERM 和文件锁，验证旧监护接替、缺少 Python pidfd wrapper 时的内核兼容路径、错误主机/命令行拒绝、停止优先、旧 start/resume 入口、发布中断恢复、准确一次续投，以及训练合同/数据/checkpoint/已有 request 不变。PBS 命令和权重 payload 使用本地 fixture；这些结果不代表已经在 ABCI 部署或恢复 GPU 训练。
 
 2026-10-29 持续监护修复验证：49 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。新增测试覆盖只有最后一个 teacher 未完成时的连续查询失败、H→Q→R、不明 qsub intent 的原作业找回、未知状态下停止优先，以及确认应用错误后的正常退出。真实隔离子进程先运行上一版 controller，复现查询失败导致其正常退出；随后升级冻结监护副本，验证 271 只续投一次、下一轮连续 PBS 故障期间锁和心跳保持、查询恢复后接管原作业，以及冻结合同/数据/checkpoint/旧 request 不变。测试使用模拟 PBS 命令，并不代表本补丁已经部署到 ABCI。
+
+2026-10-29 Math final-test 修复验证：57 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。新增 8 项测试覆盖真实隔离评分子进程中的原错误复现、正确/错误答案及原 13 项 selfcheck、preflight 失败不改变作业、监护交接、重复修复不重复投递、271 后保留修复评分版本、不同 verifier 缓存隔离、stop/作业身份限制和混合评分版本的汇总标记。另以用户提供的完整失败输入在相同五个依赖版本的隔离子进程重放：原版报同一异常，修复版正常比较并返回 0 分。公开 fixture 仅包含通用合成输入和原评分源码，不包含该完整诊断或模型输出。生产部署会在 ABCI 使用原始冻结 ZIP 再次执行 preflight；本地结果不代表已提交或完成 GPU test。
