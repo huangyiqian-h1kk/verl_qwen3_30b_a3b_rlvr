@@ -9,6 +9,7 @@ import time
 import uuid
 
 from . import controller
+from . import guardian_handoff
 from .common import (
     active,
     below,
@@ -36,6 +37,9 @@ ORIGINAL_SOURCES = {
 # Accept it as well as the initial and current sources; never edit the template.
 PREVIOUS_CONTROLLER_SHA = (
     "03463b5f3e9d01d9d64e30d0bd4210dad683b74f9135384a2235f6577c07076e"
+)
+PREVIOUS_OBSERVER_SHA = (
+    "1280812857ae4f6ae3c26ffc04daba21f790e2b9fb566e9ce86538a29e0fc35c"
 )
 PREVIOUS_CLI_SHA = "d54d27ded81160c317fb656d6d82b95add93de989226235d3c3d3c7d1d7605da"
 ORIGINAL_ENTRY = (
@@ -94,12 +98,14 @@ def prepare_revision(c):
             "exporting.py",
             "math_test_repair.py",
             "math_and_compat.py",
+            "guardian_handoff.py",
         )
     }
     for name, original in ORIGINAL_SOURCES.items():
         accepted = {original, file_sha(replacements[name])}
         if name == "controller.py":
             accepted.add(PREVIOUS_CONTROLLER_SHA)
+            accepted.add(PREVIOUS_OBSERVER_SHA)
         if name == "cli.py":
             accepted.add(PREVIOUS_CLI_SHA)
         need(
@@ -180,19 +186,16 @@ def _process_identity(pid):
     ]
 
 
-def stop_and_acquire(root, timeout=45):
-    """Caller holds control.lock, so the owner cannot be inside a PBS transaction."""
-    try:
-        return acquire(root / "guardian.lock")
-    except BlockingIOError:
-        pass
-    heartbeat = read(root / "heartbeat.json")
-    host = str(heartbeat.get("host", ""))
+def signal_local_owner(root, target, before_signal=lambda: None):
+    """Run on the owner's host, locally or through the legacy SSH helper."""
+    need(guardian_handoff.owner(root) == target, "Guardian owner changed")
+    record = target["value"]
+    host = str(record.get("host", ""))
     need(
         host.split(".")[0] == socket.gethostname().split(".")[0],
-        "Run repair on guardian host " + host + "; no remote PID will be signalled",
+        "Guardian signal helper reached the wrong host; no PID will be signalled",
     )
-    pid = heartbeat.get("pid")
+    pid = record.get("pid")
     need(type(pid) is int and pid > 1 and pid != os.getpid(), "Invalid guardian PID")
     process_signal.probe()
     try:
@@ -218,22 +221,71 @@ def stop_and_acquire(root, timeout=45):
                     ],
                     "Guardian command line mismatch; no signal sent",
                 )
+                before_signal()
                 try:
                     process_signal.send_signal(descriptor, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
         finally:
             os.close(descriptor)
+
+
+def stop_and_acquire(root, timeout=45):
+    """Hold launch/control locks; never signal a remote PID in the local namespace."""
+    try:
+        return acquire(root / "guardian.lock")
+    except BlockingIOError:
+        pass
+    target = guardian_handoff.owner(root)
+    request, request_lease = guardian_handoff.create(root, target, timeout)
     until = time.monotonic() + timeout
-    while True:
+    method, error = "shared_filesystem", None
+    try:
+        if target["value"].get("handoff_policy") != guardian_handoff.POLICY:
+            try:
+                if (
+                    str(target["value"]["host"]).split(".")[0]
+                    == socket.gethostname().split(".")[0]
+                ):
+                    method = "local_legacy"
+                    signal_local_owner(
+                        root, target, lambda: guardian_handoff.check(root, request)
+                    )
+                else:
+                    method = "ssh_legacy"
+                    guardian_handoff.remote_signal(root, request, timeout)
+            except Exception as caught:
+                error = caught
+        while True:
+            try:
+                lease = acquire(root / "guardian.lock")
+            except BlockingIOError:
+                if error:
+                    raise RuntimeError(
+                        "Guardian lock is still held; no replacement was started. "
+                        + str(error)
+                    ) from error
+                need(
+                    time.monotonic() < until,
+                    "Guardian handoff timed out; lock remains owned",
+                )
+                time.sleep(0.1)
+                continue
+            try:
+                guardian_handoff.receipt(
+                    root, request, status="LOCK_ACQUIRED", method=method
+                )
+            except Exception:
+                lease.close()
+                raise
+            return lease
+    finally:
         try:
-            return acquire(root / "guardian.lock")
-        except BlockingIOError:
-            need(
-                time.monotonic() < until,
-                "Guardian still owns its lock; rerun repair-retries",
-            )
-            time.sleep(0.1)
+            path = root / guardian_handoff.REQUEST
+            if path.exists() and read(path).get("nonce") == request["nonce"]:
+                path.unlink()
+        finally:
+            request_lease.close()
 
 
 def recover_blocks(c, pbs):

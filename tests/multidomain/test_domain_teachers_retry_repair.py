@@ -282,12 +282,12 @@ class RetryRepair(fixtures.TestCase):
                 repair.repair(self.campaign, wait_seconds=0)
             stop.assert_not_called()
 
-    def test_remote_guardian_is_not_signalled(self):
+    def test_invalid_remote_host_is_not_signalled(self):
         child = self.start_old()
         heartbeat = read(self.campaign / "heartbeat.json")
         heartbeat["host"] = "another-login-host"
         write(self.campaign / "heartbeat.json", heartbeat)
-        with self.assertRaisesRegex(RuntimeError, "Run repair on guardian host"):
+        with self.assertRaisesRegex(RuntimeError, "Invalid guardian login hostname"):
             repair.repair(self.campaign, wait_seconds=0)
         self.assertIsNone(child.poll())
         self.assertFalse((self.campaign / "controller_revision.json").exists())

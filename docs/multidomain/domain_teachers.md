@@ -80,14 +80,18 @@ CPU `preflight` 检查 pinned verl、数据、tokenizer、模型资产 inventory
 
 ### 修复已经启动的旧监护器
 
-初始 teacher 实现额外加入的三次上限偏离了旧 4-domain 正式训练规则。第一版修复还把 `BLOCKED_UNKNOWN`/`BLOCKED_HELD` 作为监护终态，导致其他 teacher 已结束时，一轮 PBS 查询失败就可能使监护退出。当前修复同时覆盖这两个问题。更新 Git checkout 本身不会更新 campaign 内冻结的监护器；已经安装过第一版修复也需要再次执行以下命令，以发布新的监护副本。若旧 guardian 仍持锁，须在 `heartbeat.json` 显示的主机上执行；若锁已释放，可以在任一登录节点执行：
+初始 teacher 实现额外加入的三次上限偏离了旧 4-domain 正式训练规则。第一版修复还把 `BLOCKED_UNKNOWN`/`BLOCKED_HELD` 作为监护终态，导致其他 teacher 已结束时，一轮 PBS 查询失败就可能使监护退出。当前修复同时覆盖这两个问题。更新 Git checkout 本身不会更新 campaign 内冻结的监护器；已经安装过第一版修复也需要再次执行以下命令，以发布新的监护副本。命令可在任一登录节点执行，不需要根据 heartbeat 手动切换节点：
 
 ```bash
 "$teacher_python" -I scripts/domain_teachers.py repair-retries --campaign "$teacher_campaign"
 "$teacher_python" -I scripts/domain_teachers.py status --campaign "$teacher_campaign"
 ```
 
-该命令先验证冻结合同和 CPU preflight，在独立 `controller_revisions/` 下生成并校验监护代码副本；取得 launch/control 锁后，在旧监护器不处于 PBS 事务中的时刻，用 pidfd 验证并终止本用户、本主机、准确命令行的登录节点监护进程。它不调用 `qdel`，不修改训练数据、冻结 template、campaign identity、已有 job request、checkpoint 或评估 journal。
+该命令先验证冻结合同和 CPU preflight，在独立 `controller_revisions/` 下生成并校验监护代码副本；取得 launch/control 锁后，在旧监护器不处于 PBS 事务中的时刻交接 guardian 锁。它不调用 `qdel`，不修改训练数据、冻结 template、campaign identity、已有 job request、checkpoint 或评估 journal。
+
+新版 guardian 支持 `shared-filesystem-guardian-handoff-v1`：修复端在共享 campaign 目录写入绑定准确进程实例的短期请求，并持有该请求专用的文件锁；旧 guardian 在等待下一次轮询或等待 control 锁时响应请求、正常退出，新 guardian 在当前节点接管。请求过期、请求端退出、进程实例变化或请求被撤销时不会触发交接。跨节点交接依赖共享文件锁，不依赖节点间 SSH，也不要求用户记住运行主机。
+
+已经运行的旧代码尚不支持共享请求，首次迁移会自动使用有超时的非交互 SSH 连接记录中的 `loginN`，在该节点验证用户、准确命令行和 pidfd 后停止旧监护器，再由当前节点取得共享锁。SSH 保留正常主机密钥校验；不把远端 PID 当成本机 PID 使用。节点间 SSH 若因认证、主机密钥或网络问题不可用，会报告具体错误；只要原锁仍被持有，就不会启动第二个 guardian，也不会解除 CP 阻塞或新增投递。已完成远端停止但回执丢失时，以实际共享锁是否释放为准。交接证据保存在 `repairs/guardian_handoffs/`；正常交接不改变已提交 GPU job。新版 guardian 的 `guardian_runtime.json` 包含 `handoff_policy` 和每次启动唯一的 `incarnation`。
 
 修复会为每个 `BLOCKED_RETRIES` 重新查询其 `previous_job`，校验 owner/queue/name/提交路径以及 campaign/domain/phase，只有确认 271 或 walltime -29、且没有 job/pending 或显式 stop fence 时才改回 READY。仍持有 job/pending 的 `BLOCKED_UNKNOWN` 由新监护正常重查：确认 271/walltime 后续投，确认 Q/R 则接管原 job，确认应用错误则保持应用阻塞；未知状态本身不授予续投权限。显式停止始终优先。READY 的任务由新监护器按原并发上限续投，从最新完整 checkpoint 恢复；日志中尚未保存的步数不作为恢复点。修复之前的 state/PBS 证据保存在 `repairs/four-domain-retries-v1/`。
 
@@ -99,7 +103,7 @@ CPU `preflight` 检查 pinned verl、数据、tokenizer、模型资产 inventory
 
 已确认的错误是 `AttributeError: 'Equality' object has no attribute '_unsorted_args'`：冻结的 `latex2sympy2_extended==1.11.0` 在构造 `And` 时，无条件给返回值写入参数顺序元数据；SymPy 可能把该表达式化简成 `Equality` 或布尔值，导致比较过程异常。修复只在返回值仍为该 `And` 类型时设置元数据，保留原化简和数学比较，不把基础设施异常直接记为零分。
 
-更新 checkout 后，在当前 guardian 所在登录节点执行（若锁已释放，任一登录节点均可）。`teacher_diagnostic` 指向失败 test 作业的原始 `math_diagnostics/*.json` 或其完整副本：
+更新 checkout 后，可在当前任一登录节点执行，命令会自动完成上述监护交接。`teacher_diagnostic` 指向失败 test 作业的原始 `math_diagnostics/*.json` 或其完整副本：
 
 ```bash
 "$teacher_python" -I scripts/domain_teachers.py repair-math-test --campaign "$teacher_campaign" --domain conversational_pivot --diagnostic "$teacher_diagnostic"
@@ -158,3 +162,5 @@ python -m unittest discover -s tests/multidomain -p 'test_training_continuation*
 2026-10-29 持续监护修复验证：49 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。新增测试覆盖只有最后一个 teacher 未完成时的连续查询失败、H→Q→R、不明 qsub intent 的原作业找回、未知状态下停止优先，以及确认应用错误后的正常退出。真实隔离子进程先运行上一版 controller，复现查询失败导致其正常退出；随后升级冻结监护副本，验证 271 只续投一次、下一轮连续 PBS 故障期间锁和心跳保持、查询恢复后接管原作业，以及冻结合同/数据/checkpoint/旧 request 不变。测试使用模拟 PBS 命令，并不代表本补丁已经部署到 ABCI。
 
 2026-10-29 Math final-test 修复验证：57 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。新增 8 项测试覆盖真实隔离评分子进程中的原错误复现、正确/错误答案及原 13 项 selfcheck、preflight 失败不改变作业、监护交接、重复修复不重复投递、271 后保留修复评分版本、不同 verifier 缓存隔离、stop/作业身份限制和混合评分版本的汇总标记。另以用户提供的完整失败输入在相同五个依赖版本的隔离子进程重放：原版报同一异常，修复版正常比较并返回 0 分。公开 fixture 仅包含通用合成输入和原评分源码，不包含该完整诊断或模型输出。生产部署会在 ABCI 使用原始冻结 ZIP 再次执行 preflight；本地结果不代表已提交或完成 GPU test。
+
+2026-10-30 跨登录节点交接验证：63 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。使用真实旧版 controller 子进程、文件锁、pidfd 和隔离远端 helper，验证从其他节点自动迁移旧 guardian、新版共享请求交接、请求端退出/过期/错误实例拒绝、SSH 失败不改变原 owner/job、SSH 回执丢失后以共享锁为准，以及重复修复不重复投递。CP 修复集成测试也通过同一远端 helper 完成 CPU preflight、交接和 test 恢复，并验证 271 续投保留评分器版本。测试中的 SSH/PBS 传输和主机名使用 fixture；尚未在 ABCI 验证实际节点间 SSH 连通性或提交新 GPU job。

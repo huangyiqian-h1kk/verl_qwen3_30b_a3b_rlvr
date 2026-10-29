@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 import socket
 import time
+import uuid
 from . import DOMAINS
+from . import guardian_handoff
 from .common import (
     active,
     age_seconds,
@@ -263,21 +265,26 @@ def guardian(path):
         "Run CPU preflight first",
     )
     with lock(Path(path) / "guardian.lock"):
-        write(
-            Path(path) / "guardian_runtime.json",
-            dict(
-                at_utc=now(),
-                host=socket.gethostname(),
-                pid=os.getpid(),
-                retry_policy=RETRY_POLICY,
-                observation_policy=OBSERVATION_POLICY,
-                controller_file=str(Path(__file__).resolve()),
-                controller_sha256=file_sha(__file__),
-            ),
+        runtime = dict(
+            at_utc=now(),
+            host=socket.gethostname(),
+            pid=os.getpid(),
+            retry_policy=RETRY_POLICY,
+            observation_policy=OBSERVATION_POLICY,
+            controller_file=str(Path(__file__).resolve()),
+            controller_sha256=file_sha(__file__),
+            handoff_policy=guardian_handoff.POLICY,
+            incarnation=uuid.uuid4().hex,
         )
+        write(Path(path) / "guardian_runtime.json", runtime)
         while True:
-            with lock(Path(path) / "control.lock", wait=60):
+            lease = guardian_handoff.control_lease(path, runtime)
+            if lease is None:
+                return dict(status="GUARDIAN_HANDED_OFF")
+            try:
                 states = tick(c)
+            finally:
+                lease.close()
             unfinished = [
                 s
                 for d, s in states.items()
@@ -290,7 +297,8 @@ def guardian(path):
             ]
             if not unfinished:
                 return states
-            time.sleep(c["policy"]["poll_seconds"])
+            if guardian_handoff.pause(path, runtime, c["policy"]["poll_seconds"]):
+                return dict(status="GUARDIAN_HANDED_OFF")
 
 
 def status(path):

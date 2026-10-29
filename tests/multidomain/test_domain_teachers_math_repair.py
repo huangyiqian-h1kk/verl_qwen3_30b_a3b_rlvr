@@ -6,6 +6,7 @@ from importlib import metadata, util
 import json
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -192,8 +193,17 @@ class MathRepair(unittest.TestCase):
         self.assertEqual(self.harness.calls(), [])
 
     def test_real_repair_restarts_guardian_rearms_only_test_and_is_repeatable(self):
+        from test_domain_teachers_handoff import install_ssh_transport
+
         h = self.harness
         old = h.start_old()
+        install_ssh_transport(h)
+        # Reproduce a client on login2 repairing a guardian owned by login1.
+        # Keep the owner record stable while the real CPU verifier checks run.
+        write(
+            self.campaign / "guardian_runtime.json",
+            dict(read(self.campaign / "heartbeat.json"), host="login1"),
+        )
         before = {
             name: files(self.campaign / name)
             for name in ("template", "data", "runs/logic_algorithmic/checkpoints")
@@ -202,8 +212,11 @@ class MathRepair(unittest.TestCase):
         original_requests = {
             d: file_sha(Path(j["folder"]) / "request.json") for d, j in h.jobs.items()
         }
-        with patch.object(
-            subprocess, "Popen", side_effect=self.record_process(subprocess.Popen)
+        with (
+            patch.object(
+                subprocess, "Popen", side_effect=self.record_process(subprocess.Popen)
+            ),
+            patch.object(socket, "gethostname", return_value="login2"),
         ):
             result = repair.repair(
                 self.campaign, "conversational_pivot", self.diagnostic, wait_seconds=10

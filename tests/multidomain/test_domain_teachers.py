@@ -424,7 +424,11 @@ class GuardianFaults(TestCase):
         with (
             patch.object(controller, "load_campaign", return_value=self.c),
             patch.object(controller, "PBS", return_value=self.pbs),
-            patch.object(controller.time, "sleep", side_effect=between_polls) as sleep,
+            patch.object(
+                controller.guardian_handoff,
+                "pause",
+                side_effect=lambda root, runtime, seconds: between_polls(seconds),
+            ) as sleep,
         ):
             states = controller.guardian(self.root)
         self.assertFalse(active(self.root / "guardian.lock"))
