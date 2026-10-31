@@ -123,6 +123,33 @@ CPU 检查通过后，命令使用与 `repair-retries` 相同的锁和主机/PID
 
 `teachers.json` 增加 `test_verifier_identities`、`expected_test_verifier`、`tests_use_current_verifier` 和 `comparable_tests_complete`。`tests_complete` 仍只表示四个 teacher 加 base 的结果均已完成；当 Math/IF 保留旧评分器结果时，不能把它当作统一评分版本的最终矩阵，`comparable_tests_complete` 为 false。若后续需要统一比较，应使用新版本显式重评旧结果。
 
+## Math step 50、CP step 80 和 base 的补充 test
+
+更新 checkout 后，在任一登录节点执行：
+
+```bash
+"$teacher_python" -I scripts/domain_teachers.py evaluate-checkpoints --campaign "$teacher_campaign"
+qstat -u "$USER"
+```
+
+**这条命令会交接/启动监护并实际提交 GPU 作业。** 固定评估 Math 的完整 checkpoint 50、CP 的完整 checkpoint 80，以及冻结的未经训练 base。三个目标都使用同一份四域 test（本 campaign 共 994 条）、greedy n=1 和当前已安装的 final-test Math 评分器修复。test 不更新训练权重，也不改变原 validation best 或 early stopping。
+
+| 任务名（status 中显示） | 执行顺序 | 结果位置（campaign 下） |
+| --- | --- | --- |
+| `math_step50` | 独立 HF 导出 job → 独立四域 test job | `runs/math_step50/test.json` |
+| `cp_step80` | 独立 HF 导出 job → 独立四域 test job | `runs/cp_step80/test.json` |
+| `base` | 直接四域 test job | `runs/base/test.json` |
+
+每个 allocation 申请 1 节点、8 GPU、24 小时 walltime；无中断时这三个目标合计 5 个 allocation，两个导出结束后才各自提交 test。它们由现有 campaign guardian 一起监护，与 Logic 共用原并发上限（默认最多 4 个 job）。base 不再等待四个 teacher 全部导出；已排队/运行/完成的 base 会被接管，不重复提交。已有 Logic GPU 作业继续受监护，交接只替换登录节点上的控制进程。新版 guardian 的共享文件交接不要求用户登录原节点。
+
+命令先核对 Math 50、CP 80 的训练完成记录、完整 checkpoint marker、lineage 和文件 inventory。缺少 checkpoint 时在交接监护前报错，不会静默改评其他步数。安装时在独占控制锁和原 run writer 锁下硬链接所需模型分片，然后原子发布 `checkpoint_evaluation.json`。独立运行目录中的 `best.json` 只是复用导出接口的指定权重描述，明确标记 `selection_source=explicit_checkpoint`、`score=null`，不伪造 validation 选择。原 `runs/math`、`runs/conversational_pivot` 的 best/export/test 和完整训练 checkpoint 保留。
+
+重执行同一命令会验证已注册目标并接管原任务，不清除 job ID、pending intent 或 journal，不重做已完成任务。新 job 的运行源码按哈希冻结在 `checkpoint_evaluation_runtimes/`，已有 template/训练合同不修改。导出后验证全部 HF 权重加载及 finite forward，再释放额外的原生模型硬链接。
+
+监护沿用已确认 PBS 271 和 walltime 超限的自动续投条件；没有“连续三次无进度就停止”的上限。test 每完成一批便持久化，恢复时只处理剩余批次；生成到一半、未提交的 batch 需要重做。未完成的 HF 导出可以重跑；已发布且有加载证明的 HF export 直接复用。PBS 查询失败继续观察原 job，不据此重复提交；应用错误仍保留为 `BLOCKED_APPLICATION`，显式 STOP 优先。监护持续至所有需处理任务完成、停止或确认阻塞，24 小时仅是单个 GPU allocation 的 walltime，不是整个监护时长。
+
+可用原 `status` 查看新增 task 的阶段、job 和心跳；`stop/reenable --domain math_step50` 或 `cp_step80` 只操作该补充任务，campaign 级 stop 覆盖它们。原 `teachers.json` 继续表示 validation 选出的模型；补充测试结果单独保存于上表路径。此次命令不导出或诊断训练日志。
+
 ## 评估恢复、导出和保存空间
 
 validation/test 的每个完成 batch 都原子写入 journal，绑定 model/checkpoint、数据、verifier、依赖版本、生成参数和顺序。重启先恢复当前 checkpoint 上未完成的 validation，再进入下一个训练 update；已完成 batch 不重新生成。收据核对完整 ID 集和输出哈希。validation 的 attempted/completed 耗时保存在 `evaluations/*/attempts`；训练及保存耗时保存在 `jobs/*/train/step_*.json`。不会依据这些耗时修改 eval interval。
@@ -168,3 +195,5 @@ python -m unittest discover -s tests/multidomain -p 'test_training_continuation*
 2026-10-30 跨登录节点交接验证：63 项 teacher 测试和 167 项 continuation 回归全部通过，Ruff E4/E7/E9/F、格式及 diff 检查通过。使用真实旧版 controller 子进程、文件锁、pidfd 和隔离远端 helper，验证从其他节点自动迁移旧 guardian、新版共享请求交接、请求端退出/过期/错误实例拒绝、SSH 失败不改变原 owner/job、SSH 回执丢失后以共享锁为准，以及重复修复不重复投递。CP 修复集成测试也通过同一远端 helper 完成 CPU preflight、交接和 test 恢复，并验证 271 续投保留评分器版本。测试中的 SSH/PBS 传输和主机名使用 fixture；尚未在 ABCI 验证实际节点间 SSH 连通性或提交新 GPU job。
 
 2026-10-30 首次 SSH 主机信任修复验证：6 项监护交接回归通过；另用真实 OpenSSH 客户端和仅监听回环地址的临时 SSH 协议服务器验证四种情况：旧 BatchMode 调用拒绝未知主机、修复后首次连接记录密钥并成功、重复连接成功、同一地址更换主机密钥时拒绝远端命令且保留原 known_hosts。临时服务器使用内存中生成的测试密钥，不执行请求中的命令；不修改系统 SSH 配置，生产无需新增 Python 依赖。此验证覆盖主机密钥处理，不证明 ABCI 实际账户认证已成功。
+
+2026-10-31 指定 checkpoint 补充评估验证：76 项 teacher 测试（含新增 13 项）与 167 项 continuation 回归全部通过，共 243 项测试及 29 个 subtest；Ruff E4/E7/E9/F、格式与 diff 检查通过。覆盖 Math 50/CP 80 的独立模型硬链接和导出请求、原 best/test 保留、缺失 checkpoint 提前失败、安装中断恢复、base 提前且不重复提交、与 Logic 共用 4-job 上限、导出和 test 的多次 271/walltime 续投、journal 保留、未知提交状态、评分器版本隔离及任务 stop。真实隔离 guardian 子进程验证共享文件交接后接管原 Logic job，并验证重复命令不再提交或取消作业。PBS 和权重使用本地 fixture；GPU 导出及 test 尚需在 ABCI 部署执行。

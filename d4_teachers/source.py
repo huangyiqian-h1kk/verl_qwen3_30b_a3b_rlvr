@@ -214,21 +214,30 @@ def load_campaign(path, verify=True):
 
 
 def make_job(c, domain, role):
+    from . import checkpoint_evaluation as extra
+
     campaign = Path(c["path"])
+    task = domain
+    p = extra.plan(c)
+    target = p["targets"].get(task) if p else None
+    if target:
+        need(role in ("export", "test"), "Explicit checkpoint tasks cannot train")
+        domain = target["domain"]
     need(
         domain in (*DOMAINS, "base") and role in ("train", "export", "test"),
         "Unknown teacher role",
     )
     need(
-        not is_fenced(campaign, domain),
+        not is_fenced(campaign, task),
         "Teacher is durably stopped; use reenable explicitly",
     )
     need(domain != "base" or role == "test", "Base is evaluation only")
-    run = campaign / "runs" / domain
+    run = campaign / "runs" / task
     lineage = read(run / "run.json")["lineage"]
     folder = run / "jobs" / (role + "_" + uuid.uuid4().hex)
     verify_files(campaign / "template", c["contract"]["template_files"])
     shutil.copytree(campaign / "template", folder)
+    extra_plan = extra.apply_runtime(c, task, folder)
     runtime = folder / "runtime"
     (runtime / ".venv-multidomain").symlink_to(
         c["contract"]["overlay"], target_is_directory=True
@@ -278,6 +287,8 @@ def make_job(c, domain, role):
             base="base",
         )[domain]
     )
+    if target:
+        name = "0390_ev_" + ("m50" if task == "math_step50" else "cp80")
     (folder / "stage.pbs").write_text(render_pbs(runtime, folder, 1, name))
     contract = dict(
         version=VERSION,
@@ -302,18 +313,28 @@ def make_job(c, domain, role):
         reward=dict(import_path="pkg://md_reward_roundoff_0390"),
         snapshot_files=files(folder),
     )
+    if extra_plan:
+        contract.update(task=task, checkpoint_evaluation=extra_plan["identity"])
     if role == "export":
         from .selection import validate_best
 
-        need(
-            read(run / "training_complete.json")["status"] == "PASS",
-            "Teacher is not finalized",
-        )
-        contract["selected"] = validate_best(read(run / "best.json"))
+        if target:
+            contract["selected"] = extra.validate_selected(c, task)
+        else:
+            need(
+                read(run / "training_complete.json")["status"] == "PASS",
+                "Teacher is not finalized",
+            )
+            contract["selected"] = validate_best(read(run / "best.json"))
     if role == "test":
         from .exporting import evaluation_model
 
-        contract["evaluation_model"] = evaluation_model(c, domain)
+        contract["evaluation_model"] = evaluation_model(c, task)
+        if extra_plan:
+            need(
+                contract["verifier_identity"] == extra_plan["verifier_identity"],
+                "Checkpoint test verifier differs from its plan",
+            )
         if test_revision:
             contract["test_verifier_revision"] = test_revision
     write(
@@ -334,6 +355,35 @@ def validate_request(path):
     need(path == Path(r["job_dir"]) / "request.json", "Teacher request moved")
     c = load_campaign(r["campaign_dir"], verify=False)
     need(c["identity"] == r["campaign_identity"], "Teacher belongs to another campaign")
+    if r.get("checkpoint_evaluation"):
+        from .checkpoint_evaluation import plan, validate_selected
+
+        p = plan(c)
+        task = r["task"]
+        need(
+            p and p["identity"] == r["checkpoint_evaluation"], "Evaluation plan changed"
+        )
+        need(
+            task in (*p["targets"], "base")
+            and r["role"] in ("export", "test")
+            and r["run_dir"] == str(Path(c["path"]) / "runs" / task),
+            "Checkpoint evaluation run changed",
+        )
+        if task in p["targets"]:
+            selected = validate_selected(c, task)
+            need(r["domain"] == selected["domain"], "Checkpoint domain changed")
+            if r["role"] == "export":
+                need(r["selected"] == selected, "Export selection changed")
+            else:
+                need(
+                    r["evaluation_model"]["step"] == selected["step"],
+                    "Test step changed",
+                )
+        if r["role"] == "test":
+            need(
+                r["verifier_identity"] == p["verifier_identity"],
+                "Test verifier changed",
+            )
     verify_files(path.parent, r["snapshot_files"])
     need(
         digest(data.verify(Path(r["campaign_dir"]) / "data"))
@@ -344,7 +394,7 @@ def validate_request(path):
         from .exporting import evaluation_model
 
         need(
-            evaluation_model(c, r["domain"]) == r["evaluation_model"],
+            evaluation_model(c, r.get("task", r["domain"])) == r["evaluation_model"],
             "Test model changed since submission",
         )
     return r

@@ -99,14 +99,22 @@ def prepare_revision(c):
             "math_test_repair.py",
             "math_and_compat.py",
             "guardian_handoff.py",
+            "checkpoint_evaluation.py",
+            "runtime.py",
         )
     }
     for name, original in ORIGINAL_SOURCES.items():
         accepted = {original, file_sha(replacements[name])}
         if name == "controller.py":
+            accepted.add(
+                "dda7bb3735ffa7d1cacce4faad8c4a54ed049ab16da0e193dd0580311d3ff2b5"
+            )
             accepted.add(PREVIOUS_CONTROLLER_SHA)
             accepted.add(PREVIOUS_OBSERVER_SHA)
         if name == "cli.py":
+            accepted.add(
+                "b74043777f8de413a5fdf024905d8ebe11200e4c526c1a49755affede86dc683"
+            )
             accepted.add(PREVIOUS_CLI_SHA)
         need(
             file_sha(source / name) in accepted,
@@ -291,7 +299,7 @@ def stop_and_acquire(root, timeout=45):
 def recover_blocks(c, pbs):
     """Rearm only legacy retry-cap blocks after a fresh, identity-checked PBS read."""
     root, results = Path(c["path"]), {}
-    for domain in controller.TASKS:
+    for domain in controller.tasks(c):
         path = controller.state_path(c, domain)
         state = read(path)
         if state["status"] != "BLOCKED_RETRIES":
@@ -312,7 +320,7 @@ def recover_blocks(c, pbs):
             )
             need(
                 request["campaign_identity"] == c["identity"]
-                and request["domain"] == domain
+                and request.get("task", request["domain"]) == domain
                 and request["role"] == state["phase"]
                 and request["job_dir"] == str(folder)
                 and request["job_name"] == job["job_name"],
@@ -446,7 +454,7 @@ def repair(path, pbs=None, wait_seconds=20, install_under_lease=None):
             if binding["first_tick_completed"] or time.monotonic() >= until:
                 break
             time.sleep(0.2)
-        states = {d: read(controller.state_path(c, d)) for d in controller.TASKS}
+        states = {d: read(controller.state_path(c, d)) for d in controller.tasks(c)}
         return dict(
             status="REPAIRED_GUARDIAN_RUNNING"
             if binding["first_tick_completed"]

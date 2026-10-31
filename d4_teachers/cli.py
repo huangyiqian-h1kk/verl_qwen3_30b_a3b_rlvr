@@ -162,6 +162,7 @@ def main(argv=None):
             "storage",
             "repair-retries",
             "repair-math-test",
+            "evaluate-checkpoints",
         ),
     )
     p.add_argument(
@@ -171,7 +172,9 @@ def main(argv=None):
         help="Shared filesystem campaign directory",
     )
     p.add_argument("--config", type=Path, default=DEFAULT)
-    p.add_argument("--domain", choices=(*DOMAINS, "base"))
+    p.add_argument(
+        "--domain", help="Teacher name; stop/reenable also accept registered task names"
+    )
     p.add_argument("--max-concurrent", type=int, choices=range(1, 5))
     p.add_argument("--background", action="store_true")
     p.add_argument("--diagnostic", type=Path)
@@ -220,6 +223,10 @@ def main(argv=None):
         from .retry_repair import repair
 
         result = repair(a.campaign)
+    elif a.action == "evaluate-checkpoints":
+        from .checkpoint_evaluation import launch
+
+        result = launch(a.campaign)
     elif a.action == "repair-math-test":
         from .math_test_repair import repair
 

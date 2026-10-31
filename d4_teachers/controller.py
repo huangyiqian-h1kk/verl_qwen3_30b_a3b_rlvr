@@ -37,6 +37,19 @@ TERMINAL = {
 }
 
 
+def tasks(c):
+    from .checkpoint_evaluation import plan
+
+    p = plan(c)
+    return (*TASKS, *(p["targets"] if p else ()))
+
+
+def early_base(c):
+    from .checkpoint_evaluation import plan
+
+    return plan(c) is not None
+
+
 def state_path(c, domain):
     return Path(c["path"]) / "runs" / domain / "state.json"
 
@@ -146,7 +159,11 @@ def reconcile(c, domain, state, pbs):
             except Exception as e:
                 state.update(status="BLOCKED_ARTIFACT", error=str(e))
                 return
-            phase = next_phase(c, state["phase"])
+            phase = (
+                "test"
+                if domain not in TASKS and state["phase"] == "export"
+                else next_phase(c, state["phase"])
+            )
             state.update(
                 previous_job=job,
                 job=None,
@@ -189,7 +206,7 @@ def reconcile(c, domain, state, pbs):
 
 def tick(c, pbs=None):
     pbs = pbs or PBS()
-    states = {d: read(state_path(c, d)) for d in TASKS}
+    states = {d: read(state_path(c, d)) for d in tasks(c)}
     for domain, state in states.items():
         reconcile(c, domain, state, pbs)
     # Count only this campaign's unresolved jobs/intents, including held/unknown.
@@ -210,10 +227,15 @@ def tick(c, pbs=None):
             or is_fenced(c["path"], domain)
         ):
             continue
-        if domain == "base" and (
-            not c["policy"]["auto_test"]
-            or not all(
-                (Path(c["path"]) / "runs" / d / "export.json").exists() for d in DOMAINS
+        if (
+            domain == "base"
+            and not early_base(c)
+            and (
+                not c["policy"]["auto_test"]
+                or not all(
+                    (Path(c["path"]) / "runs" / d / "export.json").exists()
+                    for d in DOMAINS
+                )
             )
         ):
             if not c["policy"]["auto_test"]:
@@ -291,6 +313,7 @@ def guardian(path):
                 if s["status"] not in TERMINAL
                 and not (
                     d == "base"
+                    and not early_base(c)
                     and s["status"] == "READY"
                     and all(states[x]["status"] in TERMINAL for x in DOMAINS)
                 )
@@ -312,14 +335,14 @@ def status(path):
         heartbeat=beat,
         heartbeat_stale=not beat
         or age_seconds(beat["at_utc"]) > max(120, c["policy"]["poll_seconds"] * 4),
-        states={d: read(state_path(c, d)) for d in TASKS},
+        states={d: read(state_path(c, d)) for d in tasks(c)},
         fenced=is_fenced(path),
     )
 
 
 def stop(path, domain=None):
     c = load_campaign(path, verify=False)
-    need(domain is None or domain in TASKS, "Unknown teacher")
+    need(domain is None or domain in tasks(c), "Unknown teacher/task")
     target = Path(path) if domain is None else Path(path) / "runs" / domain
     write(
         target / "STOP.json",
@@ -330,19 +353,19 @@ def stop(path, domain=None):
     if not active(Path(path) / "guardian.lock"):
         with lock(Path(path) / "guardian.lock"):
             with lock(Path(path) / "control.lock", wait=60):
-                for d in TASKS if domain is None else (domain,):
+                for d in tasks(c) if domain is None else (domain,):
                     reconcile(c, d, read(state_path(c, d)), PBS())
     return status(path)
 
 
 def reenable(path, domain=None):
     c = load_campaign(path, verify=False)
-    need(domain is None or domain in TASKS, "Unknown teacher")
+    need(domain is None or domain in tasks(c), "Unknown teacher/task")
     with lock(Path(path) / "control.lock", wait=60):
         target = Path(path) if domain is None else Path(path) / "runs" / domain
         fence = target / "STOP.json"
         need(fence.exists(), "No explicit stop fence to reenable")
-        for d in TASKS if domain is None else (domain,):
+        for d in tasks(c) if domain is None else (domain,):
             state = read(state_path(c, d))
             need(
                 not state.get("job") and not state.get("pending"),

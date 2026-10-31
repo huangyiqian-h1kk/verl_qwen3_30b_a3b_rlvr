@@ -18,7 +18,10 @@ from d4_training_continuation.runtime import wait_gpus
 
 
 def allowed(r):
-    need(not is_fenced(r["campaign_dir"], r["domain"]), "Teacher is durably stopped")
+    need(
+        not is_fenced(r["campaign_dir"], r.get("task", r["domain"])),
+        "Teacher/task is durably stopped",
+    )
 
 
 def fixed_recipe(cfg, r):
