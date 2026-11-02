@@ -294,6 +294,12 @@ def phase(path):
         cfg.data.val_files = [
             str(Path(r["campaign_dir"]) / "data" / d / "test.parquet") for d in DOMAINS
         ]
+        if r.get("deepmath_evaluation"):
+            from .deepmath_evaluation import files_and_ids
+
+            cfg.data.val_files = files_and_ids(
+                load_campaign(r["campaign_dir"], verify=False)
+            )[0]
     cfg.reward.custom_reward_function.path = r["reward"]["import_path"]
     cfg.reward.custom_reward_function.name = "compute_score"
     env = dict(
@@ -368,6 +374,12 @@ def run_trainer(config, request, phase_dir, resume):
                 for d in domains
                 for sid in request["data_manifest"]["domains"][d][split]["ids"]
             ]
+            if request.get("deepmath_evaluation"):
+                expected_ids = [
+                    sid
+                    for s in ("validation", "test")
+                    for sid in request["heldout_manifest"]["splits"][s]["ids"]
+                ]
             need(
                 [row["sample_id"] for row in val.rows] == expected_ids,
                 "Evaluation split differs from frozen manifest",

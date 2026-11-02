@@ -215,11 +215,17 @@ def load_campaign(path, verify=True):
 
 def make_job(c, domain, role):
     from . import checkpoint_evaluation as extra
+    from . import deepmath_evaluation as deep
 
     campaign = Path(c["path"])
     task = domain
     p = extra.plan(c)
     target = p["targets"].get(task) if p else None
+    dp = deep.plan(c)
+    deep_target = dp["targets"].get(task) if dp else None
+    if deep_target:
+        need(role == "test", "DeepMath tasks are evaluation only")
+        domain = "math"
     if target:
         need(role in ("export", "test"), "Explicit checkpoint tasks cannot train")
         domain = target["domain"]
@@ -238,6 +244,7 @@ def make_job(c, domain, role):
     verify_files(campaign / "template", c["contract"]["template_files"])
     shutil.copytree(campaign / "template", folder)
     extra_plan = extra.apply_runtime(c, task, folder)
+    deep_plan = deep.apply_runtime(c, task, folder)
     runtime = folder / "runtime"
     (runtime / ".venv-multidomain").symlink_to(
         c["contract"]["overlay"], target_is_directory=True
@@ -289,6 +296,15 @@ def make_job(c, domain, role):
     )
     if target:
         name = "0390_ev_" + ("m50" if task == "math_step50" else "cp80")
+    if deep_target:
+        name = (
+            "0390_dm_"
+            + {
+                "deepmath_base": "base",
+                "deepmath_math20": "m20",
+                "deepmath_math50": "m50",
+            }[task]
+        )
     (folder / "stage.pbs").write_text(render_pbs(runtime, folder, 1, name))
     contract = dict(
         version=VERSION,
@@ -315,6 +331,14 @@ def make_job(c, domain, role):
     )
     if extra_plan:
         contract.update(task=task, checkpoint_evaluation=extra_plan["identity"])
+    if deep_plan:
+        from .deepmath_data import verify
+
+        contract.update(
+            task=task,
+            deepmath_evaluation=deep_plan["identity"],
+            heldout_manifest=verify(c),
+        )
     if role == "export":
         from .selection import validate_best
 
@@ -329,7 +353,14 @@ def make_job(c, domain, role):
     if role == "test":
         from .exporting import evaluation_model
 
-        contract["evaluation_model"] = evaluation_model(c, task)
+        contract["evaluation_model"] = (
+            deep.evaluation_model(c, task) if deep_target else evaluation_model(c, task)
+        )
+        if deep_plan:
+            need(
+                contract["verifier_identity"] == deep_plan["verifier_identity"],
+                "DeepMath verifier differs from its plan",
+            )
         if extra_plan:
             need(
                 contract["verifier_identity"] == extra_plan["verifier_identity"],
@@ -355,6 +386,23 @@ def validate_request(path):
     need(path == Path(r["job_dir"]) / "request.json", "Teacher request moved")
     c = load_campaign(r["campaign_dir"], verify=False)
     need(c["identity"] == r["campaign_identity"], "Teacher belongs to another campaign")
+    if r.get("deepmath_evaluation"):
+        from . import deepmath_evaluation as deep
+        from .deepmath_data import verify
+
+        p = deep.plan(c)
+        need(
+            p
+            and p["identity"] == r["deepmath_evaluation"]
+            and r["task"] in p["targets"]
+            and r["role"] == "test"
+            and r["domain"] == "math"
+            and r["run_dir"] == str(Path(c["path"]) / "runs" / r["task"])
+            and r["verifier_identity"] == p["verifier_identity"]
+            and r["heldout_manifest"] == verify(c)
+            and r["heldout_manifest"]["identity"] == p["data_identity"],
+            "DeepMath request changed",
+        )
     if r.get("checkpoint_evaluation"):
         from .checkpoint_evaluation import plan, validate_selected
 
@@ -393,6 +441,8 @@ def validate_request(path):
     if r["role"] == "test":
         from .exporting import evaluation_model
 
+        if r.get("deepmath_evaluation"):
+            from .deepmath_evaluation import evaluation_model
         need(
             evaluation_model(c, r.get("task", r["domain"])) == r["evaluation_model"],
             "Test model changed since submission",

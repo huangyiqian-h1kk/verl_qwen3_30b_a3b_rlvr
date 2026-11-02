@@ -166,6 +166,57 @@ qstat -u "$USER"
 
 本地验证包含单次提交、export→test、后续271恢复、再次265时保持阻塞、重复运行与不明 qsub 所有权、PBS身份和状态检查、STOP/writer锁、checkpoint改动、审计写入中断恢复，以及真实 guardian 子进程交接并接管 Logic。PBS命令和模型权重为合成fixture；实际GPU提交与导出结果需以部署后的job ID和收据为准。
 
+## DeepMath 补充 held-out：base、Math20、Math50
+
+本 campaign 的 Math 训练包含 Nemotron 和 DeepMath L8/L9，而原 Math validation/test 只含 Nemotron。新增入口固定比较未经训练的 base、原 validation 选出的 Math step 20、训练末尾 Math step 50，分别报告 DeepMath validation/test 及 L8/L9 分数。此比较不改写原 best、early stopping 或原四域 test；结果属于补充诊断，不能把看过结果后挑选的模型再描述为一次未参与选择的最终 test。
+
+在任一登录节点更新 checkout 后执行（`run` 包含准备和实际投递）：
+
+```bash
+teacher_python=/groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d/.venv-multidomain/bin/python
+teacher_campaign="$PWD/outputs/domain_teachers/qwen30b_d4_teachers_seed42_v1"
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py run --campaign "$teacher_campaign"
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py status --campaign "$teacher_campaign"
+qstat -u "$USER"
+```
+
+`prepare` 只做 CPU 数据准备，加载 tokenizer 和隔离评分器，不加载模型权重、不提交 GPU；`start` 只注册已准备的评估并交接/启动 guardian；`run` 顺序执行两者。CPU 参考答案检查期间每 32 个候选题打印进度，并保存可复用的参考答案检查缓存。三个评估任务各申请 **1 节点、8 GPU、24 小时 walltime**，每个任务在同一 allocation 中按 validation→test 顺序完成两份互斥数据，分别汇总分数。无中断时合计三个新 allocation，复用已有 HF 导出，不重新训练或导出 Math。
+
+| status 任务名 | PBS job 名 | 权重来源 | campaign 下的最终收据 |
+| --- | --- | --- | --- |
+| `deepmath_base` | `0390_dm_base` | 冻结的原始 HF base | `runs/deepmath_base/heldout.json` |
+| `deepmath_math20` | `0390_dm_m20` | `runs/math/export.json`，必须是 step 20 | `runs/deepmath_math20/heldout.json` |
+| `deepmath_math50` | `0390_dm_m50` | `runs/math_step50/export.json`，必须是 step 50 | `runs/deepmath_math50/heldout.json` |
+
+Math50 导出未完成时，DeepMath 对应任务保持 `WAITING_MODEL`（并发已满时可能尚为 READY），待已有导出发布且验证通过后提交；不会并行发起第二个导出。既有 Math50 四域 test、Logic 训练和三个新任务共用同一个 guardian、同一个最多四个 job 的限制。原任务和已完成结果保留。重复 `run/start` 接管已注册任务，不清空 job/pending、不重复提交。
+
+数据准备固定 seed 42，默认每份 256 题。优先复用找到的旧 DeepMath holdout，再以未进入本 campaign 训练/评估的数据补足；旧文件有明确 validation/test 名称时保持其分区。L8/L9 配额依据冻结 Math 训练中两类 DeepMath 的比例，按当前 6268:1270 得到每份 213/43。两份数据严格互斥。所有候选题均排除本 campaign **全部四域 train/validation/test** 的题目，以及发现的旧 probe；比较规范化题文并处理训练提示词外壳，跨来源重复和答案/难度冲突也剔除。这是明确规则下的文本去重，不声称完成语义近重复或模型预训练污染审计。
+
+读取旧 holdout 的题目/答案/难度，**不沿用它的 Unicode prompt**。准备程序从实际冻结 DeepMath 训练行和 raw 题目反推唯一 prompt 外壳，核验原行 token hash；新题使用相同 system/user scaffold、tokenizer、无工具设置、64K 总上下文及相同每条输出预算规则。三模型使用同一冻结数据、greedy n=1 和当前安装的 final-test Math verifier。参考答案必须通过该评分器的 CPU 自检；图像题、超长输入和无法自洽评分的参考答案不入选。评分器基础设施异常直接报错，不当作零分或正常数据过滤。
+
+入口仅在已知项目 data/assets/supplemental_data 目录内查找输入，不下载数据。输入发现和显式补充方式：
+
+```bash
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py discover --campaign "$teacher_campaign"
+# 如自动发现不到 raw 输入，可显式提供；三个路径参数均可重复。
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py prepare --campaign "$teacher_campaign" --input /path/to/deepmath_l89_input.jsonl.gz --holdout /path/to/deepmath_holdout.parquet --exclude-probe /path/to/deepmath_probe.parquet
+```
+
+必须有 raw 题目用于核对训练 prompt。若清理后无法凑足指定 L8/L9 配额，准备会在 GPU 投递前明确报出缺口，不拿 L8 偷补 L9 或重用训练题；首次准备可用 `--size` 显式缩小每份大小。已经发布的数据不可用新参数覆盖。数据、输入 SHA256、实际来源计数、去重审计、模板证据和自检身份冻结在 `deepmath_evaluation/data/manifest.json`。任务及模型选择冻结在 `deepmath_evaluation.json`，新评估源码另存于不可变 runtime 副本；原训练 template 不修改。
+
+监护延续到任务完成、显式停止或确认应用阻塞；**24 小时只是单次 GPU allocation 上限**。确认 PBS 271 或明确 walltime 超限后自动续投，无连续三次上限。完成的 batch 存在 `evaluations/heldout_*/`，模型/数据/评分器/依赖/生成参数/顺序完全一致才可复用；未完成的 batch 重做。PBS 查询不明继续观察原 job，应用错误和 265 不会被自动泛化为无限重试。已有共享文件锁交接支持从任意登录节点执行命令。`stop --domain deepmath_base` 等入口和 campaign 级 STOP 同样生效。
+
+查看进度、生成比较报告：
+
+```bash
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py status --campaign "$teacher_campaign"
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py report --campaign "$teacher_campaign"
+```
+
+报告保存在 `deepmath_evaluation/comparison.json`，包含每模型每 split 的整体/L8/L9 分数，及同题配对的分数差、改善/退步题数、10000 次 paired bootstrap 的 95% 区间（seed 42，探索性未校正区间）。报告从有完整校验的逐题 journal 重算分数；不同依赖/生成协议不混合。尚未完成时输出 `INCOMPLETE`，不把部分批次当完整 test。原 `teachers.json` 仍表示原 validation 选出的模型。
+
+本地 CPU 测试覆盖真实 Parquet 输入、旧 Unicode holdout 解析、训练和 probe 去重、分层互斥、模型及数据绑定、冻结 launcher、Math50 等待、271 多次续投、未知 PBS 所有权、注册中断、实际 pinned validation 循环跨 split 恢复，以及真实 guardian 子进程交接。GPU/模型权重与 PBS 调度为 fixture；实际集群运行以返回的 job ID 和完成收据为准。
+
 ## 评估恢复、导出和保存空间
 
 validation/test 的每个完成 batch 都原子写入 journal，绑定 model/checkpoint、数据、verifier、依赖版本、生成参数和顺序。重启先恢复当前 checkpoint 上未完成的 validation，再进入下一个训练 update；已完成 batch 不重新生成。收据核对完整 ID 集和输出哈希。validation 的 attempted/completed 耗时保存在 `evaluations/*/attempts`；训练及保存耗时保存在 `jobs/*/train/step_*.json`。不会依据这些耗时修改 eval interval。

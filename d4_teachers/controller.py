@@ -39,9 +39,11 @@ TERMINAL = {
 
 def tasks(c):
     from .checkpoint_evaluation import plan
+    from .deepmath_evaluation import plan as deepmath_plan
 
     p = plan(c)
-    return (*TASKS, *(p["targets"] if p else ()))
+    deep = deepmath_plan(c)
+    return (*TASKS, *(p["targets"] if p else ()), *(deep["targets"] if deep else ()))
 
 
 def early_base(c):
@@ -66,14 +68,28 @@ def progress(c, domain, phase):
         )
         return step * 100000 + batches
     if phase == "test":
+        from .deepmath_evaluation import TARGETS as DEEPMATH_TASKS
+
+        pattern = (
+            "heldout_*/progress.json"
+            if domain in DEEPMATH_TASKS
+            else "test_*/progress.json"
+        )
         return sum(
             read(p).get("completed_rows", 0)
-            for p in (run / "evaluations").glob("test_*/progress.json")
+            for p in (run / "evaluations").glob(pattern)
         )
     return int((run / "export.json").exists())
 
 
 def artifact(c, domain, phase):
+    from .deepmath_evaluation import plan as deepmath_plan, validate_result
+
+    deep = deepmath_plan(c)
+    if deep and domain in deep["targets"]:
+        need(phase == "test", "DeepMath tasks are evaluation only")
+        validate_result(c, domain)
+        return
     run = Path(c["path"]) / "runs" / domain
     if phase == "train":
         done = read(run / "training_complete.json")
@@ -222,7 +238,7 @@ def tick(c, pbs=None):
     )
     for domain, state in states.items():
         if (
-            state["status"] != "READY"
+            state["status"] not in ("READY", "WAITING_MODEL")
             or occupied >= c["policy"]["max_concurrent_jobs"]
             or is_fenced(c["path"], domain)
         ):
@@ -243,6 +259,11 @@ def tick(c, pbs=None):
                 write(state_path(c, domain), state)
             continue
         try:
+            from .deepmath_evaluation import ready
+
+            if not ready(c, domain, state):
+                write(state_path(c, domain), state)
+                continue
             pending = make_job(c, domain, state["phase"])
         except Exception as e:
             state.update(

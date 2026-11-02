@@ -101,11 +101,17 @@ def prepare_revision(c):
             "guardian_handoff.py",
             "checkpoint_evaluation.py",
             "runtime.py",
+            "evaluation.py",
+            "deepmath_data.py",
+            "deepmath_evaluation.py",
         )
     }
     for name, original in ORIGINAL_SOURCES.items():
         accepted = {original, file_sha(replacements[name])}
         if name == "controller.py":
+            accepted.add(
+                "993feffda6d4a830acb98a4080a8beeceb77566253c6d664817c5608810b4d54"
+            )
             accepted.add(
                 "dda7bb3735ffa7d1cacce4faad8c4a54ed049ab16da0e193dd0580311d3ff2b5"
             )

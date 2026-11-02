@@ -95,6 +95,9 @@ def statistics(samples, rows):
 def validate(trainer, original, merged=False):
     req, cfg = trainer.teacher_request, trainer.config
     split = "test" if req["role"] == "test" else "validation"
+    if req.get("deepmath_evaluation"):
+        need(req["role"] == "test", "DeepMath comparisons cannot train")
+        split = "heldout"
     step = trainer.global_steps
     cp = trainer.current_checkpoint(step)
     from omegaconf import OmegaConf
@@ -125,6 +128,8 @@ def validate(trainer, original, merged=False):
         weights=trainer.weights_identity(cp),
         verifier=req["verifier_identity"],
     )
+    if req.get("deepmath_evaluation"):
+        binding["deepmath_evaluation"] = req["deepmath_evaluation"]
     key = digest(dict(binding=binding, runtime=runtime))
     directory = (
         Path(req["run_dir"]) / "evaluations" / (split + "_" + str(step) + "_" + key)
@@ -171,6 +176,12 @@ def validate(trainer, original, merged=False):
                 elapsed_seconds=time.monotonic() - start,
                 at_utc=now(),
             )
+            if req.get("deepmath_evaluation"):
+                from .deepmath_evaluation import split_statistics
+
+                receipt["split_scores"] = split_statistics(
+                    samples, trainer.val_dataset.rows
+                )
             receipt["content_sha256"] = digest(receipt)
             write(receipt_path, receipt)
             completed = True
@@ -199,5 +210,9 @@ def validate(trainer, original, merged=False):
             ),
         )
     else:
-        write(Path(req["run_dir"]) / "test.json", receipt)
+        write(
+            Path(req["run_dir"])
+            / ("heldout.json" if req.get("deepmath_evaluation") else "test.json"),
+            receipt,
+        )
     return receipt["metrics"]
