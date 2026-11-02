@@ -150,6 +150,22 @@ qstat -u "$USER"
 
 可用原 `status` 查看新增 task 的阶段、job 和心跳；`stop/reenable --domain math_step50` 或 `cp_step80` 只操作该补充任务，campaign 级 stop 覆盖它们。原 `teachers.json` 继续表示 validation 选出的模型；补充测试结果单独保存于上表路径。此次命令不导出或诊断训练日志。
 
+### 单次恢复启动阶段被 SIGKILL 的补充导出
+
+补充导出若在写出 `result.json` 前被 PBS 以 `Exit_status=265` 终止，控制器会保留为 `BLOCKED_APPLICATION`。这个名称包含未获自动重试许可的终止，不证明 Python 应用已经报错。265 不在原自动 271/walltime 策略内。
+
+已调查该次中断并决定单次重试时，在任意登录节点执行：
+
+```bash
+"$teacher_python" -I scripts/retry_teacher_export.py --campaign "$teacher_campaign" --task math_step50 --expected-job YOUR_JOB_ID.pbs1
+```
+
+**此命令会实际安排一次新的 GPU 导出，成功后自动进入 test，并继续由原 campaign 监护。** 导出和 test 各申请 1 节点、8 GPU、24 小时 walltime；后续确认的271/walltime中断沿用原自动恢复。它只接受已经注册的补充 checkpoint 任务、指定旧 job、明确的265终态及尚未写出 `result.json`、`export.json`、`test.json` 的情况。它会重新查询 PBS 并核验所属用户、队列、名称、提交路径、冻结 request、checkpoint 和评分器身份；未知查询、活跃作业、显式 STOP 或 writer 锁冲突均不会清除原作业所有权。
+
+旧状态与 PBS 观察先保存到 `repairs/checkpoint-export-sigkill-once-v1/`，随后在 guardian/control/writer 锁下将该导出设为 READY。原作业目录、模型、已完成的 CP/base 结果及 Logic 作业保留。重复执行同一个 `--expected-job` 会接管已恢复的流程，不会再次投递；若新作业再次以265结束，需要另行调查。本入口不把所有265或应用异常加入无限自动重试。
+
+本地验证包含单次提交、export→test、后续271恢复、再次265时保持阻塞、重复运行与不明 qsub 所有权、PBS身份和状态检查、STOP/writer锁、checkpoint改动、审计写入中断恢复，以及真实 guardian 子进程交接并接管 Logic。PBS命令和模型权重为合成fixture；实际GPU提交与导出结果需以部署后的job ID和收据为准。
+
 ## 评估恢复、导出和保存空间
 
 validation/test 的每个完成 batch 都原子写入 journal，绑定 model/checkpoint、数据、verifier、依赖版本、生成参数和顺序。重启先恢复当前 checkpoint 上未完成的 validation，再进入下一个训练 update；已完成 batch 不重新生成。收据核对完整 ID 集和输出哈希。validation 的 attempted/completed 耗时保存在 `evaluations/*/attempts`；训练及保存耗时保存在 `jobs/*/train/step_*.json`。不会依据这些耗时修改 eval interval。
