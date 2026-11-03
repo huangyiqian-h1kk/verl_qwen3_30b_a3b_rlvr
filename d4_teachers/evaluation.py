@@ -179,10 +179,10 @@ def validate(trainer, original, merged=False):
                 at_utc=now(),
             )
             if req.get("deepmath_evaluation"):
-                from .deepmath_evaluation import split_statistics
+                from .deepmath_evaluation import split_statistics, evaluation_splits
 
                 receipt["split_scores"] = split_statistics(
-                    samples, trainer.val_dataset.rows
+                    samples, trainer.val_dataset.rows, evaluation_splits(req["task"])
                 )
             if req.get("teacher_followup") and req.get("task") == "math_continued":
                 from .followup import source_statistics, selection_score

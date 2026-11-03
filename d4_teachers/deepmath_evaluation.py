@@ -1,4 +1,4 @@
-"""Independent DeepMath base/20/50 evaluations under the campaign's one guardian."""
+"""Frozen DeepMath comparisons and test-only IF70/CP80 supplements."""
 
 from itertools import combinations
 from pathlib import Path
@@ -15,21 +15,34 @@ TARGETS = {
     "deepmath_math20": ("math", 20),
     "deepmath_math50": ("math_step50", 50),
 }
+TEST_POLICY = "deepmath-if70-cp80-test-v1"
+TEST_PLAN = "deepmath_if70_cp80_test.json"
+TEST_TARGETS = {
+    "deepmath_if70": ("if_step70", 70),
+    "deepmath_cp80": ("cp_step80", 80),
+}
 
 
-def plan(c):
-    path = Path(c["path"]) / PLAN
+def evaluation_splits(task=None):
+    return ("test",) if task in TEST_TARGETS else deepmath_data.SPLITS
+
+
+def plan(c, task=None, *, test_only=False):
+    test_only = test_only or task in TEST_TARGETS
+    path = Path(c["path"]) / (TEST_PLAN if test_only else PLAN)
     if not path.exists():
         return None
     p = read(path)
     need(
         p["identity"] == digest({k: v for k, v in p.items() if k != "identity"})
         and p["campaign_identity"] == c["identity"]
-        and p["policy"] == POLICY
-        and set(p["targets"]) == set(TARGETS),
+        and p["policy"] == (TEST_POLICY if test_only else POLICY)
+        and set(p["targets"]) == set(TEST_TARGETS if test_only else TARGETS),
         "DeepMath evaluation plan changed",
     )
-    for task, (source, step) in TARGETS.items():
+    if test_only:
+        need(p["evaluation_splits"] == ["test"], "Supplement must use test only")
+    for task, (source, step) in (TEST_TARGETS if test_only else TARGETS).items():
         need(
             p["targets"][task]["source_task"] == source
             and p["targets"][task]["step"] == step,
@@ -38,19 +51,21 @@ def plan(c):
     return p
 
 
-def inspect_models(c):
+def inspect_models(c, *, test_only=False):
     from .checkpoint_evaluation import validate_selected
     from .exporting import validate_export
     from .common import model_inventory
 
     root = Path(c["path"])
     need(not is_fenced(root), "Campaign is stopped")
-    need(
-        model_inventory(c["contract"]["base_model"]) == c["contract"]["base_inventory"],
-        "Base HF model changed",
-    )
+    if not test_only:
+        need(
+            model_inventory(c["contract"]["base_model"])
+            == c["contract"]["base_inventory"],
+            "Base HF model changed",
+        )
     targets = {}
-    for task, (source, step) in TARGETS.items():
+    for task, (source, step) in (TEST_TARGETS if test_only else TARGETS).items():
         need(
             not is_fenced(root, task) and not is_fenced(root, source),
             "DeepMath source/target stopped",
@@ -60,13 +75,21 @@ def inspect_models(c):
             target["base_identity"] = c["contract"]["base_identity"]
         else:
             run = root / "runs" / source
-            if source == "math_step50":
+            if source == "if_step70":
+                from .followup import validate_if_selected
+
+                selected = validate_if_selected(c)
+            elif source in ("math_step50", "cp_step80"):
                 selected = validate_selected(c, source)
             else:
                 selected = validate_export(read(run / "export.json"))["selected"]
             need(
-                selected["step"] == step and selected["domain"] == "math",
-                "Expected Math checkpoint unavailable",
+                selected["step"] == step
+                and selected["domain"]
+                == {"if_step70": "if", "cp_step80": "conversational_pivot"}.get(
+                    source, "math"
+                ),
+                "Expected teacher checkpoint unavailable",
             )
             target.update(
                 selected_identity=digest(selected), lineage=selected["lineage"]
@@ -79,7 +102,7 @@ def evaluation_model(c, task):
     from .exporting import evaluation_model as original, validate_export
     from .common import model_inventory
 
-    p = plan(c)
+    p = plan(c, task)
     need(p and task in p["targets"], "Unregistered DeepMath task")
     target = p["targets"][task]
     source = target["source_task"]
@@ -105,7 +128,7 @@ def evaluation_model(c, task):
 
 
 def ready(c, task, state):
-    p = plan(c)
+    p = plan(c, task)
     if not p or task not in p["targets"]:
         return True
     source = p["targets"][task]["source_task"]
@@ -134,7 +157,7 @@ def runtime_directory(c, p):
 def apply_runtime(c, task, folder):
     from .checkpoint_evaluation import verifier
 
-    p = plan(c)
+    p = plan(c, task)
     if not p or task not in p["targets"]:
         return None
     need(verifier(c) == p["verifier_identity"], "DeepMath verifier changed")
@@ -151,10 +174,10 @@ def apply_runtime(c, task, folder):
     return p
 
 
-def install(c):
+def install(c, *, test_only=False):
     from .checkpoint_evaluation import verifier
 
-    existing = plan(c)
+    existing = plan(c, test_only=test_only)
     if existing:
         need(
             deepmath_data.verify(c)["identity"] == existing["data_identity"]
@@ -164,20 +187,22 @@ def install(c):
         return dict(status="ALREADY_REGISTERED", identity=existing["identity"])
     root = Path(c["path"])
     data = deepmath_data.verify(c)
-    targets = inspect_models(c)
+    targets = inspect_models(c, test_only=test_only)
     need(
         data["verifier_identity"] == verifier(c),
         "DeepMath CPU preflight used another verifier",
     )
     source = Path(__file__).parent
     payload = dict(
-        policy=POLICY,
+        policy=TEST_POLICY if test_only else POLICY,
         campaign_identity=c["identity"],
         targets=targets,
         data_identity=data["identity"],
         verifier_identity=verifier(c),
         runtime_files=files(source),
     )
+    if test_only:
+        payload["evaluation_splits"] = ["test"]
     p = dict(payload, identity=digest(payload))
     runtime = runtime_directory(c, p)
     if not runtime.exists():
@@ -226,18 +251,18 @@ def install(c):
             ),
         )
     # A crash before this publication leaves no schedulable new targets.
-    write(root / PLAN, p)
+    write(root / (TEST_PLAN if test_only else PLAN), p)
     return dict(status="REGISTERED", identity=p["identity"], tasks=list(targets))
 
 
-def launch(path):
+def launch(path, *, test_only=False):
     from .source import load_campaign
     from .retry_repair import repair
     from .checkpoint_evaluation import verifier
 
     c = load_campaign(path)
     data = deepmath_data.verify(c)
-    existing = plan(c)
+    existing = plan(c, test_only=test_only)
     if existing:
         need(
             existing["data_identity"] == data["identity"]
@@ -245,27 +270,38 @@ def launch(path):
             "DeepMath plan no longer matches",
         )
     else:
-        inspect_models(c)
-    result = repair(path, install_under_lease=None if existing else install)
+        inspect_models(c, test_only=test_only)
+    result = repair(
+        path,
+        install_under_lease=None
+        if existing
+        else lambda campaign: install(campaign, test_only=test_only),
+    )
     return dict(
-        status="DEEPMATH_EVALUATIONS_REGISTERED",
+        status="DEEPMATH_TEST_SUPPLEMENTS_REGISTERED"
+        if test_only
+        else "DEEPMATH_EVALUATIONS_REGISTERED",
         guardian=result,
-        note="Three read-only model evaluations; Math50 waits for its existing verified HF export.",
+        note=(
+            "IF70 and CP80 use the frozen DeepMath test only, with existing HF exports and guardian recovery."
+            if test_only
+            else "Three read-only model evaluations; Math50 waits for its existing verified HF export."
+        ),
     )
 
 
-def files_and_ids(c):
+def files_and_ids(c, task=None):
     m = deepmath_data.verify(c)
     return (
         [
             str(deepmath_data.directory(c) / (s + ".parquet"))
-            for s in deepmath_data.SPLITS
+            for s in evaluation_splits(task)
         ],
-        [sid for s in deepmath_data.SPLITS for sid in m["splits"][s]["ids"]],
+        [sid for s in evaluation_splits(task) for sid in m["splits"][s]["ids"]],
     )
 
 
-def split_statistics(samples, rows):
+def split_statistics(samples, rows, splits=deepmath_data.SPLITS):
     from .evaluation import statistics
 
     by_id = dict(samples)
@@ -278,19 +314,19 @@ def split_statistics(samples, rows):
             ],
             [r for r in rows if r["evaluation_split"] == s],
         )
-        for s in deepmath_data.SPLITS
+        for s in splits
     }
 
 
 def validate_result(c, task):
-    from .evaluation import Journal, read_receipt
+    from .evaluation import Journal, read_receipt, statistics
     import pyarrow.parquet as pq
 
-    p = plan(c)
+    p = plan(c, task)
     need(p and task in p["targets"], "Unregistered DeepMath result")
     receipt = read_receipt(Path(c["path"]) / "runs" / task / "heldout.json")
     model = evaluation_model(c, task)
-    paths, ids = files_and_ids(c)
+    paths, ids = files_and_ids(c, task)
     journal_dir = below(
         receipt["journal"]["path"], Path(c["path"]) / "runs" / task / "evaluations"
     )
@@ -330,6 +366,7 @@ def validate_result(c, task):
     need(
         receipt["status"] == "PASS"
         and receipt["split"] == "heldout"
+        and receipt["step"] == model["step"]
         and receipt["binding"] == binding
         and receipt["journal"]["rows"] == runtime["rows"] == len(ids)
         and runtime["ids"] == ids
@@ -340,21 +377,24 @@ def validate_result(c, task):
         "Incomplete/different DeepMath evaluation",
     )
     need(
-        receipt["split_scores"] == split_statistics(samples, rows),
+        receipt["split_scores"]
+        == split_statistics(samples, rows, evaluation_splits(task))
+        and receipt["scores"] == statistics(samples, rows),
         "DeepMath split metrics differ from journal",
     )
     return receipt, rows, samples
 
 
-def report(path):
+def report(path, *, test_only=False):
     from .source import load_campaign
     import numpy as np
 
     c = load_campaign(path)
-    p = plan(c)
+    p = plan(c, test_only=test_only)
     need(p, "DeepMath evaluations not registered")
     outputs, values, rows, protocol = {}, {}, None, None
-    for task in TARGETS:
+    targets = TEST_TARGETS if test_only else TARGETS
+    for task in targets:
         run = Path(c["path"]) / "runs" / task
         state = read(run / "state.json")
         outputs[task] = dict(
@@ -381,7 +421,7 @@ def report(path):
     comparisons = []
     if rows:
         for first, second in combinations(values, 2):
-            for split in deepmath_data.SPLITS:
+            for split in ("test",) if test_only else deepmath_data.SPLITS:
                 for level in (None, 8, 9):
                     ids = [
                         r["sample_id"]
@@ -412,11 +452,16 @@ def report(path):
                         )
                     )
     result = dict(
-        status="PASS" if len(values) == len(TARGETS) else "INCOMPLETE",
+        status="PASS" if len(values) == len(targets) else "INCOMPLETE",
         plan=p["identity"],
         models=outputs,
         paired_comparisons=comparisons,
         note="Supplementary held-out comparison; original validation selection remains recorded separately.",
     )
-    write(Path(c["path"]) / "deepmath_evaluation" / "comparison.json", result)
+    write(
+        Path(c["path"])
+        / "deepmath_evaluation"
+        / ("if70_cp80_comparison.json" if test_only else "comparison.json"),
+        result,
+    )
     return result

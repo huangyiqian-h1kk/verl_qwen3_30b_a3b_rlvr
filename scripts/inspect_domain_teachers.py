@@ -16,6 +16,7 @@ TZ = timezone(timedelta(hours=8))
 DOMAINS = ("math", "if", "conversational_pivot", "logic_algorithmic")
 EXTRA = ("math_step50", "cp_step80")
 DEEP = ("deepmath_base", "deepmath_math20", "deepmath_math50")
+DEEP_TEST = ("deepmath_if70", "deepmath_cp80")
 FOLLOWUP = ("if_step70", "math_continued")
 
 
@@ -155,6 +156,7 @@ def report(root, logs=0, history=5, no_pbs=False):
     policy = c.get("policy", {})
     cp_plan = reader.read(root / "checkpoint_evaluation.json")
     dm_plan = reader.read(root / "deepmath_evaluation.json")
+    dm_test_plan = reader.read(root / "deepmath_if70_cp80_test.json")
     fu_plan = reader.read(root / "teacher_followup.json")
     registered = (
         set(DOMAINS)
@@ -162,11 +164,14 @@ def report(root, logs=0, history=5, no_pbs=False):
         | set(cp_plan.get("targets", {}))
         | set(dm_plan.get("targets", {}))
         | set(fu_plan.get("targets", {}))
+        | set(dm_test_plan.get("targets", {}))
     )
     discovered = {p.parent.name for p in (root / "runs").glob("*/state.json")}
     tasks = [*DOMAINS, "base", *EXTRA, *DEEP]
     if fu_plan:
         tasks += list(FOLLOWUP)
+    if dm_test_plan:
+        tasks += list(DEEP_TEST)
     tasks += sorted(discovered - set(tasks))
     states = {t: reader.read(root / "runs" / t / "state.json") for t in tasks}
     beat = reader.read(root / "heartbeat.json")
@@ -319,6 +324,11 @@ def report(root, logs=0, history=5, no_pbs=False):
     data = reader.read(root / "deepmath_evaluation/data/manifest.json")
     print("数据已准备:", bool(data), "| 三模型计划已注册:", bool(dm_plan))
     print("DeepMath计划 verifier:", dm_plan.get("verifier_identity", "—"))
+    if dm_test_plan:
+        print(
+            "IF70/CP80 test补测已注册 | verifier:",
+            dm_test_plan.get("verifier_identity", "—"),
+        )
     if data:
         print(
             "数据分层:",
@@ -331,9 +341,9 @@ def report(root, logs=0, history=5, no_pbs=False):
             ),
         )
     rows = []
-    for task in DEEP:
+    for task in (*DEEP, *(DEEP_TEST if dm_test_plan else ())):
         receipt, status = reader.receipt(root / "runs" / task / "heldout.json")
-        for split in ("validation", "test"):
+        for split in ("test",) if task in DEEP_TEST else ("validation", "test"):
             scores = receipt.get("split_scores", {}).get(split, {})
             rows.append(
                 [

@@ -306,7 +306,7 @@ def phase(path):
             from .deepmath_evaluation import files_and_ids
 
             cfg.data.val_files = files_and_ids(
-                load_campaign(r["campaign_dir"], verify=False)
+                load_campaign(r["campaign_dir"], verify=False), r["task"]
             )[0]
     if r.get("teacher_followup") and r["task"] == "math_continued":
         from .followup import files_and_ids
@@ -390,9 +390,11 @@ def run_trainer(config, request, phase_dir, resume):
                 for sid in request["data_manifest"]["domains"][d][split]["ids"]
             ]
             if request.get("deepmath_evaluation"):
+                from .deepmath_evaluation import evaluation_splits
+
                 expected_ids = [
                     sid
-                    for s in ("validation", "test")
+                    for s in evaluation_splits(request["task"])
                     for sid in request["heldout_manifest"]["splits"][s]["ids"]
                 ]
             if request.get("teacher_followup") and request["task"] == "math_continued":

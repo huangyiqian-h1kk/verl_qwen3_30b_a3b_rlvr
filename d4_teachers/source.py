@@ -222,7 +222,7 @@ def make_job(c, domain, role):
     task = domain
     p = extra.plan(c)
     target = p["targets"].get(task) if p else None
-    dp = deep.plan(c)
+    dp = deep.plan(c, task)
     deep_target = dp["targets"].get(task) if dp else None
     fp = followup.plan(c)
     follow_target = fp["targets"].get(task) if fp else None
@@ -310,6 +310,8 @@ def make_job(c, domain, role):
                 "deepmath_base": "base",
                 "deepmath_math20": "m20",
                 "deepmath_math50": "m50",
+                "deepmath_if70": "if70",
+                "deepmath_cp80": "cp80",
             }[task]
         )
     if follow_target:
@@ -415,7 +417,7 @@ def validate_request(path):
         from . import deepmath_evaluation as deep
         from .deepmath_data import verify
 
-        p = deep.plan(c)
+        p = deep.plan(c, r["task"])
         need(
             p
             and p["identity"] == r["deepmath_evaluation"]

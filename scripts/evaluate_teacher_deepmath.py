@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare frozen DeepMath held-outs and evaluate base/Math20/Math50 with the guardian."""
+"""Evaluate frozen DeepMath held-outs or supplement IF70/CP80 with test only."""
 
 import argparse
 import json
@@ -17,6 +17,11 @@ def main():
         "action", choices=("discover", "prepare", "start", "run", "status", "report")
     )
     parser.add_argument("--campaign", type=Path, required=True)
+    parser.add_argument(
+        "--if70-cp80-test",
+        action="store_true",
+        help="Use the existing DeepMath test only for IF70 and CP80 (start/status/report)",
+    )
     parser.add_argument(
         "--input",
         type=Path,
@@ -37,6 +42,8 @@ def main():
         help="Questions per split, stratified by frozen DeepMath L8/L9 counts",
     )
     args = parser.parse_args()
+    if args.if70_cp80_test and args.action not in ("start", "status", "report"):
+        parser.error("--if70-cp80-test supports start, status and report only")
     c = load_campaign(args.campaign)
     if args.action == "discover":
         result = deepmath_data.discover(c)
@@ -68,7 +75,7 @@ def main():
             return
         result = deepmath_evaluation.launch(c["path"])
     elif args.action == "start":
-        result = deepmath_evaluation.launch(c["path"])
+        result = deepmath_evaluation.launch(c["path"], test_only=args.if70_cp80_test)
     elif args.action == "status":
         state = controller.status(c["path"])
         result = {
@@ -78,7 +85,12 @@ def main():
             k: (state["heartbeat"] or {}).get(k) for k in ("at_utc", "host", "pid")
         }
         result["tasks"] = {}
-        for task in deepmath_evaluation.TARGETS:
+        targets = (
+            deepmath_evaluation.TEST_TARGETS
+            if args.if70_cp80_test
+            else deepmath_evaluation.TARGETS
+        )
+        for task in targets:
             entry = state["states"].get(task, {})
             row = {
                 k: entry.get(k)
@@ -101,7 +113,7 @@ def main():
             row["receipt_exists"] = (run / "heldout.json").is_file()
             result["tasks"][task] = row
     else:
-        result = deepmath_evaluation.report(c["path"])
+        result = deepmath_evaluation.report(c["path"], test_only=args.if70_cp80_test)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

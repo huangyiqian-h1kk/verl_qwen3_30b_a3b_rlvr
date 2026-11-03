@@ -44,12 +44,14 @@ def tasks(c):
 
     p = plan(c)
     deep = deepmath_plan(c)
+    deep_test = deepmath_plan(c, test_only=True)
     follow = followup_plan(c)
     return (
         *TASKS,
         *(p["targets"] if p else ()),
         *(deep["targets"] if deep else ()),
         *(follow["targets"] if follow else ()),
+        *(deep_test["targets"] if deep_test else ()),
     )
 
 
@@ -79,11 +81,11 @@ def progress(c, domain, phase):
         )
         return step * 100000 + batches
     if phase == "test":
-        from .deepmath_evaluation import TARGETS as DEEPMATH_TASKS
+        from .deepmath_evaluation import TARGETS as DEEPMATH_TASKS, TEST_TARGETS
 
         pattern = (
             "heldout_*/progress.json"
-            if domain in DEEPMATH_TASKS
+            if domain in (*DEEPMATH_TASKS, *TEST_TARGETS)
             else "test_*/progress.json"
         )
         return sum(
@@ -102,7 +104,7 @@ def artifact(c, domain, phase):
         validate_test(c, domain)
         return
 
-    deep = deepmath_plan(c)
+    deep = deepmath_plan(c, domain)
     if deep and domain in deep["targets"]:
         need(phase == "test", "DeepMath tasks are evaluation only")
         validate_result(c, domain)

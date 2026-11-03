@@ -42,3 +42,25 @@ The existing guardian owns submission and recovery. Confirmed PBS271 interruptio
 `teacher_followup.json` freezes the plan. `selected_teachers.json` exposes adopted models even when another teacher is unfinished. CP80 has explicit-choice provenance and no validation-selection score. Math switches to the new stage after its selected export passes validation. The complete `teachers.json` follows the same selection once all teacher exports exist. Its four-domain Math column remains Nemotron-only; additional DeepMath results appear in `math_test_sources`.
 
 CPU tests cover full-state pins, actual torchdata cursor restoration, validation journal recovery across sources, selection and stopping boundaries, interrupted registration, repeated271 recovery, existing-job adoption, duplicate-start prevention, export/test progression, and reporting. GPU model restoration and training require the cluster's runtime checks.
+
+## Add DeepMath test for IF70 and CP80
+
+The original four-domain test already includes Nemotron Math. This additional measurement uses exactly the previously prepared DeepMath **test** questions for both IF70 and CP80, so its scores can be compared with the existing base/Math20/Math50 DeepMath test results. It does not include DeepMath validation or resample the held-out set.
+
+```bash
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py start --campaign "$teacher_campaign" --if70-cp80-test
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py status --campaign "$teacher_campaign" --if70-cp80-test
+"$teacher_python" -I scripts/inspect_domain_teachers.py --campaign "$teacher_campaign" --logs 8
+```
+
+`start` publishes the separate `deepmath_if70_cp80_test.json` plan and hands off the existing guardian from whichever login host runs the command. It adds `deepmath_if70` and `deepmath_cp80`, reuses their source HF exports, and waits if an export is still pending. Existing four-domain tests, CP80 adoption, Math continuation, and Logic training keep their job ownership and saved progress. Repeated `start` calls retain the same tasks and caches.
+
+Both added tasks use the campaign's existing concurrency limit, one eight-GPU node and a 24-hour limit per attempt. Confirmed271/walltime interruptions resubmit automatically, and completed evaluation batches are reused. Unknown PBS observations keep the existing job owner; application failures remain visible for diagnosis.
+
+Results are written to `runs/deepmath_if70/heldout.json` and `runs/deepmath_cp80/heldout.json`, with `split_scores.test` containing the overall and L8/L9 scores. The overview includes these test-only rows alongside the earlier DeepMath comparisons. A checked report can also be produced with:
+
+```bash
+"$teacher_python" -I scripts/evaluate_teacher_deepmath.py report --campaign "$teacher_campaign" --if70-cp80-test
+```
+
+This writes `deepmath_evaluation/if70_cp80_comparison.json`. Supplementary test scores do not change either teacher's checkpoint selection or any training/early-stopping policy.

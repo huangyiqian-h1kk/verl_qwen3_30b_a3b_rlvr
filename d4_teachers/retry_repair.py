@@ -113,6 +113,9 @@ def prepare_revision(c):
         accepted = {original, file_sha(replacements[name])}
         if name == "controller.py":
             accepted.add(
+                "8c4b65fe930aa0e7daa7f75acd8b635daab17eaadfbcf06f7e526b25e9a845c1"
+            )
+            accepted.add(
                 "b199a9524897837aa975a75376e07a5093d22ee97ac25053c41a451f36be7505"
             )
             accepted.add(
