@@ -244,6 +244,18 @@ validation/test 的每个完成 batch 都原子写入 journal，绑定 model/che
 
 `storage` 按 inode 去重硬链接；`collect` 保留配置、日志、rank/restore 证据和评估 journal，排除模型/optimizer 大文件、Parquet 和 verifier zip。每个 teacher 的 `run.json`/`state.json`、`progress.json`、`validation_state.json`、`best.json`、`training_complete.json` 和 `export.json` 是主要检查入口。
 
+## 一次查阅所有训练与补充评估
+
+`scripts/inspect_domain_teachers.py` 是只依赖标准库的只读报告入口，支持从 `git show REV:scripts/inspect_domain_teachers.py | python -I -` 执行，无需更新正在使用的 checkout 或替换 guardian。
+
+```bash
+"$teacher_python" -I scripts/inspect_domain_teachers.py --campaign "$teacher_campaign" --logs 12
+```
+
+输出涵盖监护锁/心跳、四个 teacher 的最近记录步与完整保存步、validation best/历史、最近五条训练 reward/零 advantage 组比例/响应长度/耗时、四域 test 矩阵（原 teacher、base、Math50、CP80）、DeepMath 两份 held-out 的整体和 L8/L9 分数，以及所有任务的排队/运行/阻塞、当前或上次 job 和实时 PBS exit/walltime。未注册的补充任务明确显示未注册，已准备数据不会被解释成已提交作业。
+
+`--logs N` 有界读取最新 job 的日志末尾，默认不读日志；`--history N` 控制近期训练行数；`--no-pbs` 仅读持久化文件。PBS 每个查询超时20秒、最多3个并行，超时/缺失记录显示 UNKNOWN。报告不调用 qsub/qdel，不启动或停止监护，不写 campaign 状态；可由 shell 的 `tee` 保存成小型文本文件。结果是非原子的运行快照，收据摘要校验不代替重新校验模型和完整生成 journal；训练重复步仍保留以显示中断重跑，旧 error 字段不等同于当前失败。
+
 ## 本地验证
 
 ```bash
