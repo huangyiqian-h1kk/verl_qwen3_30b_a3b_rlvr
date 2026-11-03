@@ -130,6 +130,8 @@ def validate(trainer, original, merged=False):
     )
     if req.get("deepmath_evaluation"):
         binding["deepmath_evaluation"] = req["deepmath_evaluation"]
+    if req.get("teacher_followup"):
+        binding["teacher_followup"] = req["teacher_followup"]
     key = digest(dict(binding=binding, runtime=runtime))
     directory = (
         Path(req["run_dir"]) / "evaluations" / (split + "_" + str(step) + "_" + key)
@@ -182,6 +184,21 @@ def validate(trainer, original, merged=False):
                 receipt["split_scores"] = split_statistics(
                     samples, trainer.val_dataset.rows
                 )
+            if req.get("teacher_followup") and req.get("task") == "math_continued":
+                from .followup import source_statistics, selection_score
+
+                receipt["math_sources"] = source_statistics(
+                    samples, trainer.val_dataset.rows
+                )
+                for name in ("nemotron", "deepmath"):
+                    receipt["metrics"]["val-source/math/" + name] = receipt[
+                        "math_sources"
+                    ][name]["mean"]
+                if split == "validation":
+                    receipt["selection_score"] = selection_score(receipt)
+                    receipt["metrics"]["val-selection/math/equal_source_mean"] = (
+                        receipt["selection_score"]
+                    )
             receipt["content_sha256"] = digest(receipt)
             write(receipt_path, receipt)
             completed = True
@@ -197,15 +214,20 @@ def validate(trainer, original, merged=False):
                 ),
             )
     if req["role"] == "train":
+        from .followup import stop_state
+
         best = selection.select(req, cp, receipt)
-        trainer.teacher_stop = selection.should_stop(step, best["step"], req["policy"])
+        stop = stop_state(req, step, best["step"])
+        trainer.teacher_stop = stop["early_stop"] or stop["budget_reached"]
         write(
             Path(req["run_dir"]) / "validation_state.json",
             dict(
                 step=step,
                 best_step=best["step"],
                 best_score=best["score"],
-                early_stop=trainer.teacher_stop,
+                early_stop=stop["early_stop"],
+                budget_reached=stop["budget_reached"],
+                math_sources=receipt.get("math_sources"),
                 receipt=str(receipt_path),
             ),
         )

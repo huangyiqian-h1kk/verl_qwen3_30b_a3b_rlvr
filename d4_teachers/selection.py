@@ -41,6 +41,10 @@ def select(request, checkpoint, receipt):
     need(receipt["step"] == checkpoint["step"], "Selection checkpoint mismatch")
     run = Path(request["run_dir"])
     score = receipt["scores"][request["domain"]]["mean"]
+    if request.get("teacher_followup") and request.get("task") == "math_continued":
+        from .followup import selection_score
+
+        score = selection_score(receipt)
     previous = read(run / "best.json") if (run / "best.json").exists() else None
     if previous and score <= previous["score"]:
         validate_best(previous)  # Ties always retain the earlier checkpoint.
@@ -55,6 +59,13 @@ def select(request, checkpoint, receipt):
         validation_identity=receipt["identity"],
         verifier_identity=request["verifier_identity"],
     )
+    if request.get("teacher_followup") and request.get("task") == "math_continued":
+        best.update(
+            selection_source="two_source_validation",
+            selection_rule="equal_source_mean",
+            math_sources=receipt["math_sources"],
+            teacher_followup=request["teacher_followup"],
+        )
     if step == 0:
         best.update(
             path=request["base_model"],

@@ -201,13 +201,17 @@ def evaluation_model(campaign, domain):
 
 def manifest(campaign):
     from .evaluation import read_receipt
+    from . import followup
 
     root = Path(campaign["path"])
-    teachers, matrix, test_verifiers = {}, {}, {}
+    follow = followup.plan(campaign)
+    teachers, matrix, test_verifiers, math_sources, missing = {}, {}, {}, {}, []
     for domain in DOMAINS:
-        run = root / "runs" / domain
+        task = followup.chosen_task(campaign, domain)
+        run = root / "runs" / task
         if not (run / "export.json").exists():
-            return None
+            missing.append(domain)
+            continue
         exp = validate_export(read(run / "export.json"))
         teachers[domain] = dict(
             path=exp["path"],
@@ -219,6 +223,10 @@ def manifest(campaign):
             load_proof=exp["load_proof"],
             lineage=exp["lineage"],
         )
+        if follow:
+            teachers[domain].update(
+                followup.selection_metadata(campaign, domain, task, exp)
+            )
         if (run / "test.json").exists():
             receipt = read_receipt(run / "test.json")
             need(
@@ -226,8 +234,15 @@ def manifest(campaign):
                 and receipt["split"] == "test",
                 "Test used different weights",
             )
-            matrix[domain] = {d: receipt["scores"][d] for d in DOMAINS}
+            matrix[domain] = followup.four_domain_scores(receipt)
             test_verifiers[domain] = receipt["binding"]["verifier"]
+            if receipt.get("math_sources"):
+                math_sources[domain] = receipt["math_sources"]
+            if follow and task == "cp_step80":
+                need(
+                    receipt["identity"] == follow["cp_choice"]["test_identity"],
+                    "Adopted CP80 test changed",
+                )
     base = root / "runs/base/test.json"
     base_receipt = read_receipt(base) if base.exists() else None
     if base_receipt:
@@ -254,5 +269,15 @@ def manifest(campaign):
         comparable_tests_complete=complete and current,
         at_utc=now(),
     )
+    if follow:
+        result.update(
+            teacher_followup=follow["identity"],
+            missing_teachers=missing,
+            math_test_sources=math_sources,
+        )
+        # Publish the explicit CP80 choice even while Logic/Math are unfinished.
+        write(root / "selected_teachers.json", result)
+    if missing:
+        return None
     write(root / "teachers.json", result)
     return result

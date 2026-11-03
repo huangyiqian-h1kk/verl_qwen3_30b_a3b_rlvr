@@ -128,6 +128,13 @@ def trainer_class(base):
             checkpoint = ck.latest(
                 self.teacher_request["run_dir"], self.teacher_request["lineage"]
             )
+            if (
+                checkpoint is None
+                and self.teacher_request.get("teacher_followup")
+                and self.teacher_request.get("task") == "math_continued"
+                and step == self.teacher_resume["step"]
+            ):
+                checkpoint = ck.validate(self.teacher_resume)
             need(
                 checkpoint and checkpoint["step"] == step,
                 "Validation requires a committed full checkpoint",
@@ -143,7 +150,9 @@ def trainer_class(base):
                 need(
                     not is_fenced(
                         self.teacher_request["campaign_dir"],
-                        self.teacher_request["domain"],
+                        self.teacher_request.get(
+                            "task", self.teacher_request["domain"]
+                        ),
                     ),
                     "Teacher stopped",
                 )

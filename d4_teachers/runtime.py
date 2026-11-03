@@ -245,6 +245,10 @@ def phase(path):
     phase_dir = folder / "train"  # Required by the pinned full-restore/audit context.
     phase_dir.mkdir()
     resume = ck.latest(run, r["lineage"]) if r["role"] == "train" else None
+    if resume is None and r["role"] == "train" and r.get("teacher_followup"):
+        from .followup import initial_resume
+
+        resume = initial_resume(load_campaign(r["campaign_dir"], verify=False))
     resume = resume or dict(
         step=0, files={}, world_size=8, path=r["base_model"], lineage=None
     )
@@ -281,13 +285,17 @@ def phase(path):
         if (run / "validation_state.json").exists()
         else False
     )
+    from .followup import end_step
+
     cfg.trainer.val_only = r["role"] == "test" or (
-        r["role"] == "train" and (stopped or resume["step"] >= r["policy"]["max_steps"])
+        r["role"] == "train" and (stopped or resume["step"] >= end_step(r))
     )
     cfg.trainer.val_before_train = r["role"] == "test" or (
         r["role"] == "train" and resume["step"] % 10 == 0
     )
-    cfg.trainer.experiment_name = r["policy"]["campaign"] + "_" + r["domain"]
+    cfg.trainer.experiment_name = (
+        r["policy"]["campaign"] + "_" + r.get("task", r["domain"])
+    )
     if r["role"] != "train":
         cfg.trainer.logger = ["console"]
     if r["role"] == "test":
@@ -300,6 +308,13 @@ def phase(path):
             cfg.data.val_files = files_and_ids(
                 load_campaign(r["campaign_dir"], verify=False)
             )[0]
+    if r.get("teacher_followup") and r["task"] == "math_continued":
+        from .followup import files_and_ids
+
+        cfg.data.val_files = files_and_ids(
+            load_campaign(r["campaign_dir"], verify=False),
+            "test" if r["role"] == "test" else "validation",
+        )[0]
     cfg.reward.custom_reward_function.path = r["reward"]["import_path"]
     cfg.reward.custom_reward_function.name = "compute_score"
     env = dict(
@@ -380,6 +395,8 @@ def run_trainer(config, request, phase_dir, resume):
                     for s in ("validation", "test")
                     for sid in request["heldout_manifest"]["splits"][s]["ids"]
                 ]
+            if request.get("teacher_followup") and request["task"] == "math_continued":
+                expected_ids.extend(request["heldout_manifest"]["splits"][split]["ids"])
             need(
                 [row["sample_id"] for row in val.rows] == expected_ids,
                 "Evaluation split differs from frozen manifest",
@@ -446,14 +463,15 @@ def run_trainer(config, request, phase_dir, resume):
                 except TeacherComplete:
                     need(trainer.teacher_stop, "Premature teacher exit")
                 if request["role"] == "train":
+                    from .followup import end_step
+
                     val_state = read(Path(request["run_dir"]) / "validation_state.json")
                     cp = ck.latest(request["run_dir"], request["lineage"])
                     need(
                         cp
                         and cp["step"] == val_state["step"]
                         and (
-                            val_state["early_stop"]
-                            or cp["step"] == request["policy"]["max_steps"]
+                            val_state["early_stop"] or cp["step"] == end_step(request)
                         ),
                         "Teacher ended without final validation",
                     )
@@ -466,6 +484,7 @@ def run_trainer(config, request, phase_dir, resume):
                             status="PASS",
                             completed_step=cp["step"],
                             early_stop=val_state["early_stop"],
+                            budget_reached=cp["step"] >= end_step(request),
                             lineage=request["lineage"],
                             validation=val_state,
                             at_utc=now(),

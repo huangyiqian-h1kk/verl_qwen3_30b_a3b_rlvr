@@ -16,6 +16,7 @@ TZ = timezone(timedelta(hours=8))
 DOMAINS = ("math", "if", "conversational_pivot", "logic_algorithmic")
 EXTRA = ("math_step50", "cp_step80")
 DEEP = ("deepmath_base", "deepmath_math20", "deepmath_math50")
+FOLLOWUP = ("if_step70", "math_continued")
 
 
 def short(value, limit=400):
@@ -154,14 +155,18 @@ def report(root, logs=0, history=5, no_pbs=False):
     policy = c.get("policy", {})
     cp_plan = reader.read(root / "checkpoint_evaluation.json")
     dm_plan = reader.read(root / "deepmath_evaluation.json")
+    fu_plan = reader.read(root / "teacher_followup.json")
     registered = (
         set(DOMAINS)
         | {"base"}
         | set(cp_plan.get("targets", {}))
         | set(dm_plan.get("targets", {}))
+        | set(fu_plan.get("targets", {}))
     )
     discovered = {p.parent.name for p in (root / "runs").glob("*/state.json")}
     tasks = [*DOMAINS, "base", *EXTRA, *DEEP]
+    if fu_plan:
+        tasks += list(FOLLOWUP)
     tasks += sorted(discovered - set(tasks))
     states = {t: reader.read(root / "runs" / t / "state.json") for t in tasks}
     beat = reader.read(root / "heartbeat.json")
@@ -199,9 +204,10 @@ def report(root, logs=0, history=5, no_pbs=False):
         "以下是持续变化的文件/PBS快照；PASS 为已写出收据的状态，未重读模型或大批量生成文件。"
     )
 
-    print("\n[原始 teacher 训练]")
+    print("\n[teacher 训练；math_continued 的 best 分数为两个来源 validation 等权均值]")
     training = []
-    for task in DOMAINS:
+    training_tasks = (*DOMAINS, *(("math_continued",) if fu_plan else ()))
+    for task in training_tasks:
         run = root / "runs" / task
         state, progress = states[task], reader.read(run / "progress.json")
         best, done = (
@@ -244,12 +250,14 @@ def report(root, logs=0, history=5, no_pbs=False):
         "最近记录步包含中断前未保存的工作；恢复点应看完整保存步及新 job 的 resume 记录。"
     )
 
-    print("\n[四域 test：原 teacher、base、Math50、CP80]")
+    print("\n[四域 test：Math 列仅为 Nemotron；DeepMath 另列]")
     rows, receipts = [], {}
-    for task in (*DOMAINS, "base", *EXTRA):
+    for task in (*DOMAINS, "base", *EXTRA, *(FOLLOWUP if fu_plan else ())):
         receipt, status = reader.receipt(root / "runs" / task / "test.json")
         receipts[task] = receipt
-        scores = receipt.get("scores", {})
+        scores = dict(receipt.get("scores", {}))
+        if receipt.get("math_sources"):
+            scores["math"] = receipt["math_sources"]["nemotron"]
         rows.append(
             [
                 task,
@@ -260,7 +268,16 @@ def report(root, logs=0, history=5, no_pbs=False):
             ]
         )
     table(
-        ["模型", "test收据", "被评估步", "Math", "IF", "CP", "Logic", "verifier前12位"],
+        [
+            "模型",
+            "test收据",
+            "被评估步",
+            "Math/Nemotron",
+            "IF",
+            "CP",
+            "Logic",
+            "verifier前12位",
+        ],
         rows,
     )
     revisions = {
@@ -270,6 +287,33 @@ def report(root, logs=0, history=5, no_pbs=False):
     }
     if len(revisions) > 1:
         print("注意：已完成 test 使用了不同 verifier 版本，比较时需保留此区别。")
+    if fu_plan:
+        print("\n[采用版本与 Math 续训]")
+        print(
+            "CP: 用户指定 cp_step80；复用已完成四域 test；原 CP50 validation 选择记录保留。"
+        )
+        print("IF: 当前采用 IF40，IF70 是补充 test，尚未自动替换。")
+        print(
+            "Math续训策略:", json.dumps(fu_plan.get("math_policy"), ensure_ascii=False)
+        )
+        chosen = reader.read(root / "selected_teachers.json")
+        for domain, item in chosen.get("teachers", {}).items():
+            print(
+                domain,
+                "采用任务=",
+                item.get("source_task"),
+                "step=",
+                item.get("selected_step"),
+                "选择依据=",
+                item.get("selection_source", "validation"),
+                "待完成替换=",
+                item.get("pending_replacement", "—"),
+            )
+        receipt = receipts.get("math_continued", {})
+        print(
+            "Math续训最终test:",
+            json.dumps(receipt.get("math_sources", {}), ensure_ascii=False),
+        )
 
     print("\n[DeepMath 补充 validation/test]")
     data = reader.read(root / "deepmath_evaluation/data/manifest.json")
@@ -398,7 +442,7 @@ def report(root, logs=0, history=5, no_pbs=False):
                 )
 
     print("\n[本域 validation 历史及最近训练记录]")
-    for task in DOMAINS:
+    for task in training_tasks:
         run = root / "runs" / task
         print("\n", task)
         history_rows = []
@@ -412,10 +456,22 @@ def report(root, logs=0, history=5, no_pbs=False):
                         score(receipt.get("scores", {}).get(task)),
                         number(receipt.get("elapsed_seconds")),
                         when(receipt.get("at_utc")),
+                        score(receipt.get("math_sources", {}).get("nemotron")),
+                        score(receipt.get("math_sources", {}).get("deepmath")),
+                        number(receipt.get("selection_score")),
                     ]
                 )
         table(
-            ["val步", "收据", "本域reward", "本次完成尝试耗时(s)", "完成时间"],
+            [
+                "val步",
+                "收据",
+                "本域reward",
+                "本次完成尝试耗时(s)",
+                "完成时间",
+                "Nemotron",
+                "DeepMath",
+                "来源等权均值",
+            ],
             sorted(history_rows, key=lambda r: r[0]),
         )
         recent = newest((run / "jobs").glob("*/train/step_*.json"), history)

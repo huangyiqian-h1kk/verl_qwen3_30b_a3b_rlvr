@@ -40,10 +40,17 @@ TERMINAL = {
 def tasks(c):
     from .checkpoint_evaluation import plan
     from .deepmath_evaluation import plan as deepmath_plan
+    from .followup import plan as followup_plan
 
     p = plan(c)
     deep = deepmath_plan(c)
-    return (*TASKS, *(p["targets"] if p else ()), *(deep["targets"] if deep else ()))
+    follow = followup_plan(c)
+    return (
+        *TASKS,
+        *(p["targets"] if p else ()),
+        *(deep["targets"] if deep else ()),
+        *(follow["targets"] if follow else ()),
+    )
 
 
 def early_base(c):
@@ -60,6 +67,10 @@ def progress(c, domain, phase):
     run = Path(c["path"]) / "runs" / domain
     if phase == "train":
         cp = ck.latest(run, read(run / "run.json")["lineage"])
+        if cp is None and domain == "math_continued":
+            from .followup import initial_resume
+
+            cp = initial_resume(c)
         step = cp["step"] if cp else 0
         # Completed eval batches count as progress across a walltime interruption.
         batches = sum(
@@ -84,6 +95,12 @@ def progress(c, domain, phase):
 
 def artifact(c, domain, phase):
     from .deepmath_evaluation import plan as deepmath_plan, validate_result
+    from .followup import plan as followup_plan, validate_test
+
+    follow = followup_plan(c)
+    if follow and domain in follow["targets"] and phase == "test":
+        validate_test(c, domain)
+        return
 
     deep = deepmath_plan(c)
     if deep and domain in deep["targets"]:

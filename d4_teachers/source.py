@@ -216,6 +216,7 @@ def load_campaign(path, verify=True):
 def make_job(c, domain, role):
     from . import checkpoint_evaluation as extra
     from . import deepmath_evaluation as deep
+    from . import followup
 
     campaign = Path(c["path"])
     task = domain
@@ -223,6 +224,11 @@ def make_job(c, domain, role):
     target = p["targets"].get(task) if p else None
     dp = deep.plan(c)
     deep_target = dp["targets"].get(task) if dp else None
+    fp = followup.plan(c)
+    follow_target = fp["targets"].get(task) if fp else None
+    if follow_target:
+        need(task == followup.MATH or role in ("export", "test"), "IF70 cannot train")
+        domain = follow_target["domain"]
     if deep_target:
         need(role == "test", "DeepMath tasks are evaluation only")
         domain = "math"
@@ -245,6 +251,7 @@ def make_job(c, domain, role):
     shutil.copytree(campaign / "template", folder)
     extra_plan = extra.apply_runtime(c, task, folder)
     deep_plan = deep.apply_runtime(c, task, folder)
+    followup_plan = followup.apply_runtime(c, task, folder)
     runtime = folder / "runtime"
     (runtime / ".venv-multidomain").symlink_to(
         c["contract"]["overlay"], target_is_directory=True
@@ -255,7 +262,7 @@ def make_job(c, domain, role):
     need(text.count(before) == 1, "Unknown Math diagnostics binding")
     reward.write_text(text.replace(before, repr(str(folder / "math_diagnostics"))))
     test_revision = None
-    if role == "test":
+    if role == "test" or followup_plan:
         from .math_test_repair import apply_to_job
 
         test_revision = apply_to_job(c, folder)
@@ -305,6 +312,8 @@ def make_job(c, domain, role):
                 "deepmath_math50": "m50",
             }[task]
         )
+    if follow_target:
+        name = "0390_fu_" + ("math" if task == followup.MATH else "if70")
     (folder / "stage.pbs").write_text(render_pbs(runtime, folder, 1, name))
     contract = dict(
         version=VERSION,
@@ -339,10 +348,26 @@ def make_job(c, domain, role):
             deepmath_evaluation=deep_plan["identity"],
             heldout_manifest=verify(c),
         )
+    if followup_plan:
+        need(
+            (test_revision or c["contract"]["verifier_identity"])
+            == followup_plan["verifier_identity"],
+            "Follow-up verifier changed",
+        )
+        contract.update(task=task, teacher_followup=followup_plan["identity"])
+        if task == followup.MATH:
+            from .deepmath_data import verify
+
+            contract.update(
+                math_followup_policy=followup_plan["math_policy"],
+                heldout_manifest=verify(c),
+            )
     if role == "export":
         from .selection import validate_best
 
-        if target:
+        if follow_target and task == followup.IF:
+            contract["selected"] = followup.validate_if_selected(c)
+        elif target:
             contract["selected"] = extra.validate_selected(c, task)
         else:
             need(
@@ -403,6 +428,10 @@ def validate_request(path):
             and r["heldout_manifest"]["identity"] == p["data_identity"],
             "DeepMath request changed",
         )
+    if r.get("teacher_followup"):
+        from .followup import validate_request as validate_followup
+
+        validate_followup(c, r)
     if r.get("checkpoint_evaluation"):
         from .checkpoint_evaluation import plan, validate_selected
 

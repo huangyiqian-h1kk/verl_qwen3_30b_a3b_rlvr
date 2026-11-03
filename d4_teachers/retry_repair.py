@@ -104,11 +104,17 @@ def prepare_revision(c):
             "evaluation.py",
             "deepmath_data.py",
             "deepmath_evaluation.py",
+            "followup.py",
+            "selection.py",
+            "trainer.py",
         )
     }
     for name, original in ORIGINAL_SOURCES.items():
         accepted = {original, file_sha(replacements[name])}
         if name == "controller.py":
+            accepted.add(
+                "b199a9524897837aa975a75376e07a5093d22ee97ac25053c41a451f36be7505"
+            )
             accepted.add(
                 "993feffda6d4a830acb98a4080a8beeceb77566253c6d664817c5608810b4d54"
             )
