@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import socket
 import time
 import uuid
@@ -24,7 +25,7 @@ from d4_training_continuation import checkpoints as ck
 from d4_training_continuation.scheduler import PBS, Unknown, finished, retryable
 
 TASKS = (*DOMAINS, "base")
-RETRY_POLICY = "four-domain-external-interruption-v1"
+RETRY_POLICY = "domain-teacher-external-interruption-v2"
 OBSERVATION_POLICY = "persistent-pbs-observation-v1"
 # Unknown observations and held jobs still need their existing owner. They must
 # keep this loop alive even when every other teacher has already finished/failed.
@@ -139,6 +140,30 @@ def next_phase(c, phase):
     return None
 
 
+def retry_reason(row, job):
+    """Classify an identity-checked PBS observation without broadening shared policy."""
+    if retryable(row):
+        return "pbs_271" if str(row["Exit_status"]) == "271" else "pbs_walltime"
+    if not finished(row) or str(row.get("Exit_status")) != "265":
+        return None
+    comment = " ".join(str(row.get("comment", "")).split())
+    if not re.fullmatch(
+        r"(?:Job run at .+ and )?terminated by root@[A-Za-z0-9][A-Za-z0-9._-]*",
+        comment,
+    ):
+        return None
+    folder = Path(job["folder"])
+    result = folder / "result.json"
+    if result.exists():
+        report = read(result)
+        if report.get("status") != "RUNNING" or report.get("error"):
+            return None
+    marker = folder / "finished"
+    if marker.exists() and marker.read_text().strip() != "137":
+        return None
+    return "pbs_265_root_termination"
+
+
 def reconcile(c, domain, state, pbs):
     """Resolve intents/jobs first, including after stop; never discard an unknown ID."""
     folder = Path(c["path"]) / "runs" / domain
@@ -208,7 +233,8 @@ def reconcile(c, domain, state, pbs):
                 phase=phase or state["phase"],
             )
             return
-        if retryable(row):
+        reason = retry_reason(row, job)
+        if reason:
             value = progress(c, domain, state["phase"])
             count = (
                 0
@@ -220,8 +246,15 @@ def reconcile(c, domain, state, pbs):
                 no_progress_retries=count,
                 previous_job=job,
                 job=None,
-                # Match the original 4-domain formal-training retry policy.
-                # Lost work before a durable save is not an application failure.
+                last_interruption=dict(
+                    job_id=job["job_id"],
+                    reason=reason,
+                    Exit_status=row["Exit_status"],
+                    comment=row.get("comment"),
+                    policy=RETRY_POLICY,
+                    observed_utc=now(),
+                ),
+                # Confirmed external interruptions can lose unsaved work.
                 # Keep the counter as telemetry, never as a retry veto.
                 status="READY",
             )

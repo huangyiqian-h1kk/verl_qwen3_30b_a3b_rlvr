@@ -64,3 +64,34 @@ Results are written to `runs/deepmath_if70/heldout.json` and `runs/deepmath_cp80
 ```
 
 This writes `deepmath_evaluation/if70_cp80_comparison.json`. Supplementary test scores do not change either teacher's checkpoint selection or any training/early-stopping policy.
+
+## Recover root-terminated PBS265 attempts
+
+The teacher guardian policy `domain-teacher-external-interruption-v2` also retries
+PBS265 when a fresh, identity-checked PBS observation confirms the job has ended
+and its termination comment explicitly names `root@host`. The job must have no
+explicit application failure: `result.json` may be absent or still `RUNNING`
+without an error, and the shell completion marker may be absent or `137`.
+Missing root evidence, other result states, and non-signal completion markers
+remain blocked. Unreadable evidence remains visible as an artifact error.
+The original shared four-domain retry classifier is unchanged.
+
+After updating the checkout, install this controller revision from any login
+host using the existing guardian handoff:
+
+```bash
+"$teacher_python" -I scripts/domain_teachers.py repair-retries --campaign "$teacher_campaign"
+"$teacher_python" -I scripts/inspect_domain_teachers.py --campaign "$teacher_campaign" --logs 4
+```
+
+`repair-retries` transfers the single guardian lock, installs the new controller,
+and starts monitoring. Its first reconciliation rechecks previously blocked
+owned jobs and may submit replacements immediately. Existing live jobs remain
+owned. Repeating the command does not duplicate submissions. A campaign or
+task stop fence prevents recovery. The immutable training snapshots, checkpoints,
+evaluation journals, and training settings are preserved.
+
+Each eligible interruption is recorded in the task state's `last_interruption`,
+including the previous job ID, PBS exit code, reason, comment, and policy version.
+Training resumes from the latest complete checkpoint; evaluation reuses completed
+batches. Confirmed271 and supported walltime recovery continue without a retry cap.
