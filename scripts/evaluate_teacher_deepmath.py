@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate frozen DeepMath held-outs or supplement IF70/CP80 with test only."""
+"""Evaluate frozen DeepMath held-outs or supplement specific teachers with test only."""
 
 import argparse
 import json
@@ -17,10 +17,16 @@ def main():
         "action", choices=("discover", "prepare", "start", "run", "status", "report")
     )
     parser.add_argument("--campaign", type=Path, required=True)
-    parser.add_argument(
+    supplements = parser.add_mutually_exclusive_group()
+    supplements.add_argument(
         "--if70-cp80-test",
         action="store_true",
         help="Use the existing DeepMath test only for IF70 and CP80 (start/status/report)",
+    )
+    supplements.add_argument(
+        "--logic30-test",
+        action="store_true",
+        help="Use the frozen DeepMath test only for Logic30 (start/status/report)",
     )
     parser.add_argument(
         "--input",
@@ -42,8 +48,13 @@ def main():
         help="Questions per split, stratified by frozen DeepMath L8/L9 counts",
     )
     args = parser.parse_args()
-    if args.if70_cp80_test and args.action not in ("start", "status", "report"):
-        parser.error("--if70-cp80-test supports start, status and report only")
+    if (args.if70_cp80_test or args.logic30_test) and args.action not in (
+        "start",
+        "status",
+        "report",
+    ):
+        parser.error("Test-only supplements support start, status and report only")
+    flags = dict(test_only=args.if70_cp80_test, logic30_test=args.logic30_test)
     c = load_campaign(args.campaign)
     if args.action == "discover":
         result = deepmath_data.discover(c)
@@ -75,7 +86,7 @@ def main():
             return
         result = deepmath_evaluation.launch(c["path"])
     elif args.action == "start":
-        result = deepmath_evaluation.launch(c["path"], test_only=args.if70_cp80_test)
+        result = deepmath_evaluation.launch(c["path"], **flags)
     elif args.action == "status":
         state = controller.status(c["path"])
         result = {
@@ -85,11 +96,7 @@ def main():
             k: (state["heartbeat"] or {}).get(k) for k in ("at_utc", "host", "pid")
         }
         result["tasks"] = {}
-        targets = (
-            deepmath_evaluation.TEST_TARGETS
-            if args.if70_cp80_test
-            else deepmath_evaluation.TARGETS
-        )
+        targets = deepmath_evaluation.plan_spec(**flags)[2]
         for task in targets:
             entry = state["states"].get(task, {})
             row = {
@@ -113,7 +120,7 @@ def main():
             row["receipt_exists"] = (run / "heldout.json").is_file()
             result["tasks"][task] = row
     else:
-        result = deepmath_evaluation.report(c["path"], test_only=args.if70_cp80_test)
+        result = deepmath_evaluation.report(c["path"], **flags)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

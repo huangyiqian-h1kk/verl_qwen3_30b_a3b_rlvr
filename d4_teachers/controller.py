@@ -46,6 +46,7 @@ def tasks(c):
     p = plan(c)
     deep = deepmath_plan(c)
     deep_test = deepmath_plan(c, test_only=True)
+    deep_logic = deepmath_plan(c, logic30_test=True)
     follow = followup_plan(c)
     return (
         *TASKS,
@@ -53,6 +54,7 @@ def tasks(c):
         *(deep["targets"] if deep else ()),
         *(follow["targets"] if follow else ()),
         *(deep_test["targets"] if deep_test else ()),
+        *(deep_logic["targets"] if deep_logic else ()),
     )
 
 
@@ -82,11 +84,15 @@ def progress(c, domain, phase):
         )
         return step * 100000 + batches
     if phase == "test":
-        from .deepmath_evaluation import TARGETS as DEEPMATH_TASKS, TEST_TARGETS
+        from .deepmath_evaluation import (
+            TARGETS as DEEPMATH_TASKS,
+            TEST_TARGETS,
+            LOGIC_TEST_TARGETS,
+        )
 
         pattern = (
             "heldout_*/progress.json"
-            if domain in (*DEEPMATH_TASKS, *TEST_TARGETS)
+            if domain in (*DEEPMATH_TASKS, *TEST_TARGETS, *LOGIC_TEST_TARGETS)
             else "test_*/progress.json"
         )
         return sum(
@@ -319,9 +325,9 @@ def tick(c, pbs=None):
             pending = make_job(c, domain, state["phase"])
         except Exception as e:
             state.update(
-                status="STOPPED"
-                if is_fenced(c["path"], domain)
-                else "BLOCKED_ARTIFACT",
+                status=(
+                    "STOPPED" if is_fenced(c["path"], domain) else "BLOCKED_ARTIFACT"
+                ),
                 error=str(e),
             )
             write(state_path(c, domain), state)

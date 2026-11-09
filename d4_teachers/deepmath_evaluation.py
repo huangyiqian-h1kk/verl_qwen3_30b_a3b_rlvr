@@ -1,4 +1,4 @@
-"""Frozen DeepMath comparisons and test-only IF70/CP80 supplements."""
+"""Frozen DeepMath comparisons and independent test-only teacher supplements."""
 
 from itertools import combinations
 from pathlib import Path
@@ -21,28 +21,49 @@ TEST_TARGETS = {
     "deepmath_if70": ("if_step70", 70),
     "deepmath_cp80": ("cp_step80", 80),
 }
+LOGIC_TEST_POLICY = "deepmath-logic30-test-v1"
+LOGIC_TEST_PLAN = "deepmath_logic30_test.json"
+LOGIC_TEST_TARGETS = {"deepmath_logic30": ("logic_algorithmic", 30)}
+
+
+def plan_spec(task=None, *, test_only=False, logic30_test=False):
+    """Keep each published plan immutable when adding a new comparison."""
+    test_only = test_only or task in TEST_TARGETS
+    logic30_test = logic30_test or task in LOGIC_TEST_TARGETS
+    need(not (test_only and logic30_test), "Choose one DeepMath supplement plan")
+    if logic30_test:
+        return LOGIC_TEST_POLICY, LOGIC_TEST_PLAN, LOGIC_TEST_TARGETS, True
+    if test_only:
+        return TEST_POLICY, TEST_PLAN, TEST_TARGETS, True
+    return POLICY, PLAN, TARGETS, False
 
 
 def evaluation_splits(task=None):
-    return ("test",) if task in TEST_TARGETS else deepmath_data.SPLITS
+    return (
+        ("test",)
+        if task in (*TEST_TARGETS, *LOGIC_TEST_TARGETS)
+        else deepmath_data.SPLITS
+    )
 
 
-def plan(c, task=None, *, test_only=False):
-    test_only = test_only or task in TEST_TARGETS
-    path = Path(c["path"]) / (TEST_PLAN if test_only else PLAN)
+def plan(c, task=None, *, test_only=False, logic30_test=False):
+    policy, name, targets, test_only = plan_spec(
+        task, test_only=test_only, logic30_test=logic30_test
+    )
+    path = Path(c["path"]) / name
     if not path.exists():
         return None
     p = read(path)
     need(
         p["identity"] == digest({k: v for k, v in p.items() if k != "identity"})
         and p["campaign_identity"] == c["identity"]
-        and p["policy"] == (TEST_POLICY if test_only else POLICY)
-        and set(p["targets"]) == set(TEST_TARGETS if test_only else TARGETS),
+        and p["policy"] == policy
+        and set(p["targets"]) == set(targets),
         "DeepMath evaluation plan changed",
     )
     if test_only:
         need(p["evaluation_splits"] == ["test"], "Supplement must use test only")
-    for task, (source, step) in (TEST_TARGETS if test_only else TARGETS).items():
+    for task, (source, step) in targets.items():
         need(
             p["targets"][task]["source_task"] == source
             and p["targets"][task]["step"] == step,
@@ -51,12 +72,15 @@ def plan(c, task=None, *, test_only=False):
     return p
 
 
-def inspect_models(c, *, test_only=False):
+def inspect_models(c, *, test_only=False, logic30_test=False):
     from .checkpoint_evaluation import validate_selected
     from .exporting import validate_export
     from .common import model_inventory
 
     root = Path(c["path"])
+    _, _, model_targets, test_only = plan_spec(
+        test_only=test_only, logic30_test=logic30_test
+    )
     need(not is_fenced(root), "Campaign is stopped")
     if not test_only:
         need(
@@ -65,7 +89,7 @@ def inspect_models(c, *, test_only=False):
             "Base HF model changed",
         )
     targets = {}
-    for task, (source, step) in (TEST_TARGETS if test_only else TARGETS).items():
+    for task, (source, step) in model_targets.items():
         need(
             not is_fenced(root, task) and not is_fenced(root, source),
             "DeepMath source/target stopped",
@@ -86,9 +110,11 @@ def inspect_models(c, *, test_only=False):
             need(
                 selected["step"] == step
                 and selected["domain"]
-                == {"if_step70": "if", "cp_step80": "conversational_pivot"}.get(
-                    source, "math"
-                ),
+                == {
+                    "if_step70": "if",
+                    "cp_step80": "conversational_pivot",
+                    "logic_algorithmic": "logic_algorithmic",
+                }.get(source, "math"),
                 "Expected teacher checkpoint unavailable",
             )
             target.update(
@@ -174,10 +200,12 @@ def apply_runtime(c, task, folder):
     return p
 
 
-def install(c, *, test_only=False):
+def install(c, *, test_only=False, logic30_test=False):
     from .checkpoint_evaluation import verifier
 
-    existing = plan(c, test_only=test_only)
+    flags = dict(test_only=test_only, logic30_test=logic30_test)
+    policy, plan_name, _, only_test = plan_spec(**flags)
+    existing = plan(c, **flags)
     if existing:
         need(
             deepmath_data.verify(c)["identity"] == existing["data_identity"]
@@ -187,21 +215,21 @@ def install(c, *, test_only=False):
         return dict(status="ALREADY_REGISTERED", identity=existing["identity"])
     root = Path(c["path"])
     data = deepmath_data.verify(c)
-    targets = inspect_models(c, test_only=test_only)
+    targets = inspect_models(c, **flags)
     need(
         data["verifier_identity"] == verifier(c),
         "DeepMath CPU preflight used another verifier",
     )
     source = Path(__file__).parent
     payload = dict(
-        policy=TEST_POLICY if test_only else POLICY,
+        policy=policy,
         campaign_identity=c["identity"],
         targets=targets,
         data_identity=data["identity"],
         verifier_identity=verifier(c),
         runtime_files=files(source),
     )
-    if test_only:
+    if only_test:
         payload["evaluation_splits"] = ["test"]
     p = dict(payload, identity=digest(payload))
     runtime = runtime_directory(c, p)
@@ -251,18 +279,20 @@ def install(c, *, test_only=False):
             ),
         )
     # A crash before this publication leaves no schedulable new targets.
-    write(root / (TEST_PLAN if test_only else PLAN), p)
+    write(root / plan_name, p)
     return dict(status="REGISTERED", identity=p["identity"], tasks=list(targets))
 
 
-def launch(path, *, test_only=False):
+def launch(path, *, test_only=False, logic30_test=False):
     from .source import load_campaign
     from .retry_repair import repair
     from .checkpoint_evaluation import verifier
 
     c = load_campaign(path)
     data = deepmath_data.verify(c)
-    existing = plan(c, test_only=test_only)
+    flags = dict(test_only=test_only, logic30_test=logic30_test)
+    _, _, _, only_test = plan_spec(**flags)
+    existing = plan(c, **flags)
     if existing:
         need(
             existing["data_identity"] == data["identity"]
@@ -270,22 +300,28 @@ def launch(path, *, test_only=False):
             "DeepMath plan no longer matches",
         )
     else:
-        inspect_models(c, test_only=test_only)
+        inspect_models(c, **flags)
     result = repair(
         path,
-        install_under_lease=None
-        if existing
-        else lambda campaign: install(campaign, test_only=test_only),
+        install_under_lease=(
+            None if existing else lambda campaign: install(campaign, **flags)
+        ),
     )
     return dict(
-        status="DEEPMATH_TEST_SUPPLEMENTS_REGISTERED"
-        if test_only
-        else "DEEPMATH_EVALUATIONS_REGISTERED",
+        status=(
+            "DEEPMATH_TEST_SUPPLEMENTS_REGISTERED"
+            if only_test
+            else "DEEPMATH_EVALUATIONS_REGISTERED"
+        ),
         guardian=result,
         note=(
-            "IF70 and CP80 use the frozen DeepMath test only, with existing HF exports and guardian recovery."
-            if test_only
-            else "Three read-only model evaluations; Math50 waits for its existing verified HF export."
+            "Logic30 uses the frozen DeepMath test only, with its verified HF export and guardian recovery."
+            if logic30_test
+            else (
+                "IF70 and CP80 use the frozen DeepMath test only, with existing HF exports and guardian recovery."
+                if test_only
+                else "Three read-only model evaluations; Math50 waits for its existing verified HF export."
+            )
         ),
     )
 
@@ -385,15 +421,16 @@ def validate_result(c, task):
     return receipt, rows, samples
 
 
-def report(path, *, test_only=False):
+def report(path, *, test_only=False, logic30_test=False):
     from .source import load_campaign
     import numpy as np
 
     c = load_campaign(path)
-    p = plan(c, test_only=test_only)
+    flags = dict(test_only=test_only, logic30_test=logic30_test)
+    _, _, targets, only_test = plan_spec(**flags)
+    p = plan(c, **flags)
     need(p, "DeepMath evaluations not registered")
     outputs, values, rows, protocol = {}, {}, None, None
-    targets = TEST_TARGETS if test_only else TARGETS
     for task in targets:
         run = Path(c["path"]) / "runs" / task
         state = read(run / "state.json")
@@ -421,7 +458,7 @@ def report(path, *, test_only=False):
     comparisons = []
     if rows:
         for first, second in combinations(values, 2):
-            for split in ("test",) if test_only else deepmath_data.SPLITS:
+            for split in ("test",) if only_test else deepmath_data.SPLITS:
                 for level in (None, 8, 9):
                     ids = [
                         r["sample_id"]
@@ -461,7 +498,11 @@ def report(path, *, test_only=False):
     write(
         Path(c["path"])
         / "deepmath_evaluation"
-        / ("if70_cp80_comparison.json" if test_only else "comparison.json"),
+        / (
+            "logic30_comparison.json"
+            if logic30_test
+            else "if70_cp80_comparison.json" if test_only else "comparison.json"
+        ),
         result,
     )
     return result

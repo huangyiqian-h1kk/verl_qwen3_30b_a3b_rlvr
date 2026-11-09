@@ -312,6 +312,7 @@ def make_job(c, domain, role):
                 "deepmath_math50": "m50",
                 "deepmath_if70": "if70",
                 "deepmath_cp80": "cp80",
+                "deepmath_logic30": "la30",
             }[task]
         )
     if follow_target:
