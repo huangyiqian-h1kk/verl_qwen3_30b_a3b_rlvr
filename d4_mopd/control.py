@@ -18,8 +18,9 @@ from d4_teachers.controller import retry_reason
 
 
 def task_root(m, phase, arm):
-    need(phase in ("qualification", "train") and arm in ARMS, "Unknown MOPD task")
-    return Path(m["manifest_path"]).parent / ("qualification" if phase == "qualification" else "runs") / arm
+    folders = {"qualification": "qualification", "train": "runs", "test": "final_tests"}
+    need(phase in folders and arm in ARMS, "Unknown MOPD task")
+    return Path(m["manifest_path"]).parent / folders[phase] / arm
 
 
 def entry_command(m):
@@ -49,9 +50,14 @@ def new_attempt(m, phase, arm):
     run = task_root(m, phase, arm)
     folder = run / "attempts" / uuid.uuid4().hex
     folder.mkdir(parents=True)
+    (run / "agent.yaml").write_text("- name: d4_plain_mopd\n  _target_: d4_mopd.agent_loop.MOPDAgentLoop\n")
     request = dict(manifest=m["manifest_path"], identity=m["identity"], phase=phase, arm=arm,
-                   folder=str(folder), run_dir=str(run), job_name="0390_mp_" + ("q" if phase == "qualification" else "t")
+                   folder=str(folder), run_dir=str(run), job_name="0390_mp_" + {"qualification":"q", "train":"t", "test":"e"}[phase]
                    + ("mix" if arm == "domain_mix" else "only"))
+    if phase == "test":
+        proof = read(task_root(m, "train", arm) / "receipt.json")
+        need(proof["status"] == "PASS" and proof["identity"] == m["identity"], "Training has not completed")
+        request["selection"] = proof["selection"]
     write(folder / "request.json", request)
     # No mutable checkout is placed on PYTHONPATH, including inside Ray workers.
     (folder / "entry.py").write_text("import sys\nsys.path[:0]=" + repr([
@@ -62,8 +68,21 @@ def new_attempt(m, phase, arm):
     return dict(folder=str(folder), job_name=request["job_name"])
 
 
+def register_final_tests(m, state):
+    for s in list(state.values()):
+        if s["phase"] != "train" or s["status"] != "DONE":
+            continue
+        proof = read(task_root(m, "train", s["arm"]) / "receipt.json")
+        need(proof["status"] == "PASS" and proof["identity"] == m["identity"]
+             and proof["selection"]["identity"] == m["identity"]
+             and proof["selection"]["arm"] == s["arm"], "Missing validation selection for final test")
+        state.setdefault("test:" + s["arm"], dict(phase="test", arm=s["arm"], status="READY", job=None, pending=None))
+
+
 def tick(m, state, pbs):
-    for key, s in state.items():
+    # Also repairs a restart between recording train success and registering test.
+    register_final_tests(m, state)
+    for key, s in list(state.items()):
         if s["status"] in ("DONE", "BLOCKED"):
             continue
         run = task_root(m, s["phase"], s["arm"])
@@ -93,6 +112,17 @@ def tick(m, state, pbs):
                 need(result.get("identity") == m["identity"], "Unbound success receipt")
                 if s["phase"] == "qualification":
                     need(result.get("resumed_from") == 4 and result["step"] == 8, "Missing fresh-process resume proof")
+                elif s["phase"] == "train":
+                    need(result["step"] == m["spec"]["updates"] and result["selection"]["identity"] == m["identity"]
+                         and result["selection"]["arm"] == s["arm"], "Missing endpoint/selection")
+                else:
+                    expected = read(Path(job["folder"]) / "request.json")["selection"]
+                    test = read(result["test_receipt"])
+                    need(result["selection"] == expected and result["step"] == expected["step"]
+                         and test["status"] == "PASS" and test["split"] == "test"
+                         and test["identity"] == m["identity"] and test["arm"] == s["arm"]
+                         and test["step"] == expected["step"]
+                         and test["checkpoint_identity"] == expected["checkpoint_identity"], "Unbound final test result")
                 proof = dict(result, pbs_job=job, pbs=row, scope=s["phase"], at_utc=now())
                 write(run / "receipt.json", proof)
                 s["status"] = "DONE"
@@ -117,6 +147,8 @@ def tick(m, state, pbs):
         finally:
             s["observed_utc"] = now()
             write(Path(m["manifest_path"]).parent / "states.json", state)
+    register_final_tests(m, state)
+    write(Path(m["manifest_path"]).parent / "states.json", state)
     return state
 
 

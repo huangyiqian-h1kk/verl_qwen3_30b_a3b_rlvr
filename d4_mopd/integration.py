@@ -13,7 +13,8 @@ from omegaconf import OmegaConf
 
 from . import DOMAINS
 from . import checkpoints
-from .spec import PlannedSampler
+from .spec import PlannedSampler, domain_order
+from .metrics import SELECTION_KEY, select_best
 from d4_teachers.common import digest, need, now, read, write
 from verl.trainer.main_ppo_v0 import BaseTaskRunner
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
@@ -47,8 +48,7 @@ def check_batch(batch, spec, arm, step, expected_ids):
     if arm == "domain_mix":
         need(counts == {d: b//4 for d in DOMAINS}, "Mixed batch changed domain proportions")
     else:
-        cycle, offset = divmod(step-1, 4)
-        target = DOMAINS[(cycle + offset) % 4]
+        target = domain_order(spec)[step-1]
         need(counts == {target: b}, "Domain-only optimizer update mixes domains or changes schedule")
     ids = list(batch.non_tensor_batch["index"])
     need(Counter(ids) == Counter(expected_ids), "DataLoader resumed at the wrong prompt position")
@@ -87,7 +87,12 @@ class MOPDTrainer(RayPPOTrainer):
         self.mopd_started = time.monotonic()
         self.mopd_loaded_step = 0
         sampler = self.train_dataloader.sampler
-        selected = checkpoints.latest(self.config.trainer.default_local_dir, cfg.identity, cfg.arm, sampler.identity)
+        if cfg.test_checkpoint is not None:
+            train_root = Path(cfg.manifest_path).parent / "runs" / cfg.arm / "checkpoints"
+            selection = OmegaConf.to_container(cfg.test_checkpoint, resolve=True)
+            selected = checkpoints.restore_selected(selection, train_root, cfg.identity, cfg.arm, sampler.identity)
+        else:
+            selected = checkpoints.latest(self.config.trainer.default_local_dir, cfg.identity, cfg.arm, sampler.identity)
         if selected is None:
             self.config.trainer.resume_mode = "disable"
         else:
@@ -100,6 +105,9 @@ class MOPDTrainer(RayPPOTrainer):
             np.random.set_state(driver["numpy"])
             torch.set_rng_state(driver["torch"])
             self.mopd_loaded_step = self.global_steps
+        # A scheduler interruption must not introduce extra selection checkpoints.
+        if cfg.test_checkpoint is None and self.global_steps % cfg.effective_spec.validate_every:
+            self.config.trainer.val_before_train = False
         write(Path(cfg.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / "resume.json",
               dict(step=self.global_steps, checkpoint=str(selected) if selected else None,
                    model_optimizer_scheduler_rng_and_loader=bool(selected),
@@ -139,11 +147,37 @@ class MOPDTrainer(RayPPOTrainer):
         return result
 
     def _validate(self):
-        metrics = super()._validate()
         c = self.config.mopd
-        write(Path(c.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / f"validation_{self.global_steps}.json",
-              dict(status="PASS", step=self.global_steps, identity=c.identity, metrics=plain(metrics),
-                   split="validation", test_used_for_selection=False, at_utc=now()))
+        run = Path(c.run_dir)
+        is_test = c.test_checkpoint is not None
+        split = "test" if is_test else "validation"
+        canonical = run / split / f"step_{self.global_steps}.json"
+        reference = None
+        if not c.qualification:
+            if is_test:
+                reference = {k: c.test_checkpoint[k] for k in ("checkpoint", "checkpoint_identity")}
+            else:
+                reference = checkpoints.evaluation_reference(self.config.trainer.default_local_dir,
+                    c.identity, c.arm, self.global_steps, self.train_dataloader.sampler.identity)
+            if canonical.exists():
+                old = read(canonical)
+                need(old["identity"] == c.identity and old["arm"] == c.arm and old["split"] == split
+                     and old["step"] == self.global_steps and old["status"] == "PASS"
+                     and all(old[k] == v for k, v in reference.items()), "Cached evaluation identity mismatch")
+                if not is_test:
+                    select_best(run, c.identity, c.arm)
+                return old["metrics"]
+        metrics = plain(super()._validate())
+        row = dict(status="PASS", step=self.global_steps, identity=c.identity, arm=c.arm, metrics=metrics,
+                   split=split, test_used_for_selection=False, at_utc=now())
+        if reference is not None:
+            need(SELECTION_KEY in metrics, "Full four-domain/two-source evaluation is incomplete")
+            row.update(reference)
+            write(canonical, row)
+            if not is_test:
+                select_best(run, c.identity, c.arm)
+        write(Path(c.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / f"{split}_{self.global_steps}.json",
+              row)
         return metrics
 
 
@@ -188,6 +222,14 @@ class MOPDTaskRunner(BaseTaskRunner):
                       "uncommitted_next_step": trainer.global_steps}
             write(Path(config.mopd.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / "result.json", result)
             return result
+        if config.mopd.test_checkpoint is not None:
+            selection = OmegaConf.to_container(config.mopd.test_checkpoint, resolve=True)
+            receipt = Path(config.mopd.run_dir) / "test" / f"step_{selection['step']}.json"
+            need(read(receipt)["status"] == "PASS", "Final test did not complete")
+            result = dict(status="PASS", identity=config.mopd.identity, step=selection["step"],
+                          selection=selection, test_receipt=str(receipt), split="test")
+            write(Path(config.mopd.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / "result.json", result)
+            return result
         final = checkpoints.latest(config.trainer.default_local_dir, config.mopd.identity, config.mopd.arm, sampler.identity)
         need(final is not None and read(final / "mopd_complete.json")["step"] == config.mopd.effective_spec.updates,
              "fit returned without the final complete checkpoint")
@@ -200,5 +242,9 @@ class MOPDTaskRunner(BaseTaskRunner):
         result = {"status": "PASS", "step": config.mopd.effective_spec.updates,
                   "resumed_from": resumed_from, "checkpoint": str(final),
                   "identity": config.mopd.identity, "qualification": config.mopd.qualification}
+        if not config.mopd.qualification:
+            need((Path(config.mopd.run_dir) / "validation" / f"step_{config.mopd.effective_spec.updates}.json").is_file(),
+                 "Missing fixed-budget endpoint validation")
+            result["selection"] = select_best(config.mopd.run_dir, config.mopd.identity, config.mopd.arm)
         write(Path(config.mopd.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / "result.json", result)
         return result

@@ -16,7 +16,7 @@
 | 项目 | 本次实现 | 来源/性质 |
 |---|---|---|
 | Student 起点 | 原 teacher campaign 的 `contract.base_model` | 同源起点；没有新做一次 SFT |
-| Math teacher | `runs/math_step50/export.json`，step 50 | 用户指定；不是 `math_continued` 的另一份评估记录 |
+| Math teacher | `runs/math_step50/export.json`，step 50 | 用户指定的原训练 checkpoint；资产校验用于防止错载，不要求重新选择 Math50 |
 | IF teacher | `runs/if_step70/export.json`，step 70 | 用户指定；不读取旧的 adopted IF40 指针 |
 | CP teacher | `runs/cp_step80/export.json`，step 80 | 用户指定 |
 | Logic teacher | `runs/logic_algorithmic/export.json`，step 30 | 用户指定 |
@@ -24,17 +24,18 @@
 | 蒸馏目标 | sampled-token PG，teacher−student logprob，detach，clip±5 | 对齐论文 PG 形式 |
 | Loss reduction | `seq-mean-token-mean` | 每条 response 等权，排除 prompt/padding；保留有效 EOS |
 | 每批更新 | `ppo_mini_batch_size=2048`，`ppo_epochs=1` | 一批新 rollout → 一次 optimizer update → 丢弃 rollout |
-| 优化器 | Megatron Adam/AdamW 方式，LR=1e-6，betas=(0.9,0.999)，WD=.01，grad clip=1 | 上游 OPD/优化器默认值与项目工程选择；论文没有单独明确披露全部 MOPD optimizer 数值 |
+| 优化器 | Megatron Adam/AdamW 方式，LR=1e-6，betas=(0.9,0.999)，epsilon=1e-8，WD=.01，grad clip=1 | beta/epsilon 经 `override_optimizer_config` 传入底层构造；这些数值是工程选择，原论文没有完整披露 |
 | LR schedule | constant，warmup=0 | 明确工程默认值 |
-| 域比例 | Math/IF/CP/Logic 各 1/4 | 四域适配；不是论文三域比例的原样复现 |
+| 域比例 | mix 每步四域等量；only 每次 update 独立以各 1/4 概率选域 | only 允许连续选择同一域，不强制四步配平；固定 seed，可恢复 |
 | 域内采样 | 固定数据集内 shuffle，耗尽后再 shuffle | 不重新配平 Math 内 Nemotron/DeepMath，不按 reward 过滤 |
 | Rollout decoding | temperature=1，top_p=1，top_k=-1 | 原始分布采样；单次 assistant response |
 | Context | 沿用项目每条记录的 64K 总预算和冻结 chat template | 项目适配；不是论文 Math/IF 的 32K 配置 |
 | 正式预算 | 200 updates，每 4 步保存，每 20 步 validation | 工程默认值；固定预算，无 adaptive early stop |
 | Validation | 原四域 validation + 冻结 DeepMath validation，greedy n=1 | 沿用 teacher 评估协议；不同于论文数学 avg@32 |
+| 选模与最终 test | Math 两来源各 1/2，再四域各 1/4；取完整 validation 分数最高的单一 checkpoint | 平分取较早步；包含 step0；训练结束自动注册独立 test 作业并持续监护 |
 | 额外训练信号 | 无 task reward、reference KL、entropy bonus、SFT、value loss、PPO ratio clipping、importance correction、动态过滤；显式关闭 MoE auxiliary/z loss | 纯蒸馏 baseline |
 
-默认每个 arm 共 409,600 prompt exposures，每域 102,400。重复采样不代表新增独立样本。`seed=42` 固定数据计划与模型随机种子；不同 batching 下的生成结果不要求相同。
+默认每个 arm 共 409,600 prompt exposures。Mix 每域恰好 102,400；only 每域期望 102,400，实际次数由固定随机域计划决定，CPU preflight 和逐步日志记录实际 exposure。重复采样不代表新增独立样本。域选择 RNG 独立于域内 shuffle 和生成 RNG；`seed=42` 固定计划，恢复继续相同域序。
 
 论文没有披露的工程参数在表中单独标出，不声称逐 bit 复现原论文。改变 B、总步数、保存或验证频率时，使用新的 spec 文件和输出目录；这些计数必须为 4 的倍数。
 
@@ -59,14 +60,20 @@ Student logprob 在训练 forward 上计算。Teacher 只对同一份 student to
 | 维度 | domain-mix | domain-only |
 |---|---|---|
 | 每次 optimizer update | 每域 512 prompts，共 2048 | 单一域 2048 prompts |
-| 每四次 update | 每域 2048 exposures | 每域恰好一次 update，共 2048 exposures |
+| 域预算 | 每步四域各 1/4 | 每次独立均匀选域，有限步数内的域次数有随机波动 |
 | 数据计划 | 使用每域相同的 shuffle stream | 使用同一组 stream |
-| 域顺序 | batch 内打乱 | 每四步轮换首域，四轮构成 Latin rotation |
+| 域顺序 | batch 内打乱 | 专用 seed 产生 IID uniform 随机域序 |
 | 梯度累积 | 累积到完整 mixed batch 后更新一次 | 累积到完整单域 batch 后更新一次 |
 
-逐四步比较两 arm 的 prompt **多重集**，包含重复样本次数。Domain-only 的意思是完整 optimizer update 同域，不能通过把四域 microbatch 累积到一起实现。Native token balancing 只改变完整 batch 内的顺序；运行时仍检查域计数和 sample ID 多重集。
+两 arm 的总 prompt/update 预算相同、各域使用相同 shuffle stream，但 IID only 不保证逐四步或整个实验的各域 exposure 相等。比较时必须同时报告实际域次数。Domain-only 指完整 optimizer update 同域；Native token balancing 只改变完整 batch 内顺序，运行时检查随机计划对应的域及 sample ID 多重集。
 
-建议主比较使用 step=0/20/40/...：这些点刚好完成整组四域预算。中间单域更新后的 seesaw 可另作诊断，不能与另一 arm 暴露不相等的点直接混算。
+正式训练只有一套完整 validation，在 step=0/20/40/.../200 评估。没有每步小 probe。20 步间隔只给出这些观测点，无法重建例如 step21 上升、step22 下降的短期 seesaw；提高时间分辨率需要明确改变同一套评估的频率，不能宣称现有曲线已经测量每次更新的能力变化。
+
+Validation 的 verifier performance 不参与训练采样、teacher 路由、loss 或 optimizer；只记录结果并选择 checkpoint。当前固定 200 updates，不使用 validation early stopping。`trainer.test_freq` 是上游历史命名，训练期间它调用的是 validation，不读取 test set。
+
+选模分数为 `Math=(Nemotron+DeepMath)/2`，`score=(Math+IF+CP+Logic)/4`。DeepMath 内按固定 L8/L9 样本集合求均值。`runs/<arm>/validation/step_<n>.json` 将完整评估绑定至模型保存记录；`best_validation.json` 指向最高分 checkpoint，分数相同取较早步。中断恢复复用已完成收据，不因重启多次重评并挑高分；非计划评估步不额外选模。
+
+训练完成后，guardian 自动注册 `test:<arm>`，从冻结的 validation 选择加载权重（若 step0 最好则加载 base），通过原生 `val_only` 在 test 数据上评估，绝不调用 actor update。结果在 `final_tests/<arm>/receipt.json`。该作业也处理 271、带管理员终止证据的 265 与 qstat unknown；应用错误阻塞，不用重试掩盖。中断发生在完整 test 收据写出前时重做该次 test；已完成整套收据可复用，尚不缓存未完成的 test 批次。固定预算终点的 validation 另行保留，不从 test 分数反向选择模型。
 
 ## 5. 资源与环境
 
@@ -90,7 +97,7 @@ Teacher 推理 `max_model_len` 为 padding 上界与 prompt-logprob API 预留�
 | ABCI CPU preflight | 实际 base/teacher 导出身份、数据分割、prompt token hash、tokenizer、冻结 verifier、依赖与配置 | 必须在 ABCI 执行，尚未执行 |
 | ABCI GPU qualification | 真实四 teacher scoring、Megatron forward/backward/update、原生完整 checkpoint；step4 正常退出，再由新 PBS 进程恢复到 step8 | 必须分别完成两个 arm，尚未执行 |
 
-Qualification 使用 **B=8、8 updates、response 上限256**，从每域最长的两个训练 prompts 取测试样本；validation 每域一个样本。路径位于 `qualification/`，不改变正式配方。它验证基本执行与恢复，**不证明 B2048/64K 的最坏长度吞吐和显存容量**。正式运行出现 OOM 会停在 BLOCKED，不会改 batch 或截断长度来伪装通过。
+Qualification 使用 **B=8、8 updates、response 上限256**，从每域最长的两个训练 prompts 取测试样本；调试评估每域一个样本。这些数值是本项目适配层新增的 smoke/reload 调试设置，来自工程实现，不来自原始 MOPD 论文，也不属于正式训练超参数。路径位于 `qualification/`，不参与正式选模。它验证基本执行与恢复，**不证明 B2048/64K 的最坏长度吞吐和显存容量**。正式运行出现 OOM 会停在 BLOCKED，不会改 batch 或截断长度来伪装通过。
 
 CPU 中的 AdamW 小模型恢复测试检查保存状态后下一次更新完全一致；它不替代上述真实 MoE 重启测试。分布式 loss 的 CPU 测试模拟 DP 梯度平均，实际 NCCL/DP 通信留给 GPU qualification。
 

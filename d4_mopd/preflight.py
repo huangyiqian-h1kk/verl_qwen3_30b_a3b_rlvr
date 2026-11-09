@@ -73,9 +73,15 @@ def cpu(manifest_path):
             train = rows
     plans = {arm: plan_indices(train, m["spec"], arm) for arm in ARMS}
     b = m["spec"]["train_batch_size"]
-    for start in range(0, len(plans[ARMS[0]]), 4*b):
-        need(sorted(plans[ARMS[0]][start:start+4*b]) == sorted(plans[ARMS[1]][start:start+4*b]),
-             "Two arms consumed different four-update prompt sets")
+    from collections import Counter
+    exposure = {}
+    for arm, indices in plans.items():
+        need(len(indices) == m["spec"]["updates"] * b, "Incorrect prompt budget")
+        exposure[arm] = dict(Counter(train[i]["domain"] for i in indices))
+        for start in range(0, len(indices), b):
+            counts = Counter(train[i]["domain"] for i in indices[start:start+b])
+            need((len(counts) == 1 if arm == "domain_only" else counts == {d:b//4 for d in DOMAINS}),
+                 "Incorrect optimizer batch domain composition")
     configs = {}
     for arm in ARMS:
         for qual in (False, True):
@@ -90,7 +96,9 @@ def cpu(manifest_path):
     need(p.returncode == 0, "Original verifier environment failed to import: " + p.stderr[-3000:])
     proof = dict(status="PASS", identity=m["identity"], scope="cpu-assets-config-tokenization",
                  versions=versions, configs=configs, tokenizer_fingerprint=fingerprint,
-                 prompt_sets_matched=True, gpu_execution_tested=False, at_utc=now())
+                 prompt_budget_matched=True, domain_exposure=exposure,
+                 domain_only_schedule="iid_uniform; exposure equal only in expectation",
+                 gpu_execution_tested=False, at_utc=now())
     weight_bytes = sum(v["bytes"] for k, v in m["student"]["files"].items()
                        if k.endswith((".safetensors", ".bin")))
     saves_per_arm = (m["spec"]["updates"] + m["spec"]["save_every"]-1) // m["spec"]["save_every"]

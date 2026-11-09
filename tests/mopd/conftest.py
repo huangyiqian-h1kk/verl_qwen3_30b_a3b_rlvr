@@ -27,6 +27,7 @@ def rows():
 @pytest.fixture
 def manifest(spec, tmp_path):
     return dict(spec=spec, verl_src=str(VERL), max_prompt_tokens=4096,
+                python=sys.executable,
                 data={s: [str(tmp_path / (s+".parquet"))] for s in ("train", "validation", "test")},
                 student={"path": str(tmp_path / "base")},
                 teachers={d: {"path": str(tmp_path / d)} for d in DOMAINS},

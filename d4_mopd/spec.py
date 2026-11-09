@@ -1,4 +1,4 @@
-"""Immutable experiment recipe and equal-budget schedule; no GPU imports."""
+"""Immutable recipe and reproducible domain sampling; no GPU imports."""
 
 from pathlib import Path
 from . import ARMS, DOMAINS
@@ -13,6 +13,8 @@ def load_spec(path=None):
 def validate_spec(s):
     need(s["schema"] == "d4-plain-mopd-v1", "Unknown MOPD recipe")
     need(s["rollout_n"] == 1, "This baseline requires rollout_n=1")
+    need(s["domain_only_schedule"] == "iid_uniform", "Domain-only requires independent uniform draws")
+    need(s["selection_score"] == "four_domain_macro_math_source_equal", "Unexpected selection score")
     for key in ("train_batch_size", "updates", "save_every", "validate_every"):
         need(isinstance(s[key], int) and s[key] > 0 and s[key] % 4 == 0,
              key + " must be a positive multiple of four")
@@ -20,6 +22,10 @@ def validate_spec(s):
     need(s["pg_signal_clip"] == 5.0, "Paper PG signal clipping must be +/-5")
     need(s["max_context_tokens"] == 65536, "Frozen project prompt budgets require 64K")
     need(s["learning_rate"] > 0 and s["weight_decay"] >= 0, "Invalid optimizer")
+    need(s["adam_epsilon"] > 0 and len(s["adam_betas"]) == 2
+         and all(0 <= b < 1 for b in s["adam_betas"]), "Invalid Adam parameters")
+    need(s["validate_every"] % s["save_every"] == 0,
+         "Every scheduled validation must have a complete checkpoint")
     need(s["student_nodes"] == s["teacher_nodes"] == 1 and s["gpus_per_node"] == 8,
          "Qualified topology is one 8-GPU student node plus one 8-GPU teacher node")
     need((s["actor_tp"], s["actor_pp"], s["actor_ep"], s["rollout_tp"], s["teacher_tp"])
@@ -29,38 +35,50 @@ def validate_spec(s):
     return s
 
 
-def plan_indices(rows, spec, arm):
-    """Same per-domain shuffled streams and multiset in every four-update cycle.
+def domain_order(spec):
+    """One independent uniform draw per update, separate from all other RNGs."""
+    import random
+    rng = random.Random(int(digest([spec["seed"], "domain_only_iid_uniform_v1"])[:16], 16))
+    return [rng.choice(DOMAINS) for _ in range(spec["updates"])]
 
-    Domain-only rotates domain order each cycle (a four-cycle Latin rotation).
-    It is homogeneous at optimizer-update granularity, not just microbatch granularity.
+
+def plan_indices(rows, spec, arm):
+    """Both arms use the same shuffled stream within each domain.
+
+    Mix consumes equal quotas each update; only chooses a domain independently.
+    Only has equal domain exposure in expectation, not in every four-update block.
     """
+    from collections import Counter
     import random
     need(arm in ARMS, "Unknown batching arm")
     groups = {d: [i for i, r in enumerate(rows) if r["domain"] == d] for d in DOMAINS}
     need(all(groups.values()), "Every domain must contain training prompts")
     need(sum(map(len, groups.values())) == len(rows), "Unknown training domain")
+    order = domain_order(spec)
+    counts = Counter(order)
+    b = spec["train_batch_size"]
     streams = {}
     for d, indices in groups.items():
         rng = random.Random(int(digest([spec["seed"], d])[:16], 16))
         stream = []
-        while len(stream) < spec["updates"] // 4 * spec["train_batch_size"]:
+        required = spec["updates"] * b // 4 if arm == "domain_mix" else counts[d] * b
+        while len(stream) < required:
             block = indices.copy()
             rng.shuffle(block)
             stream.extend(block)
         streams[d] = stream
-    b, output = spec["train_batch_size"], []
-    for cycle in range(spec["updates"] // 4):
-        chunk = {d: streams[d][cycle*b:(cycle+1)*b] for d in DOMAINS}
+    output, cursor = [], dict.fromkeys(DOMAINS, 0)
+    for step in range(spec["updates"]):
         if arm == "domain_mix":
-            for j in range(4):
-                batch = [idx for d in DOMAINS for idx in chunk[d][j*b//4:(j+1)*b//4]]
-                random.Random(spec["seed"] + cycle*4 + j).shuffle(batch)
-                output.extend(batch)
+            batch = [idx for d in DOMAINS for idx in streams[d][cursor[d]:cursor[d]+b//4]]
+            random.Random(spec["seed"] + step).shuffle(batch)
+            output.extend(batch)
+            for d in DOMAINS:
+                cursor[d] += b//4
         else:
-            order = DOMAINS[cycle % 4:] + DOMAINS[:cycle % 4]
-            for d in order:
-                output.extend(chunk[d])
+            d = order[step]
+            output.extend(streams[d][cursor[d]:cursor[d]+b])
+            cursor[d] += b
     return output
 
 

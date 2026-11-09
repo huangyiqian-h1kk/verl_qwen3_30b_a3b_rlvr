@@ -58,7 +58,9 @@ def execute(request_path):
                     dest = folder / "incomplete_checkpoints" / p.name
                     dest.parent.mkdir(exist_ok=True)
                     p.rename(dest)
-            cfg = compose(m, r["arm"], r["run_dir"], qualification=r["phase"] == "qualification")
+            cfg = compose(m, r["arm"], r["run_dir"], qualification=r["phase"] == "qualification",
+                          test_checkpoint=r.get("selection") if r["phase"] == "test" else None)
+            need((r["phase"] == "test") == (cfg.mopd.test_checkpoint is not None), "Test selection missing")
             cfg.trainer.validation_data_dir = str(folder / "validation_generations")
             validate_native_config(cfg)
             OmegaConf.save(cfg, folder / "resolved.yaml")
@@ -87,7 +89,7 @@ def main():
         q = sub.add_parser(name)
         q.add_argument("--manifest", required=True)
         if name == "start":
-            q.add_argument("--phase", choices=("qualification", "train"), required=True)
+            q.add_argument("--phase", choices=("qualification", "train", "test"), required=True)
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
     for name in ("execute", "gpu-node", "paths"):
         q = sub.add_parser(name)
@@ -130,7 +132,7 @@ def main():
             m = verify(path)
             (root / "STOP").unlink(missing_ok=True)
             states = read(root / "states.json")
-            for phase in ("qualification", "train"):
+            for phase in ("qualification", "train", "test"):
                 arms = [s["arm"] for s in states.values() if s["phase"] == phase]
                 if arms:
                     control.start(path, phase, arms)

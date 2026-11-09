@@ -1,4 +1,4 @@
-"""Validation-only scoring in the original verifier environment, never an RL loss."""
+"""Evaluation-only scoring in the original verifier environment, never an RL loss."""
 import asyncio
 import json
 from pathlib import Path

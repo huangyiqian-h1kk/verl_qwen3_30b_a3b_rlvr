@@ -53,3 +53,33 @@ def latest(root, identity, arm, sampler_identity=None):
     validate_native(folder, proof["step"])
     need(inventory(folder) == proof["contents"], "Committed checkpoint changed; refusing silent rollback")
     return folder
+
+
+def evaluation_reference(root, identity, arm, step, sampler_identity):
+    """Bind a validation to the saved model state, or the unchanged base at step 0."""
+    if step == 0:
+        return dict(checkpoint=None, checkpoint_identity=digest([identity, "base"]))
+    folder = Path(root).resolve() / f"global_step_{step}"
+    proof = read(folder / "mopd_complete.json")
+    need(proof["identity"] == identity and proof["arm"] == arm and proof["step"] == step
+         and proof["sampler_identity"] == sampler_identity, "Evaluation checkpoint identity mismatch")
+    validate_native(folder, step)
+    need(inventory(folder) == proof["contents"], "Evaluation checkpoint changed")
+    return dict(checkpoint=str(folder), checkpoint_identity=digest(proof))
+
+
+def restore_selected(selection, root, identity, arm, sampler_identity):
+    """An evaluation job loads its frozen selection, never the latest train step."""
+    need(selection["identity"] == identity and selection["arm"] == arm
+         and selection["split"] == "validation" and not selection["test_used_for_selection"],
+         "Test selection is not bound to validation")
+    row = read(selection["validation_receipt"])
+    need(digest(row) == selection["validation_sha256"], "Selected validation receipt changed")
+    need(row["identity"] == identity and row["arm"] == arm and row["step"] == selection["step"]
+         and row["split"] == "validation" and row["status"] == "PASS"
+         and row["metrics"][selection["selection_key"]] == selection["score"],
+         "Selected score/step does not match validation")
+    ref = evaluation_reference(root, identity, arm, selection["step"], sampler_identity)
+    need(all(selection[k] == v and row[k] == v for k, v in ref.items()),
+         "Selected checkpoint does not match validation")
+    return Path(ref["checkpoint"]) if ref["checkpoint"] else None

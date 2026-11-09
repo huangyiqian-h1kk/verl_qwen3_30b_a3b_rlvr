@@ -3,7 +3,7 @@ from pathlib import Path
 from . import DOMAINS
 
 
-def compose(manifest, arm, run_dir, *, qualification=False):
+def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None):
     from hydra import compose as hydra_compose, initialize_config_dir
     from omegaconf import OmegaConf
     s = dict(manifest["spec"])
@@ -28,6 +28,7 @@ def compose(manifest, arm, run_dir, *, qualification=False):
         "trainer.save_freq": s["save_every"],
         "trainer.test_freq": s["validate_every"],
         "trainer.val_before_train": True,
+        "trainer.val_only": test_checkpoint is not None,
         "trainer.balance_batch": True,
         "trainer.default_local_dir": str(root / "checkpoints"),
         "trainer.validation_data_dir": str(root / "validation_generations"),
@@ -35,7 +36,7 @@ def compose(manifest, arm, run_dir, *, qualification=False):
         "trainer.max_actor_ckpt_to_keep": None,
         "trainer.del_local_ckpt_after_load": False,
         "data.train_files": manifest["data"]["train"],
-        "data.val_files": manifest["data"]["validation"],
+        "data.val_files": manifest["data"]["test" if test_checkpoint is not None else "validation"],
         "data.train_batch_size": s["train_batch_size"],
         "data.val_batch_size": 8,
         "data.max_prompt_length": prompt,
@@ -63,6 +64,9 @@ def compose(manifest, arm, run_dir, *, qualification=False):
         "actor_rollout_ref.actor.optim.lr": s["learning_rate"],
         "actor_rollout_ref.actor.optim.weight_decay": s["weight_decay"],
         "actor_rollout_ref.actor.optim.betas": s["adam_betas"],
+        "actor_rollout_ref.actor.optim.override_optimizer_config.adam_beta1": s["adam_betas"][0],
+        "actor_rollout_ref.actor.optim.override_optimizer_config.adam_beta2": s["adam_betas"][1],
+        "actor_rollout_ref.actor.optim.override_optimizer_config.adam_eps": s["adam_epsilon"],
         "actor_rollout_ref.actor.optim.clip_grad": s["grad_clip"],
         "actor_rollout_ref.actor.optim.optimizer": "adam",
         "actor_rollout_ref.actor.optim.lr_decay_style": "constant",
@@ -145,6 +149,7 @@ def compose(manifest, arm, run_dir, *, qualification=False):
         c.distillation.teacher_models[d] = t
     c.mopd = {"manifest_path": manifest["manifest_path"], "identity": manifest["identity"],
               "arm": arm, "run_dir": str(root), "qualification": qualification,
+              "test_checkpoint": test_checkpoint,
               "effective_spec": s}
     OmegaConf.resolve(c)
     return c

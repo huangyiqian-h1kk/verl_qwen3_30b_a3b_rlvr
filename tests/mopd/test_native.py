@@ -28,11 +28,63 @@ def test_real_hydra_and_native_dataclasses(manifest, tmp_path, arm, qualificatio
     assert not c.algorithm.filter_groups.enable
     assert c.algorithm.rollout_correction.rollout_is is None
     assert not c.actor_rollout_ref.actor.use_kl_loss
+    overrides = c.actor_rollout_ref.actor.optim.override_optimizer_config
+    assert (overrides.adam_beta1, overrides.adam_beta2, overrides.adam_eps) == (.9, .999, 1e-8)
     assert c.actor_rollout_ref.actor.entropy_coeff == 0
     assert c.actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff == 0
     assert c.actor_rollout_ref.actor.megatron.override_transformer_config.moe_z_loss_coeff is None
     from verl.utils.config import omega_conf_to_dataclass
     assert set(omega_conf_to_dataclass(c.distillation).teacher_models) == set(DOMAINS)
+
+
+def test_test_config_uses_frozen_test_rows_and_native_val_only(manifest, tmp_path):
+    selected = {"step":20,"checkpoint":"/synthetic/global_step_20"}
+    c = compose(manifest, "domain_mix", tmp_path / "test", test_checkpoint=selected)
+    validate_native_config(c)
+    assert c.trainer.val_only and c.trainer.val_before_train
+    assert list(c.data.val_files) == manifest["data"]["test"]
+    assert c.mopd.test_checkpoint.step == 20
+
+
+def test_native_megatron_constructor_receives_explicit_adam_parameters(manifest, tmp_path):
+    # Execute the pinned upstream argument-builder, intercepting OptimizerConfig.
+    # This audits kwargs without pretending to instantiate a GPU/MCore optimizer.
+    import ast
+    from pathlib import Path
+    path = Path(manifest["verl_src"]) / "verl/utils/megatron/optimizer.py"
+    source = ast.parse(path.read_text())
+    func = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == "init_megatron_optim_config")
+    namespace = dict(torch=torch, OptimizerConfig=SimpleNamespace, _MUON_ALGORITHMS=set(), print_rank_0=lambda _: None)
+    exec(compile(ast.Module(body=[func], type_ignores=[]), str(path), "exec"), namespace)
+    changed = dict(manifest, spec=dict(manifest["spec"], adam_betas=[.81,.97], adam_epsilon=2e-8))
+    c = compose(changed, "domain_mix", tmp_path)
+    actual = namespace["init_megatron_optim_config"](c.actor_rollout_ref.actor.optim)
+    assert (actual.adam_beta1, actual.adam_beta2, actual.adam_eps) == (.81,.97,2e-8)
+    assert actual.lr == changed["spec"]["learning_rate"]
+
+
+def test_native_val_only_fit_never_iterates_training_or_updates(manifest, tmp_path, monkeypatch):
+    from verl.trainer.ppo.ray_trainer import RayPPOTrainer, SkipManager
+    from verl.utils import tracking
+    monkeypatch.setattr(tracking, "Tracking", lambda **kwargs: SimpleNamespace(log=lambda **kwargs: None))
+    monkeypatch.setattr(SkipManager, "init", lambda *args: None)
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.config = compose(manifest, "domain_mix", tmp_path, test_checkpoint={"step":20})
+    trainer._dump_executor = SimpleNamespace(_shutdown=False)
+    events = []
+    def load():
+        trainer.global_steps = 20
+        events.append("load20")
+    trainer._load_checkpoint = load
+    trainer.checkpoint_manager = SimpleNamespace(update_weights=lambda step: events.append(("sync",step)))
+    class Loader:
+        def __len__(self): return 200
+        def __iter__(self): raise AssertionError("test must not train")
+    trainer.train_dataloader = Loader()
+    trainer._validate = lambda: {"test_score":.5}
+    trainer._shutdown_dump_executor = lambda: events.append("done")
+    trainer.fit()
+    assert events == ["load20", ("sync",20), "done"]
 
 
 def pg_config():

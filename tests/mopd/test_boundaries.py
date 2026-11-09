@@ -13,7 +13,7 @@ from tensordict import TensorDict
 from d4_mopd import DOMAINS
 from d4_mopd.config import compose
 from d4_mopd.integration import check_batch
-from d4_mopd.metrics import source_metrics
+from d4_mopd.metrics import source_metrics, SELECTION_KEY
 from d4_teachers.common import write
 from verl import DataProto
 from verl.trainer.ppo.utils import create_rl_dataset
@@ -103,6 +103,20 @@ def test_math_validation_family_mean_is_not_row_weighted():
     extra["mopd_sample_id"][-1] = "a"
     with pytest.raises(RuntimeError, match="duplicate"):
         source_metrics(extra)
+
+
+def test_selection_score_has_four_domains_and_equal_math_sources():
+    extra = dict(reward=[0.,1.,1.,1.,.25,.25,.75,.5],
+                 mopd_source=["nemotron","deepmath_l8","deepmath_l8","deepmath_l9","if","if","cp","logic"],
+                 mopd_domain=["math"]*4+["if","if","conversational_pivot","logic_algorithmic"],
+                 mopd_sample_id=list("abcdefgh"))
+    metrics = source_metrics(extra)
+    assert metrics[SELECTION_KEY] == .5
+    assert metrics["val-selection/math"] == .5
+    assert metrics[SELECTION_KEY] != sum(extra["reward"]) / len(extra["reward"])
+    for key in extra:
+        extra[key].pop()
+    assert SELECTION_KEY not in source_metrics(extra)
 
 
 def test_formal_start_requires_arm_specific_gpu_resume_proof(manifest, tmp_path, monkeypatch):
