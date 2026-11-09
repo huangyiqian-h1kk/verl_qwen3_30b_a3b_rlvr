@@ -105,6 +105,47 @@ def test_math_validation_family_mean_is_not_row_weighted():
         source_metrics(extra)
 
 
+def validation_candidates():
+    groups = [("math", "math", 238), ("math", "deepmath_l8", 213), ("math", "deepmath_l9", 43)]
+    groups += [(d, d, 256) for d in DOMAINS if d != "math"]
+    return [dict(domain=d, source=s, sample_id=f"{s}:{i}", mopd_split="validation")
+            for d, s, count in groups for i in range(count)]
+
+
+def test_validation_subset_matches_mix_rl_scale_and_preserves_sources(spec, tmp_path):
+    from collections import Counter
+    from d4_mopd.assets import select_validation
+    candidates = validation_candidates()
+    path = tmp_path / "validation.parquet"
+    pq.write_table(pa.Table.from_pylist(candidates), path)
+    selected = select_validation(pq.read_table(path).to_pylist(), spec)
+    assert len(candidates) == 1262 and len(selected) == 1024
+    assert Counter(r["domain"] for r in selected) == {d: 256 for d in DOMAINS}
+    math = [r for r in selected if r["domain"] == "math"]
+    assert Counter(r["source"] for r in math) == {"math": 128, "deepmath_l8": 107, "deepmath_l9": 21}
+    assert {r["sample_id"] for r in selected} <= {r["sample_id"] for r in candidates}
+    # Keep every existing IF/CP/Logic item and its order; no new train/test samples.
+    assert [r for r in selected if r["domain"] != "math"] == [r for r in candidates if r["domain"] != "math"]
+    assert pq.read_table(path).to_pylist() == candidates
+    assert selected == select_validation(candidates, spec)
+    assert {r["sample_id"] for r in selected} == {r["sample_id"] for r in select_validation(candidates[::-1], spec)}
+    assert math != [r for r in select_validation(candidates, dict(spec, seed=43)) if r["domain"] == "math"]
+
+
+@pytest.mark.parametrize("corruption", ["test", "duplicate", "insufficient_nemotron"])
+def test_validation_selection_rejects_split_leakage_duplicate_and_shortfall(spec, corruption):
+    from d4_mopd.assets import select_validation
+    rows = validation_candidates()
+    if corruption == "test":
+        rows[0]["mopd_split"] = "test"
+    elif corruption == "duplicate":
+        rows.append(dict(rows[0]))
+    else:
+        rows = rows[111:]  # Leave only 127 Nemotron validation candidates.
+    with pytest.raises(RuntimeError, match="validation"):
+        select_validation(rows, spec)
+
+
 def test_selection_score_has_four_domains_and_equal_math_sources():
     extra = dict(reward=[0.,1.,1.,1.,.25,.25,.75,.5],
                  mopd_source=["nemotron","deepmath_l8","deepmath_l8","deepmath_l9","if","if","cp","logic"],

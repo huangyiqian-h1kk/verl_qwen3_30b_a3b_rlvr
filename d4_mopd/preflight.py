@@ -71,6 +71,15 @@ def cpu(manifest_path):
                  "Frozen prompt tokenization changed: " + row["sample_id"])
         if split == "train":
             train = rows
+        elif split == "validation":
+            from collections import Counter
+            counts = Counter(r["domain"] for r in rows)
+            need(counts == {d: m["spec"]["validation_per_domain"] for d in DOMAINS},
+                 "Validation domain sizes differ from the frozen recipe")
+            math_sources = Counter("deepmath" if r["source"].startswith("deepmath_") else "nemotron"
+                                   for r in rows if r["domain"] == "math")
+            need(math_sources == {s: m["spec"]["validation_per_domain"] // 2 for s in ("nemotron", "deepmath")},
+                 "Math validation must contain equal Nemotron and DeepMath counts")
     plans = {arm: plan_indices(train, m["spec"], arm) for arm in ARMS}
     b = m["spec"]["train_batch_size"]
     from collections import Counter
@@ -97,6 +106,7 @@ def cpu(manifest_path):
     proof = dict(status="PASS", identity=m["identity"], scope="cpu-assets-config-tokenization",
                  versions=versions, configs=configs, tokenizer_fingerprint=fingerprint,
                  prompt_budget_matched=True, domain_exposure=exposure,
+                 validation=m["data_summary"]["validation"],
                  domain_only_schedule="iid_uniform; exposure equal only in expectation",
                  gpu_execution_tested=False, at_utc=now())
     weight_bytes = sum(v["bytes"] for k, v in m["student"]["files"].items()

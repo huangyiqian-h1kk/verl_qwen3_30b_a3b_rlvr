@@ -23,6 +23,8 @@ def test_real_hydra_and_native_dataclasses(manifest, tmp_path, arm, qualificatio
     assert c.actor_rollout_ref.rollout.n == 1
     assert c.data.train_batch_size == c.actor_rollout_ref.actor.ppo_mini_batch_size
     assert c.actor_rollout_ref.actor.ppo_epochs == 1
+    assert c.trainer.test_freq == (4 if qualification else 10)
+    assert c.trainer.save_freq == (4 if qualification else 5)
     assert c.distillation.distillation_loss.log_prob_min_clamp is None
     assert not c.distillation.distillation_loss.use_task_rewards
     assert not c.algorithm.filter_groups.enable

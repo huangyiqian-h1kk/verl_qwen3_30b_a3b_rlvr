@@ -30,14 +30,14 @@
 | 域内采样 | 固定数据集内 shuffle，耗尽后再 shuffle | 不重新配平 Math 内 Nemotron/DeepMath，不按 reward 过滤 |
 | Rollout decoding | temperature=1，top_p=1，top_k=-1 | 原始分布采样；单次 assistant response |
 | Context | 沿用项目每条记录的 64K 总预算和冻结 chat template | 项目适配；不是论文 Math/IF 的 32K 配置 |
-| 正式预算 | 200 updates，每 4 步保存，每 20 步 validation | 工程默认值；固定预算，无 adaptive early stop |
-| Validation | 原四域 validation + 冻结 DeepMath validation，greedy n=1 | 沿用 teacher 评估协议；不同于论文数学 avg@32 |
+| 正式预算 | 200 updates，每 5 步保存，每 10 步 validation | 用户指定验证间隔；固定预算，无 adaptive early stop |
+| Validation | 固定 1,024 题：Math 256（Nemotron 128 + DeepMath 128），IF/CP/Logic 各 256；greedy n=1 | 接近原 Mix RL 的规模；不同于论文数学 avg@32 |
 | 选模与最终 test | Math 两来源各 1/2，再四域各 1/4；取完整 validation 分数最高的单一 checkpoint | 平分取较早步；包含 step0；训练结束自动注册独立 test 作业并持续监护 |
 | 额外训练信号 | 无 task reward、reference KL、entropy bonus、SFT、value loss、PPO ratio clipping、importance correction、动态过滤；显式关闭 MoE auxiliary/z loss | 纯蒸馏 baseline |
 
 默认每个 arm 共 409,600 prompt exposures。Mix 每域恰好 102,400；only 每域期望 102,400，实际次数由固定随机域计划决定，CPU preflight 和逐步日志记录实际 exposure。重复采样不代表新增独立样本。域选择 RNG 独立于域内 shuffle 和生成 RNG；`seed=42` 固定计划，恢复继续相同域序。
 
-论文没有披露的工程参数在表中单独标出，不声称逐 bit 复现原论文。改变 B、总步数、保存或验证频率时，使用新的 spec 文件和输出目录；这些计数必须为 4 的倍数。
+论文没有披露的工程参数在表中单独标出，不声称逐 bit 复现原论文。改变 B、总步数、保存或验证频率时，使用新的 spec 文件和输出目录。B 必须能被四域均分；总步数和频率必须为正整数，验证间隔必须为保存间隔的整数倍，以便每个选模候选都有完整 checkpoint。
 
 ## 3. Loss 与更新语义
 
@@ -67,7 +67,9 @@ Student logprob 在训练 forward 上计算。Teacher 只对同一份 student to
 
 两 arm 的总 prompt/update 预算相同、各域使用相同 shuffle stream，但 IID only 不保证逐四步或整个实验的各域 exposure 相等。比较时必须同时报告实际域次数。Domain-only 指完整 optimizer update 同域；Native token balancing 只改变完整 batch 内顺序，运行时检查随机计划对应的域及 sample ID 多重集。
 
-正式训练只有一套完整 validation，在 step=0/20/40/.../200 评估。没有每步小 probe。20 步间隔只给出这些观测点，无法重建例如 step21 上升、step22 下降的短期 seesaw；提高时间分辨率需要明确改变同一套评估的频率，不能宣称现有曲线已经测量每次更新的能力变化。
+正式训练只有一套完整 validation，在 step=0/10/20/.../200 评估，共 21 个计划观测点；step 指 optimizer update。两个 arm 使用同一固定集合，没有每步小 probe。
+
+原 Mix RL 的 validation 是 1,006 题（Nemotron Math 238，其余三域各 256）；上一版 MOPD 直接追加 DeepMath 256 后为 1,262 题。当前从这些既有 validation 数据中固定抽取 Math 两来源各 128 题，其余三域全部保留，总计 1,024 题。DeepMath 依照候选集 L8:L9=213:43 的比例，用最大余数法分配为 L8 107 题、L9 21 题。抽样只依赖 seed=42、来源和 sample ID，prepare 时冻结，不随训练重新抽样，不使用 test 或训练数据。Manifest 保留候选及选中 ID 摘要、来源计数和 Parquet 哈希；CPU preflight 验证四域题数及 Math 的 1:1 比例。已有 manifest 不会被此配置原地改写，下面命令使用新的输出目录。
 
 Validation 的 verifier performance 不参与训练采样、teacher 路由、loss 或 optimizer；只记录结果并选择 checkpoint。当前固定 200 updates，不使用 validation early stopping。`trainer.test_freq` 是上游历史命名，训练期间它调用的是 validation，不读取 test set。
 
@@ -85,7 +87,7 @@ Validation 的 verifier performance 不参与训练采样、teacher 路由、los
 
 该 pinned verl 的 `uv.lock` 使用 **PyTorch 2.13 / CUDA 13 / vLLM 0.32**。不能直接在原 teacher 的 CUDA 12.8 环境里 `pip install -U`。Bootstrap 创建单独环境；GPU preflight 检查扩展导入、BF16 运算和显存。ABCI driver 与该 CUDA 13 栈是否兼容仍需实机验证，检查不通过时不提交正式训练。
 
-默认保留全部完整 checkpoint：两个正式 arm 共 100 份，另有 4 份 qualification checkpoint。CPU preflight 输出可用文件系统空间及按 BF16 权重×7 估算的总 checkpoint 体积；30B 全参数 Adam 状态会占用数十 TB。估算不包含中断留下的半成品，也不能验证项目 quota，需结合 ABCI quota 核对。当前实现不会自动删除历史完整 checkpoint。
+默认保留全部完整 checkpoint：两个正式 arm 共 80 份，另有 4 份 qualification checkpoint。CPU preflight 输出可用文件系统空间及按 BF16 权重×7 估算的总 checkpoint 体积；30B 全参数 Adam 状态会占用数十 TB。估算不包含中断留下的半成品，也不能验证项目 quota，需结合 ABCI quota 核对。当前实现不会自动删除历史完整 checkpoint。
 
 Teacher 推理 `max_model_len` 为 padding 上界与 prompt-logprob API 预留一个 token；实际每条 student prompt+response 仍受冻结的 65,536 token 总预算限制。
 
@@ -136,7 +138,7 @@ cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
 mopd_verl=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd
 mopd_python="$mopd_verl/.venv/bin/python"
 mopd_teacher=/groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_teachers/outputs/domain_teachers/qwen30b_d4_teachers_seed42_v1
-mopd_output="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_v1"
+mopd_output="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2"
 
 "$mopd_python" -I scripts/mopd.py prepare \
   --teacher-campaign "$mopd_teacher" --output "$mopd_output" \
@@ -152,7 +154,7 @@ mopd_output="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_v1"
 set -euo pipefail
 cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
 mopd_python=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd/.venv/bin/python
-mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_v1/manifest.json"
+mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2/manifest.json"
 "$mopd_python" -I scripts/mopd.py start --manifest "$mopd_manifest" --phase qualification --arm both
 "$mopd_python" -I scripts/mopd.py status --manifest "$mopd_manifest"
 timeout 20s qstat -u "$USER" || true
@@ -166,7 +168,7 @@ timeout 20s qstat -u "$USER" || true
 set -euo pipefail
 cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
 mopd_python=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd/.venv/bin/python
-mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_v1/manifest.json"
+mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2/manifest.json"
 "$mopd_python" -I scripts/mopd.py start --manifest "$mopd_manifest" --phase train --arm both
 )
 ```
@@ -208,11 +210,11 @@ mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_v1/manifest.json"
 | `validation_generations/<step>.jsonl` | validation responses、score、sample ID 与 source |
 | `result.json` / `pbs.log` | 本次进程结果与完整日志 |
 
-Math validation 同时报告 Nemotron、DeepMath、L8/L9 与两个来源等权均值；原生 Math 聚合值仍是按样本数加权，两者名称不同。Task verifier 只用于 validation，通过原环境的隔离 Python 子进程运行；训练不会调用它。
+Math validation 同时报告 Nemotron、DeepMath、L8/L9 与两个来源等权均值。当前 validation 两来源样本数相同，按样本数加权与来源等权的 Math 均值相等；最终 test 仍保留 Nemotron 226、DeepMath 256，因此 test 上两种聚合口径仍需区分。Task verifier 用于 validation 和最终 test，通过原环境的隔离 Python 子进程运行；训练 loss 不调用它。
 
 比较收敛时间时分开统计 optimizer update、generation、完整 step、validation/checkpoint 开销、队列等待及中断重做。不要把 `actor_update_seconds` 当成完整训练步耗时，也不要把重跑的同一步累计为新增训练步。中断 attempt 的 metrics 保留，不覆盖。
 
-该阶段冻结了 test 集并检查其不进入训练，但**不在训练中自动反复跑 test，也未实现最终 test 任务调度**；目前完整实现的评估通路是周期 validation。后续最终 checkpoint 的 test 应沿用冻结 verifier 和独立收据，不用 test 结果调整这次训练的批次机制。
+训练结束后自动对 validation 选出的 checkpoint 调度独立最终 test，流程见第 4 节。固定 test 共 1,250 题，不随本次 validation 抽样改变；结果写入 `final_tests/<arm>/receipt.json`。选模记录保存在 `runs/<arm>/validation/step_<n>.json` 和 `best_validation.json`，test 结果不用于选模、采样或 loss。
 
 ## 10. 复跑本地 CPU 测试
 

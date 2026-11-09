@@ -16,8 +16,11 @@ def validate_spec(s):
     need(s["domain_only_schedule"] == "iid_uniform", "Domain-only requires independent uniform draws")
     need(s["selection_score"] == "four_domain_macro_math_source_equal", "Unexpected selection score")
     for key in ("train_batch_size", "updates", "save_every", "validate_every"):
-        need(isinstance(s[key], int) and s[key] > 0 and s[key] % 4 == 0,
-             key + " must be a positive multiple of four")
+        need(type(s[key]) is int and s[key] > 0, key + " must be a positive integer")
+    need(s["train_batch_size"] % 4 == 0, "Mixed batch size must be divisible by four")
+    need(type(s["validation_per_domain"]) is int and s["validation_per_domain"] > 0
+         and s["validation_per_domain"] % 2 == 0,
+         "Validation size per domain must be positive and even for 1:1 Math sources")
     need(s["loss_reduction"] == "seq-mean-token-mean", "Unexpected loss reduction")
     need(s["pg_signal_clip"] == 5.0, "Paper PG signal clipping must be +/-5")
     need(s["max_context_tokens"] == 65536, "Frozen project prompt budgets require 64K")

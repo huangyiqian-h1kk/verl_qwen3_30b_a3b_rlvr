@@ -69,7 +69,8 @@ def test_changed_dataset_or_arm_refuses_resume(rows, spec):
             PlannedSampler(changed_rows, spec, arm).load_state_dict(state)
 
 
-@pytest.mark.parametrize("patch", [{"rollout_n": 8}, {"updates": 201}, {"train_batch_size": 15}, {"pg_signal_clip": 10}])
+@pytest.mark.parametrize("patch", [{"rollout_n": 8}, {"updates": 0}, {"train_batch_size": 15},
+                                   {"pg_signal_clip": 10}, {"validate_every": 12}, {"validation_per_domain": 255}])
 def test_invalid_baseline_rejected(spec, patch):
     with pytest.raises(RuntimeError):
         validate_spec(dict(spec, **patch))

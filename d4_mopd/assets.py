@@ -1,6 +1,7 @@
 """Freeze teacher identities, disjoint data, code and the existing scoring environment."""
 import json
 import os
+from collections import Counter
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +12,44 @@ from .spec import load_spec
 from d4_teachers.common import digest, file_sha, files, model_inventory, need, read, verify_files, write
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def select_validation(rows, spec):
+    """Freeze one equal-domain set; only draw from the existing validation pools."""
+    need(all(r["mopd_split"] == "validation" for r in rows), "Expected validation-only candidates")
+    need(len({r["sample_id"] for r in rows}) == len(rows), "Duplicate validation candidates")
+    need(all(r["domain"] in DOMAINS for r in rows), "Unknown validation domain")
+    size = spec["validation_per_domain"]
+    half = size // 2
+
+    def take(pool, count, label):
+        need(len(pool) >= count, f"Insufficient validation candidates for {label}: {len(pool)} < {count}")
+        if len(pool) == count:
+            return list(pool)
+        # Ranking by seed + ID is independent of file order, RNG use and model scores.
+        return sorted(pool, key=lambda r: (digest([spec["seed"], "mopd_validation_v1", label,
+                                                  r["sample_id"]]), r["sample_id"]))[:count]
+
+    selected = []
+    for domain in DOMAINS:
+        pool = [r for r in rows if r["domain"] == domain]
+        if domain != "math":
+            selected.extend(take(pool, size, domain))
+            continue
+        need(all(r["source"] in ("math", "deepmath_l8", "deepmath_l9") for r in pool),
+             "Unexpected Math validation source")
+        selected.extend(take([r for r in pool if r["source"] == "math"], half, "math/nemotron"))
+        strata = {s: [r for r in pool if r["source"] == s] for s in ("deepmath_l8", "deepmath_l9")}
+        total = sum(map(len, strata.values()))
+        need(total >= half and all(strata.values()), "Insufficient DeepMath validation strata")
+        quotas = {s: half * len(p) // total for s, p in strata.items()}
+        # Largest remainder keeps the frozen L8/L9 mixture, with a stable tie break.
+        order = sorted(strata, key=lambda s: (-(half * len(strata[s]) % total), s))
+        for source in order[:half - sum(quotas.values())]:
+            quotas[source] += 1
+        for source, pool in strata.items():
+            selected.extend(take(pool, quotas[source], "math/" + source))
+    return selected
 
 
 def check_verl(path):
@@ -69,6 +108,9 @@ def prepare(campaign, destination, verl_src, python, spec_path=None):
                 rows = [{**{k: r[k] for k in required}, "category": r.get("category", ""),
                          "task": r.get("task", ""), "mopd_split": split} for r in rows]
                 need(len({r["sample_id"] for r in rows}) == len(rows), "Duplicate sample IDs in " + split)
+                candidate_ids = [r["sample_id"] for r in rows]
+                if split == "validation":
+                    rows = select_validation(rows, spec)
                 need(all(r["domain"] in DOMAINS and 0 < r["prompt_tokens"] < 65536
                          and 0 < r["generation_max_tokens"] <= 65536-r["prompt_tokens"] for r in rows),
                      "Invalid domain or frozen context budget")
@@ -78,6 +120,12 @@ def prepare(campaign, destination, verl_src, python, spec_path=None):
                 data[split] = [str(root / "data" / path.name)]
                 summaries[split] = {"rows": len(rows), "domains": {d: sum(r["domain"] == d for r in rows) for d in DOMAINS},
                                     "sha256": file_sha(path), "ids_sha256": digest([r["sample_id"] for r in rows])}
+                summaries[split]["sources"] = {d: dict(Counter(r["source"] for r in rows if r["domain"] == d))
+                                                for d in DOMAINS}
+                if split == "validation":
+                    summaries[split].update(selection="fixed_equal_domains_math_1_to_1_v1", seed=spec["seed"],
+                                            candidate_rows=len(candidate_ids),
+                                            candidate_ids_sha256=digest(sorted(candidate_ids)))
                 rows_by_split[split] = rows
             for a, b in (("train", "validation"), ("train", "test"), ("validation", "test")):
                 for key in ("sample_id", "split_group_id", "prompt_token_hash"):
