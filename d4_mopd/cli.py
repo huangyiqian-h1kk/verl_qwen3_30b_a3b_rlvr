@@ -1,4 +1,4 @@
-"""Prepare, inspect, qualify and explicitly start the two plain MOPD arms."""
+"""Prepare, inspect and supervise qualification -> train -> test for plain MOPD."""
 import argparse
 import json
 import os
@@ -89,7 +89,7 @@ def main():
         q = sub.add_parser(name)
         q.add_argument("--manifest", required=True)
         if name == "start":
-            q.add_argument("--phase", choices=("qualification", "train", "test"), required=True)
+            q.add_argument("--phase", choices=("pipeline", "qualification", "train", "test"), required=True)
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
     for name in ("execute", "gpu-node", "paths"):
         q = sub.add_parser(name)
@@ -131,15 +131,21 @@ def main():
         elif a.command == "resume-control":
             m = verify(path)
             (root / "STOP").unlink(missing_ok=True)
-            states = read(root / "states.json")
-            for phase in ("qualification", "train", "test"):
-                arms = [s["arm"] for s in states.values() if s["phase"] == phase]
-                if arms:
-                    control.start(path, phase, arms)
+            if (root / "pipeline.json").exists():
+                control.start(path, "pipeline", read(root / "pipeline.json")["arms"])
+            else:
+                states = read(root / "states.json")
+                for phase in ("qualification", "train", "test"):
+                    arms = [a for a in ARMS if phase+":"+a in states]
+                    if arms:
+                        control.start(path, phase, arms)
             result = {"status": "CONTROL_RESUMED", "blocked_jobs": "remain blocked for inspection"}
         else:
             result = {"manifest": str(path), "guardian_lock_held": active(root / "guardian.lock"),
                       "stopped": (root / "STOP").exists(),
+                      "pipeline": read(root / "pipeline.json") if (root / "pipeline.json").exists() else None,
+                      "checkpoint_retention": {arm: read(root / "runs" / arm / "retention.json")
+                          for arm in ARMS if (root / "runs" / arm / "retention.json").exists()},
                       "heartbeat": read(root / "heartbeat.json") if (root / "heartbeat.json").exists() else None,
                       "states": read(root / "states.json") if (root / "states.json").exists() else {}}
     print(json.dumps(result, ensure_ascii=False, indent=2))

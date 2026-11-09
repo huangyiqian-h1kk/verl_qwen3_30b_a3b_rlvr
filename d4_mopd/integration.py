@@ -76,6 +76,12 @@ def check_batch(batch, spec, arm, step, expected_ids):
 
 
 class MOPDTrainer(RayPPOTrainer):
+    def _prune_checkpoints(self):
+        c = self.config.mopd
+        if not c.qualification and c.test_checkpoint is None:
+            checkpoints.prune(c.run_dir, c.identity, c.arm, self.train_dataloader.sampler.identity,
+                              c.effective_spec.checkpoint_keep_recent, c.effective_spec.updates)
+
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
         from .metrics import source_metrics
         metrics = super()._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
@@ -112,6 +118,8 @@ class MOPDTrainer(RayPPOTrainer):
               dict(step=self.global_steps, checkpoint=str(selected) if selected else None,
                    model_optimizer_scheduler_rng_and_loader=bool(selected),
                    vllm_sampling_rng_bitwise_restored=False, identity=cfg.identity))
+        if any((Path(cfg.run_dir) / "validation").glob("step_*.json")):
+            self._prune_checkpoints()
 
     def _save_checkpoint(self):
         super()._save_checkpoint()
@@ -120,6 +128,7 @@ class MOPDTrainer(RayPPOTrainer):
         torch.save(dict(random=random.getstate(), numpy=np.random.get_state(), torch=torch.get_rng_state()), folder / "driver.pt")
         checkpoints.commit(folder, c.identity, c.arm, self.global_steps, self.train_dataloader.sampler.identity,
                            resumed_from=self.mopd_loaded_step)
+        self._prune_checkpoints()
         if c.qualification and self.mopd_loaded_step == 0 and self.global_steps == 4:
             raise QualificationPause("Step 4 committed; restart another PBS process to check native resume")
 
@@ -166,6 +175,7 @@ class MOPDTrainer(RayPPOTrainer):
                      and all(old[k] == v for k, v in reference.items()), "Cached evaluation identity mismatch")
                 if not is_test:
                     select_best(run, c.identity, c.arm)
+                    self._prune_checkpoints()
                 return old["metrics"]
         metrics = plain(super()._validate())
         row = dict(status="PASS", step=self.global_steps, identity=c.identity, arm=c.arm, metrics=metrics,
@@ -176,6 +186,7 @@ class MOPDTrainer(RayPPOTrainer):
             write(canonical, row)
             if not is_test:
                 select_best(run, c.identity, c.arm)
+                self._prune_checkpoints()
         write(Path(c.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / f"{split}_{self.global_steps}.json",
               row)
         return metrics
@@ -214,11 +225,12 @@ class MOPDTaskRunner(BaseTaskRunner):
             trainer.fit()
         except QualificationPause:
             result = {"status": "RESUME_REQUIRED", "step": trainer.global_steps,
-                      "identity": config.mopd.identity}
+                      "identity": config.mopd.identity, "arm": config.mopd.arm}
             write(Path(config.mopd.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / "result.json", result)
             return result
         except ControlPause:
             result = {"status": "CONTROL_PAUSED", "identity": config.mopd.identity,
+                      "arm": config.mopd.arm,
                       "uncommitted_next_step": trainer.global_steps}
             write(Path(config.mopd.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / "result.json", result)
             return result
@@ -227,7 +239,7 @@ class MOPDTaskRunner(BaseTaskRunner):
             receipt = Path(config.mopd.run_dir) / "test" / f"step_{selection['step']}.json"
             need(read(receipt)["status"] == "PASS", "Final test did not complete")
             result = dict(status="PASS", identity=config.mopd.identity, step=selection["step"],
-                          selection=selection, test_receipt=str(receipt), split="test")
+                          arm=config.mopd.arm, selection=selection, test_receipt=str(receipt), split="test")
             write(Path(config.mopd.run_dir) / "attempts" / os.environ["D4_MOPD_ATTEMPT"] / "result.json", result)
             return result
         final = checkpoints.latest(config.trainer.default_local_dir, config.mopd.identity, config.mopd.arm, sampler.identity)
@@ -240,6 +252,7 @@ class MOPDTaskRunner(BaseTaskRunner):
             resumed_from = read(final / "mopd_complete.json")["resumed_from"]
             need(resumed_from == 4, "Qualification did not reload in a fresh process")
         result = {"status": "PASS", "step": config.mopd.effective_spec.updates,
+                  "arm": config.mopd.arm,
                   "resumed_from": resumed_from, "checkpoint": str(final),
                   "identity": config.mopd.identity, "qualification": config.mopd.qualification}
         if not config.mopd.qualification:

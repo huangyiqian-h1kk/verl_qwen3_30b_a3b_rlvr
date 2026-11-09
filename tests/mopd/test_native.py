@@ -25,6 +25,8 @@ def test_real_hydra_and_native_dataclasses(manifest, tmp_path, arm, qualificatio
     assert c.actor_rollout_ref.actor.ppo_epochs == 1
     assert c.trainer.test_freq == (4 if qualification else 10)
     assert c.trainer.save_freq == (4 if qualification else 5)
+    assert c.trainer.max_actor_ckpt_to_keep is None  # Project retention protects validation best.
+    assert c.mopd.effective_spec.checkpoint_keep_recent == 2
     assert c.distillation.distillation_loss.log_prob_min_clamp is None
     assert not c.distillation.distillation_loss.use_task_rewards
     assert not c.algorithm.filter_groups.enable

@@ -79,8 +79,39 @@ def register_final_tests(m, state):
         state.setdefault("test:" + s["arm"], dict(phase="test", arm=s["arm"], status="READY", job=None, pending=None))
 
 
+def qualification_passed(m, arm):
+    q = read(task_root(m, "qualification", arm) / "receipt.json")
+    need(q.get("status") == "PASS" and q.get("identity") == m["identity"]
+         and q.get("scope") == "qualification" and q.get("arm") == arm
+         and q.get("step") == 8 and q.get("resumed_from") == 4,
+         "GPU end-to-end qualification/reload is required before formal training: " + arm)
+
+
+def advance_pipeline(m, state):
+    """Sequential qualifications, then all requested training arms; durable and idempotent."""
+    path = Path(m["manifest_path"]).parent / "pipeline.json"
+    if not path.exists():
+        return
+    p = read(path)
+    need(p["schema"] == "d4-mopd-pipeline-v1" and p["identity"] == m["identity"]
+         and p["arms"] == [a for a in ARMS if a in p["arms"]] and p["arms"],
+         "Pipeline identity or arm order changed")
+    for arm in p["arms"]:
+        key = "qualification:" + arm
+        s = state.setdefault(key, dict(phase="qualification", arm=arm, status="READY", job=None, pending=None))
+        need(s["phase"] == "qualification" and s["arm"] == arm, "Pipeline qualification task changed")
+        if s["status"] != "DONE":
+            return  # In particular, BLOCKED is not a successful prerequisite.
+        qualification_passed(m, arm)
+    for arm in p["arms"]:
+        state.setdefault("train:" + arm, dict(phase="train", arm=arm, status="READY", job=None, pending=None))
+
+
 def tick(m, state, pbs):
+    if (Path(m["manifest_path"]).parent / "STOP").exists():
+        return state
     # Also repairs a restart between recording train success and registering test.
+    advance_pipeline(m, state)
     register_final_tests(m, state)
     for key, s in list(state.items()):
         if s["status"] in ("DONE", "BLOCKED"):
@@ -89,6 +120,8 @@ def tick(m, state, pbs):
         try:
             job = s.get("job")
             if not job:
+                if (Path(m["manifest_path"]).parent / "STOP").exists():
+                    break
                 # Durable pending directory precedes qsub. An ambiguous qsub is
                 # recovered at the same path, never retried with a new directory.
                 pending = s.get("pending")
@@ -111,7 +144,8 @@ def tick(m, state, pbs):
             if str(row.get("Exit_status")) == "0" and result.get("status") == "PASS":
                 need(result.get("identity") == m["identity"], "Unbound success receipt")
                 if s["phase"] == "qualification":
-                    need(result.get("resumed_from") == 4 and result["step"] == 8, "Missing fresh-process resume proof")
+                    need(result.get("resumed_from") == 4 and result["step"] == 8 and result.get("arm") == s["arm"],
+                         "Missing arm-bound fresh-process resume proof")
                 elif s["phase"] == "train":
                     need(result["step"] == m["spec"]["updates"] and result["selection"]["identity"] == m["identity"]
                          and result["selection"]["arm"] == s["arm"], "Missing endpoint/selection")
@@ -123,12 +157,12 @@ def tick(m, state, pbs):
                          and test["identity"] == m["identity"] and test["arm"] == s["arm"]
                          and test["step"] == expected["step"]
                          and test["checkpoint_identity"] == expected["checkpoint_identity"], "Unbound final test result")
-                proof = dict(result, pbs_job=job, pbs=row, scope=s["phase"], at_utc=now())
+                proof = dict(result, pbs_job=job, pbs=row, scope=s["phase"], arm=s["arm"], at_utc=now())
                 write(run / "receipt.json", proof)
                 s["status"] = "DONE"
             elif str(row.get("Exit_status")) == "0" and result.get("status") == "RESUME_REQUIRED":
                 need(result.get("identity") == m["identity"] and s["phase"] == "qualification"
-                     and result.get("step") == 4, "Unexpected pause")
+                     and result.get("step") == 4 and result.get("arm") == s["arm"], "Unexpected pause")
                 s.update(status="READY", previous_job=job, job=None)
             elif str(row.get("Exit_status")) == "0" and result.get("status") == "CONTROL_PAUSED":
                 need(result.get("identity") == m["identity"], "Unbound pause receipt")
@@ -147,6 +181,7 @@ def tick(m, state, pbs):
         finally:
             s["observed_utc"] = now()
             write(Path(m["manifest_path"]).parent / "states.json", state)
+    advance_pipeline(m, state)
     register_final_tests(m, state)
     write(Path(m["manifest_path"]).parent / "states.json", state)
     return state
@@ -183,21 +218,30 @@ def guardian(manifest_path):
 def start(manifest_path, phase, arms):
     m = verify(manifest_path)
     root = Path(manifest_path).parent
+    need(phase in ("pipeline", "qualification", "train", "test")
+         and list(arms) == [a for a in ARMS if a in arms] and arms, "Invalid phase/arms")
     need(not (root / "STOP").exists(), "Experiment is stopped; use resume-control explicitly")
     proof = read(root / "cpu_preflight.json")
     need(proof["status"] == "PASS" and proof["identity"] == m["identity"], "CPU preflight has not passed")
     if phase == "train":
         for arm in arms:
-            q = read(task_root(m, "qualification", arm) / "receipt.json")
-            need(q["status"] == "PASS" and q["identity"] == m["identity"] and q["resumed_from"] == 4,
-                 "GPU end-to-end qualification/reload is required before formal training: " + arm)
+            qualification_passed(m, arm)
     with lock(root / "launch.lock", wait=60):
         with lock(root / "states.lock", wait=120):
             path = root / "states.json"
             state = read(path) if path.exists() else {}
-            for arm in arms:
-                key = phase + ":" + arm
-                state.setdefault(key, dict(phase=phase, arm=arm, status="READY", job=None, pending=None))
+            if phase == "pipeline":
+                path_plan = root / "pipeline.json"
+                plan = dict(schema="d4-mopd-pipeline-v1", identity=m["identity"], arms=list(arms))
+                if path_plan.exists():
+                    need(read(path_plan) == plan, "Existing automatic pipeline has another identity/arms")
+                else:
+                    write(path_plan, plan)
+                advance_pipeline(m, state)
+            else:
+                for arm in arms:
+                    key = phase + ":" + arm
+                    state.setdefault(key, dict(phase=phase, arm=arm, status="READY", job=None, pending=None))
             write(path, state)
         if not active(root / "guardian.lock"):
             with (root / "guardian.log").open("ab") as log:
@@ -209,5 +253,6 @@ def start(manifest_path, phase, arms):
                 need(child.poll() is None, "Guardian exited during startup; inspect guardian.log")
                 time.sleep(0.1)
             need(active(root / "guardian.lock"), "Guardian did not acquire its lease; inspect guardian.log")
-    return dict(status="REGISTERED", tasks=[phase+":"+a for a in arms], manifest=m["manifest_path"],
+    return dict(status="REGISTERED", tasks=list(state), manifest=m["manifest_path"],
+                automatic_pipeline=phase == "pipeline",
                 note="Use status to confirm the guardian heartbeat and PBS submission")

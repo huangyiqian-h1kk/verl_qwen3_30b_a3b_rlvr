@@ -112,10 +112,14 @@ def cpu(manifest_path):
     weight_bytes = sum(v["bytes"] for k, v in m["student"]["files"].items()
                        if k.endswith((".safetensors", ".bin")))
     saves_per_arm = (m["spec"]["updates"] + m["spec"]["save_every"]-1) // m["spec"]["save_every"]
+    retained_per_arm = min(saves_per_arm, m["spec"]["checkpoint_keep_recent"] + 1)
     proof["storage"] = dict(filesystem_free_bytes=shutil.disk_usage(Path(manifest_path).parent).free,
-        retained_formal_checkpoints=2*saves_per_arm, retained_qualification_checkpoints=4,
-        estimated_checkpoint_bytes=(2*saves_per_arm+4)*7*weight_bytes,
-        estimate_basis="BF16 HF weights x7 for model/FP32 master/Adam moments; excludes incomplete retries and overhead",
+        created_formal_checkpoints=2*saves_per_arm,
+        retained_formal_checkpoints_upper_bound=2*retained_per_arm, retained_qualification_checkpoints=4,
+        checkpoint_keep_recent=m["spec"]["checkpoint_keep_recent"], keep_validation_best=True,
+        estimated_retained_checkpoint_bytes=(2*retained_per_arm+4)*7*weight_bytes,
+        estimated_peak_checkpoint_bytes=(2*(retained_per_arm+1)+4)*7*weight_bytes,
+        estimate_basis="BF16 HF weights x7 for model/FP32 master/Adam moments; peak includes one new save per arm; excludes incomplete retries and overhead",
         project_quota_checked=False)
     write(Path(manifest_path).parent / "cpu_preflight.json", proof)
     return proof

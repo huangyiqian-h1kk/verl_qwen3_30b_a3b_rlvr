@@ -2,7 +2,7 @@
 
 这份实现用于 mix rl 的基础实验：固定 Math50、IF70、CP80、Logic30，比较 **rollout=1 的 domain-mix 与 domain-only optimizer batch**。训练只有蒸馏信号。原 teacher campaign 作为只读输入，新实验、环境、日志和 checkpoint 使用独立目录。
 
-**验收状态：本地 CPU 测试已通过；ABCI GPU 资格测试尚未执行。** 本地没有 ABCI 模型文件、PBS 或 GPU，不能据此宣称 Qwen3-30B-A3B 的分布式训练已经跑通。正式训练入口会检查该 arm 的 GPU 资格测试收据。
+**验收状态：本地 CPU 测试已通过；ABCI GPU 资格测试尚未执行。** 本地没有 ABCI 模型文件、PBS 或 GPU，不能据此宣称 Qwen3-30B-A3B 的分布式训练已经跑通。`start --phase pipeline --arm both` 会监护顺序执行两组 GPU 资格测试，全部通过后自动提交两个正式训练任务，随后各自执行最终 test。
 
 ## 1. 依据与固定版本
 
@@ -31,6 +31,7 @@
 | Rollout decoding | temperature=1，top_p=1，top_k=-1 | 原始分布采样；单次 assistant response |
 | Context | 沿用项目每条记录的 64K 总预算和冻结 chat template | 项目适配；不是论文 Math/IF 的 32K 配置 |
 | 正式预算 | 200 updates，每 5 步保存，每 10 步 validation | 用户指定验证间隔；固定预算，无 adaptive early stop |
+| Checkpoint 保留 | 每个正式 arm 保留最近 2 个完整 checkpoint，另保留 validation 最佳及已冻结最终 test 的选择 | 保存成功后滚动清理；完整模型/optimizer/scheduler/RNG/数据状态；日志和评估历史保留 |
 | Validation | 固定 1,024 题：Math 256（Nemotron 128 + DeepMath 128），IF/CP/Logic 各 256；greedy n=1 | 接近原 Mix RL 的规模；不同于论文数学 avg@32 |
 | 选模与最终 test | Math 两来源各 1/2，再四域各 1/4；取完整 validation 分数最高的单一 checkpoint | 平分取较早步；包含 step0；训练结束自动注册独立 test 作业并持续监护 |
 | 额外训练信号 | 无 task reward、reference KL、entropy bonus、SFT、value loss、PPO ratio clipping、importance correction、动态过滤；显式关闭 MoE auxiliary/z loss | 纯蒸馏 baseline |
@@ -87,7 +88,7 @@ Validation 的 verifier performance 不参与训练采样、teacher 路由、los
 
 该 pinned verl 的 `uv.lock` 使用 **PyTorch 2.13 / CUDA 13 / vLLM 0.32**。不能直接在原 teacher 的 CUDA 12.8 环境里 `pip install -U`。Bootstrap 创建单独环境；GPU preflight 检查扩展导入、BF16 运算和显存。ABCI driver 与该 CUDA 13 栈是否兼容仍需实机验证，检查不通过时不提交正式训练。
 
-默认保留全部完整 checkpoint：两个正式 arm 共 80 份，另有 4 份 qualification checkpoint。CPU preflight 输出可用文件系统空间及按 BF16 权重×7 估算的总 checkpoint 体积；30B 全参数 Adam 状态会占用数十 TB。估算不包含中断留下的半成品，也不能验证项目 quota，需结合 ABCI quota 核对。当前实现不会自动删除历史完整 checkpoint。
+两个正式 arm 在 200 步内共创建 80 份完整 checkpoint，但滚动保留每组最近 2 份和 validation 最佳，正常最多各 3 份；最佳在最近两份内时不重复保存。step200 终点属于最近两份，始终保留。另保留 4 份 qualification checkpoint 作为恢复证据。CPU preflight 分别估算稳态保留空间和两组各新增一份尚未清理时的峰值空间，按 BF16 权重×7 估算完整 Adam 训练状态；不包含中断留下的半成品，也不能验证项目 quota，需结合 ABCI quota 核对。
 
 Teacher 推理 `max_model_len` 为 padding 上界与 prompt-logprob API 预留一个 token；实际每条 student prompt+response 仍受冻结的 65,536 token 总预算限制。
 
@@ -102,6 +103,8 @@ Teacher 推理 `max_model_len` 为 padding 上界与 prompt-logprob API 预留�
 Qualification 使用 **B=8、8 updates、response 上限256**，从每域最长的两个训练 prompts 取测试样本；调试评估每域一个样本。这些数值是本项目适配层新增的 smoke/reload 调试设置，来自工程实现，不来自原始 MOPD 论文，也不属于正式训练超参数。路径位于 `qualification/`，不参与正式选模。它验证基本执行与恢复，**不证明 B2048/64K 的最坏长度吞吐和显存容量**。正式运行出现 OOM 会停在 BLOCKED，不会改 batch 或截断长度来伪装通过。
 
 CPU 中的 AdamW 小模型恢复测试检查保存状态后下一次更新完全一致；它不替代上述真实 MoE 重启测试。分布式 loss 的 CPU 测试模拟 DP 梯度平均，实际 NCCL/DP 通信留给 GPU qualification。
+
+自动流程先完成 mix 的 step1–4、在新 PBS job 中恢复至 step8，再对 only 做同样测试。两份结果都必须绑定本实验、对应 arm、step8 和 resumed_from=4，才能提交两组正式训练。正式任务从 base 初始化，使用独立的 `runs/` 目录，不继承 qualification 权重。无中断时共 4 个资格测试 job、2 个训练 job 和 2 个最终 test job。资格测试阶段最多 2 节点/16 GPU；两组正式任务并发最多 4 节点/32 GPU。明确的应用错误 BLOCKED、STOP 或尚未确认的 PBS 状态均不会被当成通过。
 
 ## 7. ABCI 操作命令
 
@@ -138,7 +141,7 @@ cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
 mopd_verl=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd
 mopd_python="$mopd_verl/.venv/bin/python"
 mopd_teacher=/groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_teachers/outputs/domain_teachers/qwen30b_d4_teachers_seed42_v1
-mopd_output="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2"
+mopd_output="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_roll2_v3"
 
 "$mopd_python" -I scripts/mopd.py prepare \
   --teacher-campaign "$mopd_teacher" --output "$mopd_output" \
@@ -147,37 +150,29 @@ mopd_output="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2"
 )
 ```
 
-提交 GPU qualification 并启动监护：
+注册自动流程并启动监护。这个入口已包含测试通过后的正式训练及最终 test，不需要等待测试结束后再手动提交：
 
 ```bash
 (
 set -euo pipefail
 cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
 mopd_python=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd/.venv/bin/python
-mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2/manifest.json"
-"$mopd_python" -I scripts/mopd.py start --manifest "$mopd_manifest" --phase qualification --arm both
+mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_roll2_v3/manifest.json"
+"$mopd_python" -I scripts/mopd.py start --manifest "$mopd_manifest" --phase pipeline --arm both
 "$mopd_python" -I scripts/mopd.py status --manifest "$mopd_manifest"
 timeout 20s qstat -u "$USER" || true
 )
 ```
 
-两个 `qualification/*/receipt.json` 均 PASS 后，显式启动正式训练。命令本身也会检查收据，不会因为只有 CPU PASS 就开始训练：
+流程意图写入 `pipeline.json`，重复执行同一命令或执行 `resume-control` 会接管原任务；不会重复提交已登记的 job。仍可使用 `--phase qualification` 只注册资格测试，或在对应测试已通过后用 `--phase train` 单独注册正式训练。`--arm domain_mix` / `domain_only` 可限制流程只包含一个 arm；已注册 pipeline 的 arm 集合不能通过重复 start 改写。后面的简短状态/暂停命令需要在登录 shell 中重新设置 `mopd_python`、`mopd_manifest` 并进入 checkout；上面的 subshell 不会保留这些变量。
 
-```bash
-(
-set -euo pipefail
-cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
-mopd_python=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd/.venv/bin/python
-mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2/manifest.json"
-"$mopd_python" -I scripts/mopd.py start --manifest "$mopd_manifest" --phase train --arm both
-)
-```
-
-资源不足时可用 `--arm domain_mix` 或 `--arm domain_only` 分别启动。后面的简短状态/暂停命令需要在登录 shell 中重新设置 `mopd_python`、`mopd_manifest` 并进入 checkout；上面的 subshell 不会保留这些变量。
+本次使用新的 `...val1024_roll2_v3` 输出目录，冻结自动流程及滚动保留代码。旧 manifest 内的 runtime 不会因为 checkout 更新而改变，不能直接拿旧目录宣称已经启用这些行为。
 
 ## 8. Checkpoint、监护和中断
 
 - 原生 checkpoint 必须包含 model、optimizer、LR scheduler、worker RNG，再加 DataLoader state 和 driver RNG。所有文件完成后才原子写入 `mopd_complete.json`。
+- 滚动保留先从全部 validation 收据重建最佳模型指针，再校验完整状态。最近 2 份、validation 最佳、固定预算终点、已冻结最终 test 使用的 checkpoint 都受保护。step0 最佳时直接保留 base 引用，不复制 base。不会清理原 teacher campaign。
+- 旧 checkpoint 先原子移入该 run 的 `checkpoints/.retention_trash`，再删除；清理计划及原始 marker 写入 `checkpoint_retention/*.json`。若删除中断，恢复只扫描仍完整的 checkpoint，接管后完成待清理文件。`retention.json` 记录保留/已删除步数；训练日志、完整 validation 历史、生成结果不删除。新 checkpoint 尚未完整保存时不触发滚动清理。
 - 重启只使用最后一个完整 marker；半写入的新 checkpoint 移入当前 attempt 的 `incomplete_checkpoints/` 保留证据。已提交 checkpoint 被修改会报错，避免悄悄回退。
 - 两 arm 独立保存，marker 绑定 manifest、arm、step、sampler 身份。不会把 Math50 权重当作 student resume，也不会只加载权重冒充续训。
 - 未保存的 rollout/update 会在最后一次完整 checkpoint 后重做。**vLLM 的采样 RNG 没有逐请求完整恢复保证**，因此重做 response 不承诺 bitwise 一致。
@@ -197,7 +192,7 @@ mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_v2/manifest.
 
 ## 9. 查看结果与测量时间
 
-`status` 返回 guardian 锁、heartbeat、每个任务及上次 PBS 观察。每个 `runs/<arm>/attempts/<id>/` 保留：
+`status` 返回 guardian 锁、heartbeat、自动流程计划、每个任务及上次 PBS 观察，以及每个 arm 的 checkpoint 保留/删除记录。每个 `runs/<arm>/attempts/<id>/` 保留：
 
 | 文件 | 含义 |
 |---|---|

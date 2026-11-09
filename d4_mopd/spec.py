@@ -29,6 +29,8 @@ def validate_spec(s):
          and all(0 <= b < 1 for b in s["adam_betas"]), "Invalid Adam parameters")
     need(s["validate_every"] % s["save_every"] == 0,
          "Every scheduled validation must have a complete checkpoint")
+    need(type(s["checkpoint_keep_recent"]) is int and s["checkpoint_keep_recent"] >= 2,
+         "Keep at least two complete checkpoints for recovery, plus the validation best")
     need(s["student_nodes"] == s["teacher_nodes"] == 1 and s["gpus_per_node"] == 8,
          "Qualified topology is one 8-GPU student node plus one 8-GPU teacher node")
     need((s["actor_tp"], s["actor_pp"], s["actor_ep"], s["rollout_tp"], s["teacher_tp"])

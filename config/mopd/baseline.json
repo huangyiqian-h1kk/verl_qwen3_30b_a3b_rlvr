@@ -15,6 +15,7 @@
   "loss_reduction": "seq-mean-token-mean",
   "save_every": 5,
   "validate_every": 10,
+  "checkpoint_keep_recent": 2,
   "validation_per_domain": 256,
   "max_context_tokens": 65536,
   "student_nodes": 1,
