@@ -88,7 +88,7 @@ def qualification_passed(m, arm):
 
 
 def advance_pipeline(m, state):
-    """Sequential qualifications, then all requested training arms; durable and idempotent."""
+    """Parallel qualification chains, then training after every requested arm passes."""
     path = Path(m["manifest_path"]).parent / "pipeline.json"
     if not path.exists():
         return
@@ -100,9 +100,17 @@ def advance_pipeline(m, state):
         key = "qualification:" + arm
         s = state.setdefault(key, dict(phase="qualification", arm=arm, status="READY", job=None, pending=None))
         need(s["phase"] == "qualification" and s["arm"] == arm, "Pipeline qualification task changed")
+    # Register every chain before checking the barrier. setdefault preserves
+    # running jobs and ambiguous submissions when an existing pipeline is resumed.
+    all_passed = True
+    for arm in p["arms"]:
+        s = state["qualification:" + arm]
         if s["status"] != "DONE":
-            return  # In particular, BLOCKED is not a successful prerequisite.
-        qualification_passed(m, arm)
+            all_passed = False  # BLOCKED/unknown is not a successful prerequisite.
+        else:
+            qualification_passed(m, arm)
+    if not all_passed:
+        return
     for arm in p["arms"]:
         state.setdefault("train:" + arm, dict(phase="train", arm=arm, status="READY", job=None, pending=None))
 
@@ -254,5 +262,5 @@ def start(manifest_path, phase, arms):
                 time.sleep(0.1)
             need(active(root / "guardian.lock"), "Guardian did not acquire its lease; inspect guardian.log")
     return dict(status="REGISTERED", tasks=list(state), manifest=m["manifest_path"],
-                automatic_pipeline=phase == "pipeline",
+                automatic_pipeline=(root / "pipeline.json").exists(),
                 note="Use status to confirm the guardian heartbeat and PBS submission")

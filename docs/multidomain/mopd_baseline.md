@@ -2,7 +2,7 @@
 
 这份实现用于 mix rl 的基础实验：固定 Math50、IF70、CP80、Logic30，比较 **rollout=1 的 domain-mix 与 domain-only optimizer batch**。训练只有蒸馏信号。原 teacher campaign 作为只读输入，新实验、环境、日志和 checkpoint 使用独立目录。
 
-**验收状态：本地 CPU 测试已通过；ABCI GPU 资格测试尚未执行。** 本地没有 ABCI 模型文件、PBS 或 GPU，不能据此宣称 Qwen3-30B-A3B 的分布式训练已经跑通。`start --phase pipeline --arm both` 会监护顺序执行两组 GPU 资格测试，全部通过后自动提交两个正式训练任务，随后各自执行最终 test。
+**验收状态：本地 CPU 测试和 ABCI CPU preflight 已通过；ABCI GPU 资格测试已提交，尚无通过记录。** 本地没有 ABCI 模型文件、PBS 或 GPU，不能据此宣称 Qwen3-30B-A3B 的分布式训练已经跑通。`start --phase pipeline --arm both` 会并行调度两组 GPU 资格测试，全部通过后自动提交两个正式训练任务，随后各自执行最终 test。
 
 ## 1. 依据与固定版本
 
@@ -97,14 +97,14 @@ Teacher 推理 `max_model_len` 为 padding 上界与 prompt-logprob API 预留�
 | 层级 | 检查内容 | 当前证据 |
 |---|---|---|
 | 本地 CPU 软件测试 | 官方 Hydra/dataclass、原生 loss 与梯度、原生 teacher routing、数据 factory、token 对齐、采样/loader 恢复、checkpoint 与 PBS 状态机 | `tests/mopd` 已通过，见下面复跑命令 |
-| ABCI CPU preflight | 实际 base/teacher 导出身份、数据分割、prompt token hash、tokenizer、冻结 verifier、依赖与配置 | 必须在 ABCI 执行，尚未执行 |
-| ABCI GPU qualification | 真实四 teacher scoring、Megatron forward/backward/update、原生完整 checkpoint；step4 正常退出，再由新 PBS 进程恢复到 step8 | 必须分别完成两个 arm，尚未执行 |
+| ABCI CPU preflight | 实际 base/teacher 导出身份、数据分割、prompt token hash、tokenizer、冻结 verifier、依赖与配置 | 用户回传 v3 的 PASS，时间为 2026-11-09T21:43:45Z |
+| ABCI GPU qualification | 真实四 teacher scoring、Megatron forward/backward/update、原生完整 checkpoint；step4 正常退出，再由新 PBS 进程恢复到 step8 | 用户回传 Mix 已提交；两个 arm 均尚无通过记录 |
 
 Qualification 使用 **B=8、8 updates、response 上限256**，从每域最长的两个训练 prompts 取测试样本；调试评估每域一个样本。这些数值是本项目适配层新增的 smoke/reload 调试设置，来自工程实现，不来自原始 MOPD 论文，也不属于正式训练超参数。路径位于 `qualification/`，不参与正式选模。它验证基本执行与恢复，**不证明 B2048/64K 的最坏长度吞吐和显存容量**。正式运行出现 OOM 会停在 BLOCKED，不会改 batch 或截断长度来伪装通过。
 
 CPU 中的 AdamW 小模型恢复测试检查保存状态后下一次更新完全一致；它不替代上述真实 MoE 重启测试。分布式 loss 的 CPU 测试模拟 DP 梯度平均，实际 NCCL/DP 通信留给 GPU qualification。
 
-自动流程先完成 mix 的 step1–4、在新 PBS job 中恢复至 step8，再对 only 做同样测试。两份结果都必须绑定本实验、对应 arm、step8 和 resumed_from=4，才能提交两组正式训练。正式任务从 base 初始化，使用独立的 `runs/` 目录，不继承 qualification 权重。无中断时共 4 个资格测试 job、2 个训练 job 和 2 个最终 test job。资格测试阶段最多 2 节点/16 GPU；两组正式任务并发最多 4 节点/32 GPU。明确的应用错误 BLOCKED、STOP 或尚未确认的 PBS 状态均不会被当成通过。
+自动流程同时登记 mix 和 only 两条测试链，每条各自执行 step1–4、在新 PBS job 中恢复至 step8。两条链独立推进；一条链排队、恢复或 BLOCKED 不阻止另一条继续测试。两份结果都必须绑定本实验、对应 arm、step8 和 resumed_from=4，才能提交两组正式训练。正式任务从 base 初始化，使用独立的 `runs/` 目录，不继承 qualification 权重。无中断时共 4 个资格测试 job、2 个训练 job 和 2 个最终 test job。资格测试和正式训练阶段均最多并发 4 节点/32 GPU；同一 arm 的 step4 与恢复测试仍有先后依赖，不会四个资格 job 同时运行。实际启动时间由 PBS 可用资源决定。明确的应用错误 BLOCKED、STOP 或尚未确认的 PBS 状态均不会被当成通过。
 
 ## 7. ABCI 操作命令
 
@@ -164,9 +164,25 @@ timeout 20s qstat -u "$USER" || true
 )
 ```
 
-流程意图写入 `pipeline.json`，重复执行同一命令或执行 `resume-control` 会接管原任务；不会重复提交已登记的 job。仍可使用 `--phase qualification` 只注册资格测试，或在对应测试已通过后用 `--phase train` 单独注册正式训练。`--arm domain_mix` / `domain_only` 可限制流程只包含一个 arm；已注册 pipeline 的 arm 集合不能通过重复 start 改写。后面的简短状态/暂停命令需要在登录 shell 中重新设置 `mopd_python`、`mopd_manifest` 并进入 checkout；上面的 subshell 不会保留这些变量。
+流程意图写入 `pipeline.json`，重复执行同一命令或执行 `resume-control` 会接管原任务；不会重复提交已登记的 job。仍可使用 `--phase qualification` 登记资格测试：没有 pipeline 时不会自动启动正式训练；已有 pipeline 时保留其后续自动调度。也可在对应测试已通过后用 `--phase train` 单独注册正式训练。`--arm domain_mix` / `domain_only` 可限制流程只包含一个 arm；已注册 pipeline 的 arm 集合不能通过重复 start 改写。后面的简短状态/暂停命令需要在登录 shell 中重新设置 `mopd_python`、`mopd_manifest` 并进入 checkout；上面的 subshell 不会保留这些变量。
 
-本次使用新的 `...val1024_roll2_v3` 输出目录，冻结自动流程及滚动保留代码。旧 manifest 内的 runtime 不会因为 checkout 更新而改变，不能直接拿旧目录宣称已经启用这些行为。
+`...val1024_roll2_v3` 已冻结自动流程及滚动保留代码。更新 checkout 不会改变旧 manifest 内的 runtime。对于已经用 `63d59e2` 启动、只有 Mix 入队的 v3 实验，冻结监护本来就会处理共享状态表内的所有任务，因此可以直接补登记 Only，使两条测试链并行。下面的命令通过启动锁及状态锁保留原 Mix 的 job/pending、已有 CPU preflight 和 pipeline；复用现有监护，两组通过后仍自动进入正式训练。不需要重建环境、重新 prepare 或替换冻结 runtime：
+
+```bash
+(
+set -euo pipefail
+cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
+git fetch --no-tags origin codex/d4-mopd-baseline
+git merge --ff-only FETCH_HEAD
+mopd_python=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd/.venv/bin/python
+mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_roll2_v3/manifest.json"
+"$mopd_python" -I scripts/mopd.py start --manifest "$mopd_manifest" --phase pipeline --arm both
+"$mopd_python" -I scripts/mopd.py status --manifest "$mopd_manifest"
+timeout 20s qstat -u "$USER" || true
+)
+```
+
+重复执行不会再创建同一任务。登记完成时 Only 可能还是 READY；监护下一轮才提交到 PBS。`automatic_pipeline` 返回已有自动流程是否启用，不取决于本次 start 的 phase。
 
 ## 8. Checkpoint、监护和中断
 
@@ -226,7 +242,7 @@ python3 -m compileall -q d4_mopd scripts/mopd.py tests/mopd
 bash -n d4_mopd/node.sh scripts/mopd_bootstrap.sh
 ```
 
-本次本地结果：**45 passed**。这些测试直接导入固定版本的上游 loss/config/teacher manager；缺少 upstream checkout 或导入失败会失败，不会用 skip 冒充通过。
+这些测试直接导入固定版本的上游 loss/config/teacher manager；缺少 upstream checkout 或导入失败会失败，不会用 skip 冒充通过。并行调度回归覆盖两种完成先后顺序、step4 新进程恢复、两组通过前禁止正式训练、已有冻结监护补登记 Only、pending 提交恢复，以及单组 271/265/查询超时/明确 FAIL 对另一组的隔离。
 
 ## 11. 文件导览
 

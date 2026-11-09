@@ -317,7 +317,8 @@ def qualification_receipt(manifest, target_arm, **overrides):
     write(control.task_root(manifest, "qualification", target_arm) / "receipt.json", proof)
 
 
-def test_pipeline_serializes_qualifications_then_starts_both_fresh_training_arms(manifest, tmp_path):
+@pytest.mark.parametrize("finish_order", [("domain_mix", "domain_only"), ("domain_only", "domain_mix")])
+def test_parallel_qualifications_gate_both_fresh_training_arms(manifest, tmp_path, finish_order):
     pipeline(manifest)
     class PBS:
         submissions = []
@@ -328,9 +329,11 @@ def test_pipeline_serializes_qualifications_then_starts_both_fresh_training_arms
             path = Path(job["folder"]) / "result.json"
             return dict(job_state="F", Exit_status=0) if path.exists() else dict(job_state="R")
     state, pbs = {}, PBS()
-    for arm in ("domain_mix", "domain_only"):
+    control.tick(manifest, state, pbs)
+    first_jobs = {arm: copy.deepcopy(state["qualification:" + arm]["job"]) for arm in finish_order}
+    assert [n for _, n in pbs.submissions] == ["0390_mp_qmix", "0390_mp_qonly"]
+    for arm in finish_order:
         key = "qualification:" + arm
-        control.tick(manifest, state, pbs)
         job = state[key]["job"]
         write(Path(job["folder"]) / "result.json", dict(status="RESUME_REQUIRED", step=4, identity=manifest["identity"], arm=arm))
         control.tick(manifest, state, pbs)
@@ -342,13 +345,15 @@ def test_pipeline_serializes_qualifications_then_starts_both_fresh_training_arms
         write(Path(second["folder"]) / "result.json", dict(status="PASS", step=8, resumed_from=4, identity=manifest["identity"], arm=arm))
         control.tick(manifest, state, pbs)
         assert state[key]["status"] == "DONE"
-        if arm == "domain_mix":
-            assert state["qualification:domain_only"]["status"] == "READY"
+        if arm == finish_order[0]:
+            peer = state["qualification:" + finish_order[1]]
+            assert peer["status"] == "R" and peer["job"] == first_jobs[finish_order[1]]
             assert not any(k.startswith("train:") for k in state)
     assert len(pbs.submissions) == 4
     assert state["train:domain_mix"]["status"] == state["train:domain_only"]["status"] == "READY"
     control.tick(manifest, state, pbs)
-    assert [n for _, n in pbs.submissions] == ["0390_mp_qmix"]*2 + ["0390_mp_qonly"]*2 + ["0390_mp_tmix", "0390_mp_tonly"]
+    resumed_names = ["0390_mp_qmix" if a == "domain_mix" else "0390_mp_qonly" for a in finish_order]
+    assert [n for _, n in pbs.submissions] == ["0390_mp_qmix", "0390_mp_qonly"] + resumed_names + ["0390_mp_tmix", "0390_mp_tonly"]
     # Formal attempts use separate empty checkpoint roots, never the qualification weights.
     for arm in ("domain_mix", "domain_only"):
         request = read(Path(state["train:"+arm]["job"]["folder"]) / "request.json")
@@ -384,7 +389,7 @@ def test_pipeline_restart_repairs_gap_and_blocked_qualification_never_promotes(m
     pipeline(manifest)
     state = {"qualification:domain_mix": dict(phase="qualification", arm="domain_mix", status="BLOCKED")}
     control.advance_pipeline(manifest, state)
-    assert len(state) == 1
+    assert len(state) == 2 and state["qualification:domain_only"]["status"] == "READY"
     state["qualification:domain_mix"]["status"] = "DONE"
     qualification_receipt(manifest, "domain_mix")
     control.advance_pipeline(manifest, state)
@@ -404,7 +409,7 @@ def test_pipeline_requires_bound_full_qualification_receipt(manifest, bad):
     qualification_receipt(manifest, "domain_mix", **bad)
     with pytest.raises(RuntimeError, match="qualification/reload"):
         control.advance_pipeline(manifest, state)
-    assert len(state) == 1
+    assert set(state) == {"qualification:domain_mix", "qualification:domain_only"}
 
 
 def test_pipeline_stop_prevents_submissions_and_automatic_transitions(manifest, tmp_path):
@@ -435,13 +440,132 @@ def test_pipeline_start_persists_intent_is_idempotent_and_respects_stop(manifest
     for _ in range(2):
         result = control.start(manifest["manifest_path"], "pipeline", ("domain_mix", "domain_only"))
         assert result["automatic_pipeline"]
-    assert list(read(tmp_path / "states.json")) == ["qualification:domain_mix"]
+    assert list(read(tmp_path / "states.json")) == ["qualification:domain_mix", "qualification:domain_only"]
     assert read(tmp_path / "pipeline.json")["arms"] == ["domain_mix", "domain_only"]
     with pytest.raises(RuntimeError, match="another identity/arms"):
         control.start(manifest["manifest_path"], "pipeline", ("domain_mix",))
     write(tmp_path / "STOP", {})
     with pytest.raises(RuntimeError, match="stopped"):
         control.start(manifest["manifest_path"], "pipeline", ("domain_mix", "domain_only"))
+
+
+def legacy_advance_pipeline_v1(m, state):
+    # Frozen 63d59e2 dispatcher. tick/guardian are unchanged by the parallel
+    # registration fix; exercise an existing guardian without replacing runtime.
+    from d4_mopd import ARMS
+    path = Path(m["manifest_path"]).parent / "pipeline.json"
+    if not path.exists():
+        return
+    p = read(path)
+    control.need(p["schema"] == "d4-mopd-pipeline-v1" and p["identity"] == m["identity"]
+                 and p["arms"] == [a for a in ARMS if a in p["arms"]] and p["arms"],
+                 "Pipeline identity or arm order changed")
+    for arm in p["arms"]:
+        s = state.setdefault("qualification:" + arm,
+                             dict(phase="qualification", arm=arm, status="READY", job=None, pending=None))
+        control.need(s["phase"] == "qualification" and s["arm"] == arm, "Pipeline qualification task changed")
+        if s["status"] != "DONE":
+            return
+        control.qualification_passed(m, arm)
+    for arm in p["arms"]:
+        state.setdefault("train:" + arm, dict(phase="train", arm=arm, status="READY", job=None, pending=None))
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("registration", ["pipeline", "qualification"])
+def test_existing_frozen_guardian_adds_only_without_restarting_mix(manifest, tmp_path, monkeypatch, pending, registration):
+    pipeline(manifest)
+    write(tmp_path / "manifest.json", manifest)
+    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"]))
+    frozen = tmp_path / "runtime/d4_mopd/control.py"
+    frozen.parent.mkdir(parents=True)
+    frozen.write_text("frozen runtime must remain unchanged\n")
+    protected = [tmp_path / n for n in ("manifest.json", "pipeline.json", "cpu_preflight.json")] + [frozen]
+    original = {p: p.read_bytes() for p in protected}
+    attempt = control.new_attempt(manifest, "qualification", "domain_mix")
+    job = dict(attempt, job_id="2893794.pbs1")
+    Path(attempt["folder"], "job_id.txt").write_text(job["job_id"])
+    mix = dict(phase="qualification", arm="domain_mix", status="READY" if pending else "Q",
+               job=None if pending else job, pending=attempt if pending else None)
+    write(tmp_path / "states.json", {"qualification:domain_mix": mix})
+    monkeypatch.setattr(control, "verify", lambda _: manifest)
+    monkeypatch.setattr(control, "active", lambda _: True)
+    def no_restart(*args, **kwargs):
+        raise AssertionError("must reuse the existing guardian")
+    monkeypatch.setattr(control.subprocess, "Popen", no_restart)
+    for _ in range(2):
+        result = control.start(manifest["manifest_path"], registration, ("domain_mix", "domain_only"))
+        assert result["automatic_pipeline"]
+        assert read(tmp_path / "states.json")["qualification:domain_mix"] == mix
+    class PBS:
+        submissions = []
+        def submit(self, folder, name):
+            # An accepted-but-pending qsub is recovered by its original path.
+            identity = Path(folder) / "job_id.txt"
+            if identity.exists():
+                return dict(folder=folder, job_name=name, job_id=identity.read_text())
+            self.submissions.append(name)
+            return dict(folder=folder, job_name=name, job_id=f"new-{len(self.submissions)}.pbs1")
+        def observe(self, job):
+            return dict(job_state="Q")
+    # The updated checkout registers tasks; the already-running guardian keeps
+    # its frozen dispatcher and consumes the same shared state table.
+    monkeypatch.setattr(control, "advance_pipeline", legacy_advance_pipeline_v1)
+    state, pbs = read(tmp_path / "states.json"), PBS()
+    control.tick(manifest, state, pbs)
+    assert state["qualification:domain_mix"]["job"] == job
+    only_job = copy.deepcopy(state["qualification:domain_only"]["job"])
+    control.tick(manifest, state, pbs)
+    assert state["qualification:domain_only"]["job"] == only_job
+    assert pbs.submissions == ["0390_mp_qonly"]
+    # Only may finish first under the old guardian; formal training still waits.
+    qualification_receipt(manifest, "domain_only")
+    state["qualification:domain_only"]["status"] = "DONE"
+    control.tick(manifest, state, pbs)
+    assert not any(k.startswith("train:") for k in state)
+    qualification_receipt(manifest, "domain_mix")
+    state["qualification:domain_mix"]["status"] = "DONE"
+    control.tick(manifest, state, pbs)
+    assert pbs.submissions == ["0390_mp_qonly", "0390_mp_tmix", "0390_mp_tonly"]
+    assert all(p.read_bytes() == value for p, value in original.items())
+
+
+@pytest.mark.parametrize("outcome", ["unknown", "271", "265", "application_fail"])
+def test_parallel_peer_continues_during_interruption_or_observation_error(manifest, tmp_path, outcome):
+    pipeline(manifest)
+    class PBS:
+        submissions = []
+        interrupted = False
+        def submit(self, folder, name):
+            self.submissions.append(name)
+            return dict(folder=folder, job_name=name, job_id=f"{len(self.submissions)}.pbs1")
+        def observe(self, job):
+            if job["job_id"] == "1.pbs1":
+                if outcome == "unknown":
+                    raise Unknown("qstat timeout")
+                if not self.interrupted:
+                    self.interrupted = True
+                    return dict(job_state="F", Exit_status=271 if outcome == "application_fail" else int(outcome),
+                                comment="terminated by root@login3")
+            return dict(job_state="R")
+    state, pbs = {}, PBS()
+    control.tick(manifest, state, pbs)
+    mix, only = state["qualification:domain_mix"], state["qualification:domain_only"]
+    old_mix, old_only = copy.deepcopy(mix["job"]), copy.deepcopy(only["job"])
+    if outcome == "application_fail":
+        write(Path(old_mix["folder"]) / "result.json", dict(status="FAIL", error="explicit failure"))
+    control.tick(manifest, state, pbs)
+    assert only["status"] == "R" and only["job"] == old_only
+    if outcome in ("271", "265"):
+        assert mix["status"] == "READY" and mix["job"] is None
+        assert mix["external_interruptions"] == 1
+    else:
+        assert mix["job"] == old_mix
+        assert mix["status"] == ("BLOCKED" if outcome == "application_fail" else "SUBMITTED")
+    control.tick(manifest, state, pbs)
+    assert pbs.submissions == ["0390_mp_qmix", "0390_mp_qonly"] + (["0390_mp_qmix"] if outcome in ("271", "265") else [])
+    assert only["job"] == old_only
+    assert not any(k.startswith("train:") for k in state)
 
 
 def test_retention_keeps_two_latest_and_best_with_complete_history(tmp_path):
