@@ -2,10 +2,12 @@
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
 import sys
+import traceback
 
 from . import ARMS, DOMAINS
 from .assets import verify
@@ -15,6 +17,58 @@ from d4_teachers.common import digest, file_sha, need, now, read, write
 LOCKED = {"torch": "2.13.0", "ray": "2.55.1", "tensordict": "0.10.0",
           "torchdata": "0.11.0", "transformers": "5.16.1", "vllm": "0.32.0",
           "megatron-core": "0.19.2", "megatron-bridge": "0.6.2", "transformer-engine": "2.20.2"}
+
+
+def glibc_requirements(output):
+    """Only version NEEDS, not definitions or GLIBCXX requirements."""
+    needs = output.split("Version needs section", 1)
+    if len(needs) == 1:
+        return []
+    section = needs[1].split("\nVersion ", 1)[0]
+    return sorted({tuple(map(int, v.split(".")))
+                   for v in re.findall(r"Name: GLIBC_(\d+(?:\.\d+)+)\b", section)})
+
+
+def native_abi():
+    """No GPU/driver import: inspect native wheelhouse ELF version requirements."""
+    libc = os.confstr("CS_GNU_LIBC_VERSION")
+    need(libc and libc.startswith("glibc "), "Native preflight requires Linux/glibc")
+    host = tuple(map(int, libc.split()[1].split(".")))
+    # ABCI compute nodes use glibc 2.34. A newer login host must not bless a
+    # binary that will fail in the compute allocation.
+    target = min(host, (2, 34))
+    records, incompatible = [], []
+    for package in ("transformer-engine", "apex", "flash-attn"):
+        dist = importlib.metadata.distribution(package)
+        binaries = []
+        for file in dist.files or []:
+            if ".so" not in Path(file).name:
+                continue
+            path = Path(dist.locate_file(file)).resolve()
+            with path.open("rb") as stream:
+                if stream.read(4) != b"\x7fELF":
+                    continue
+            binaries.append(path)
+        need(binaries, f"No native ELF files recorded for {package}")
+        for path in sorted(set(binaries)):
+            p = subprocess.run(["readelf", "--version-info", "--wide", str(path)],
+                               capture_output=True, text=True, timeout=60, check=True,
+                               env={**os.environ, "LC_ALL": "C"})
+            required = max(glibc_requirements(p.stdout), default=(0,))
+            row = dict(package=package, version=dist.version, path=str(path), sha256=file_sha(path),
+                       required_glibc=".".join(map(str, required)))
+            records.append(row)
+            if required > target:
+                incompatible.append(row)
+    return dict(status="FAIL" if incompatible else "PASS", host_glibc=libc,
+                target_glibc=".".join(map(str, target)), files=records, incompatible=incompatible,
+                scope="ELF GLIBC requirements only; CUDA/CXX/kernel tests remain GPU qualification")
+
+
+def require_native_abi(proof):
+    need(proof["status"] == "PASS", "Native GLIBC preflight failed: " + "; ".join(
+        f"{r['path']} requires GLIBC_{r['required_glibc']} > {proof['target_glibc']}"
+        for r in proof["incompatible"]))
 
 
 def environment(*, gpu_packages=False):
@@ -44,6 +98,17 @@ def validate_native_config(config):
 
 
 def cpu(manifest_path):
+    path = Path(manifest_path).parent / "cpu_preflight.json"
+    # Never leave an earlier PASS usable after a failed repeat preflight.
+    write(path, dict(status="RUNNING", at_utc=now()))
+    try:
+        return _cpu(manifest_path)
+    except Exception as exc:
+        write(path, dict(status="FAIL", error=str(exc), traceback=traceback.format_exc(), at_utc=now()))
+        raise
+
+
+def _cpu(manifest_path):
     import pyarrow.parquet as pq
     from transformers import AutoTokenizer
     from omegaconf import OmegaConf
@@ -53,6 +118,9 @@ def cpu(manifest_path):
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(),
          "Run CPU preflight with the NEW pinned verl interpreter recorded at prepare")
     versions = environment(gpu_packages=True)
+    abi = native_abi()
+    write(Path(manifest_path).parent / "native_abi.json", abi)
+    require_native_abi(abi)
     import verl
     need(Path(verl.__file__).resolve().parent.parent == Path(m["verl_src"]), "Another verl shadows the pinned checkout")
     base = AutoTokenizer.from_pretrained(m["student"]["path"], local_files_only=True)
@@ -104,7 +172,7 @@ def cpu(manifest_path):
                        input='{"import_only":true}', capture_output=True, text=True, timeout=120)
     need(p.returncode == 0, "Original verifier environment failed to import: " + p.stderr[-3000:])
     proof = dict(status="PASS", identity=m["identity"], scope="cpu-assets-config-tokenization",
-                 versions=versions, configs=configs, tokenizer_fingerprint=fingerprint,
+                 versions=versions, native_abi=abi, configs=configs, tokenizer_fingerprint=fingerprint,
                  prompt_budget_matched=True, domain_exposure=exposure,
                  validation=m["data_summary"]["validation"],
                  domain_only_schedule="iid_uniform; exposure equal only in expectation",
@@ -126,6 +194,16 @@ def cpu(manifest_path):
 
 
 def gpu_node(manifest_path, folder, rank):
+    try:
+        return _gpu_node(manifest_path, folder, rank)
+    except Exception as exc:
+        write(Path(folder) / f"gpu_node_{rank}.json",
+              dict(status="FAIL", rank=rank, stage="gpu-node-preflight", error=str(exc),
+                   traceback=traceback.format_exc(), at_utc=now()))
+        raise
+
+
+def _gpu_node(manifest_path, folder, rank):
     import torch
     m = verify(manifest_path, models=False)
     versions = environment(gpu_packages=True)

@@ -163,9 +163,83 @@ def test_selection_score_has_four_domains_and_equal_math_sources():
 def test_formal_start_requires_arm_specific_gpu_resume_proof(manifest, tmp_path, monkeypatch):
     from d4_mopd import control
     monkeypatch.setattr(control, "verify", lambda p: manifest)
-    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"]))
+    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], native_abi={"status":"PASS"}))
     q = tmp_path / "qualification/domain_mix/receipt.json"
     write(q, dict(status="PASS", identity=manifest["identity"], resumed_from=0))
     with pytest.raises(RuntimeError, match="qualification"):
         control.start(manifest["manifest_path"], "train", ["domain_mix"])
     assert not (tmp_path / "states.json").exists()
+
+
+def test_glibc_audit_uses_needed_versions_not_definitions():
+    from d4_mopd.preflight import glibc_requirements
+    text = ("Version definition section '.gnu.version_d' contains 1 entry:\n"
+            "  Name: GLIBC_2.99\n"
+            "Version needs section '.gnu.version_r' contains 3 entries:\n"
+            "  Name: GLIBC_2.9 Flags: none\n  Name: GLIBC_2.34 Flags: none\n"
+            "  Name: GLIBCXX_3.4.32\n  Name: GLIBC_PRIVATE\n")
+    assert glibc_requirements(text) == [(2, 9), (2, 34)]
+    assert glibc_requirements("No version information found in this file.") == []
+
+
+@pytest.mark.parametrize("host", ["glibc 2.34", "glibc 2.40"])
+def test_abi_audit_catches_the_uploaded_failure_before_gpu_import(tmp_path, monkeypatch, host):
+    from pathlib import Path
+    from d4_mopd import preflight
+    paths = {}
+    for name in ("transformer-engine", "apex", "flash-attn"):
+        path = tmp_path / name / "library.so"
+        path.parent.mkdir()
+        path.write_bytes(b"\x7fELFsynthetic")
+        paths[name] = path
+    def dist(name):
+        return SimpleNamespace(version="2.20.2", files=[paths[name]], locate_file=lambda f:f)
+    monkeypatch.setattr(preflight.importlib.metadata, "distribution", dist)
+    monkeypatch.setattr(preflight.os, "confstr", lambda _:host)
+    def readelf(args, **kw):
+        version = "2.38" if Path(args[-1]) == paths["transformer-engine"] else "2.28"
+        return SimpleNamespace(stdout="Version needs section '.gnu.version_r':\n  Name: GLIBC_"+version)
+    monkeypatch.setattr(preflight.subprocess, "run", readelf)
+    audit = preflight.native_abi()
+    assert audit["target_glibc"] == "2.34" and len(audit["incompatible"]) == 1
+    with pytest.raises(RuntimeError, match="GLIBC_2.38"):
+        preflight.require_native_abi(audit)
+
+
+def test_failed_repeat_cpu_preflight_invalidates_old_pass(tmp_path, monkeypatch):
+    from d4_mopd import preflight
+    from d4_teachers.common import read
+    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity="old"))
+    def fail(_): raise OSError("GLIBC_2.38 not found")
+    monkeypatch.setattr(preflight, "_cpu", fail)
+    with pytest.raises(OSError): preflight.cpu(tmp_path / "manifest.json")
+    assert read(tmp_path / "cpu_preflight.json")["status"] == "FAIL"
+
+
+def test_gpu_import_error_is_persisted(tmp_path, monkeypatch):
+    from d4_mopd import preflight
+    from d4_teachers.common import read
+    def fail(*args): raise OSError("GLIBC_2.38 not found")
+    monkeypatch.setattr(preflight, "_gpu_node", fail)
+    with pytest.raises(OSError): preflight.gpu_node(tmp_path / "manifest.json", tmp_path, 1)
+    result = read(tmp_path / "gpu_node_1.json")
+    assert result["status"] == "FAIL" and "GLIBC_2.38" in result["traceback"]
+
+
+def test_node_shell_records_failure_before_ray(tmp_path):
+    from pathlib import Path
+    import os
+    import subprocess
+    folder = tmp_path / "attempt"
+    folder.mkdir()
+    fake = tmp_path / "python"
+    fake.write_text('#!/bin/bash\nif [[ "$3" == paths ]]; then echo /unused; exit 0; fi\nexit 17\n')
+    fake.chmod(0o755)
+    (folder / "python.txt").write_text(str(fake))
+    script = Path(__file__).resolve().parents[2] / "d4_mopd/node.sh"
+    p = subprocess.run(["bash", str(script), str(folder / "request.json")],
+                       env={**os.environ, "OMPI_COMM_WORLD_RANK":"0", "PBS_LOCALDIR":str(tmp_path)},
+                       capture_output=True, text=True, timeout=15)
+    assert p.returncode == 17, p.stderr
+    assert (folder / "finished").read_text().strip() == "17"
+    assert not list(folder.glob("ray_*.log"))

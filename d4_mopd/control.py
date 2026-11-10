@@ -11,7 +11,7 @@ import uuid
 
 from . import ARMS
 from .assets import verify
-from d4_teachers.common import active, lock, need, now, read, write
+from d4_teachers.common import active, file_sha, lock, need, now, read, write
 from d4_training_continuation.common import atomic_text, locked
 from d4_training_continuation.scheduler import PBS, Unknown, finished
 from d4_teachers.controller import retry_reason
@@ -149,6 +149,13 @@ def tick(m, state, pbs):
                 continue
             result_path = Path(job["folder"]) / "result.json"
             result = read(result_path) if result_path.exists() else {}
+            if not result:
+                for rank in (0, 1):
+                    path = Path(job["folder"]) / f"gpu_node_{rank}.json"
+                    node = read(path) if path.exists() else {}
+                    if node.get("status") == "FAIL":
+                        result = dict(status="FAIL", error=f"GPU node {rank} preflight: " + node["error"])
+                        break
             if str(row.get("Exit_status")) == "0" and result.get("status") == "PASS":
                 need(result.get("identity") == m["identity"], "Unbound success receipt")
                 if s["phase"] == "qualification":
@@ -231,6 +238,7 @@ def start(manifest_path, phase, arms):
     need(not (root / "STOP").exists(), "Experiment is stopped; use resume-control explicitly")
     proof = read(root / "cpu_preflight.json")
     need(proof["status"] == "PASS" and proof["identity"] == m["identity"], "CPU preflight has not passed")
+    need(proof.get("native_abi", {}).get("status") == "PASS", "Repeat CPU preflight with the native GLIBC check")
     if phase == "train":
         for arm in arms:
             qualification_passed(m, arm)
@@ -264,3 +272,101 @@ def start(manifest_path, phase, arms):
     return dict(status="REGISTERED", tasks=list(state), manifest=m["manifest_path"],
                 automatic_pipeline=(root / "pipeline.json").exists(),
                 note="Use status to confirm the guardian heartbeat and PBS submission")
+
+
+def quiescent_qualifications(m, state, pbs):
+    """Environment repair is only supported before qualification has progressed."""
+    need(state and all(s["phase"] == "qualification" and s["status"] == "BLOCKED"
+                       and s.get("job") and not s.get("pending") for s in state.values()),
+         "Repair requires only BLOCKED qualification jobs, with no pending submissions")
+    observations = {}
+    for key, s in state.items():
+        observations[key] = pbs.observe(s["job"])
+        need(finished(observations[key]), "Qualification PBS job is still active: " + key)
+        run = task_root(m, "qualification", s["arm"])
+        need(not (run / "receipt.json").exists()
+             and not any((run / "checkpoints").glob("global_step_*")),
+             "Qualification already produced progress; environment replacement requires a new experiment")
+    return observations
+
+
+def repair_te(manifest_path):
+    """Rebuild the pinned package without changing the frozen learner/runtime."""
+    from .preflight import environment, native_abi, require_native_abi
+    import importlib.metadata
+    import shutil
+    m = verify(manifest_path)
+    root = Path(manifest_path).parent
+    need(Path(sys.executable).absolute() == Path(m["python"]).absolute(), "Use the manifest interpreter")
+    def packages():
+        return {d.metadata["Name"].lower().replace("_", "-"): d.version
+                for d in importlib.metadata.distributions()}
+    # Shared locks, no PID signalling or original-login-host requirement.
+    with lock(root / "launch.lock"), locked(root / "guardian.lock"), lock(root / "states.lock"):
+        states = read(root / "states.json") if (root / "states.json").exists() else {}
+        observations = quiescent_qualifications(m, states, PBS()) if states else {}
+        before = packages()
+        versions = environment(gpu_packages=True)
+        audit = root / "environment_repairs" / uuid.uuid4().hex
+        audit.mkdir(parents=True)
+        write(audit / "before.json", dict(identity=m["identity"], packages=before, states=states,
+                                          pbs=observations, native_abi=native_abi(), at_utc=now()))
+        script = Path(__file__).resolve().parents[1] / "scripts/mopd_bootstrap.sh"
+        shutil.copy2(script, audit / "build.sh")
+        proof = root / "cpu_preflight.json"
+        if proof.exists():
+            shutil.copy2(proof, audit / "previous_cpu_preflight.json")
+        write(proof, dict(status="INVALIDATED", reason="Transformer Engine native rebuild", at_utc=now()))
+        try:
+            print("Native build log and audit: " + str(audit), flush=True)
+            subprocess.run(["bash", str(audit / "build.sh"), m["verl_src"], "--rebuild-te", str(audit)], check=True)
+            after = packages()
+            need(all(after.get(k) == v for k, v in before.items()), "An existing dependency version changed")
+            need(set(after) - set(before) <= {"wheel", "pybind11"}, "Unexpected new dependency")
+            need(environment(gpu_packages=True) == versions, "Pinned training environment changed")
+            abi = native_abi()
+            require_native_abi(abi)
+            result = dict(status="PASS", identity=m["identity"], versions=versions, native_abi=abi,
+                          build=read(audit / "build_receipt.json"), at_utc=now(),
+                          next_step="Run preflight, then retry-qualification; no GPU test has passed yet")
+            write(audit / "result.json", result)
+            write(root / "environment_repair.json", dict(result, audit=str(audit)))
+            return result
+        except Exception as exc:
+            write(audit / "result.json", dict(status="FAIL", error=str(exc), at_utc=now()))
+            raise
+
+
+def retry_qualification(manifest_path, arms):
+    """Explicit one-shot rearm after repair; ordinary start never clears BLOCKED."""
+    from .preflight import environment, native_abi, require_native_abi
+    m = verify(manifest_path)
+    root = Path(manifest_path).parent
+    need(list(arms) == [a for a in ARMS if a in arms] and arms, "Invalid arms")
+    need(not (root / "STOP").exists(), "Experiment is stopped")
+    with lock(root / "launch.lock"), locked(root / "guardian.lock"), lock(root / "states.lock"):
+        proof = read(root / "cpu_preflight.json")
+        need(proof.get("status") == "PASS" and proof.get("identity") == m["identity"]
+             and proof.get("native_abi", {}).get("status") == "PASS", "Repeat the updated CPU preflight first")
+        need(environment(gpu_packages=True) == proof["versions"], "Environment changed after preflight")
+        abi = native_abi()
+        require_native_abi(abi)
+        need(abi["files"] == proof["native_abi"]["files"], "Native binaries changed after preflight")
+        state = read(root / "states.json")
+        observations = quiescent_qualifications(m, state, PBS())
+        keys = ["qualification:" + a for a in arms]
+        need(all(k in state for k in keys), "Requested qualification is not registered")
+        audit = root / "qualification_retries" / (uuid.uuid4().hex + ".json")
+        write(audit, dict(identity=m["identity"], before=state, pbs=observations,
+                          cpu_preflight_sha256=file_sha(root / "cpu_preflight.json"), at_utc=now()))
+        for key in keys:
+            s = state[key]
+            s.update(status="READY", previous_job=s["job"], job=None, pending=None,
+                     previous_error=s.pop("error", None), explicit_retry=str(audit))
+            s.pop("pbs", None)
+        write(root / "states.json", state)
+    # This launches the existing immutable guardian. The repaired binary has the
+    # same package version; no manifest/runtime hash or experiment settings change.
+    if (root / "pipeline.json").exists():
+        return start(manifest_path, "pipeline", read(root / "pipeline.json")["arms"])
+    return start(manifest_path, "qualification", arms)

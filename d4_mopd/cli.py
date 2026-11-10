@@ -85,11 +85,12 @@ def main():
     create.add_argument("--verl-src", required=True)
     create.add_argument("--python", required=True, help="New upstream uv environment; never the teacher environment")
     create.add_argument("--spec")
-    for name in ("preflight", "guardian", "status", "stop", "resume-control", "start"):
+    for name in ("preflight", "guardian", "status", "stop", "resume-control", "start", "repair-te", "retry-qualification"):
         q = sub.add_parser(name)
         q.add_argument("--manifest", required=True)
         if name == "start":
             q.add_argument("--phase", choices=("pipeline", "qualification", "train", "test"), required=True)
+        if name in ("start", "retry-qualification"):
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
     for name in ("execute", "gpu-node", "paths"):
         q = sub.add_parser(name)
@@ -119,6 +120,10 @@ def main():
             sys.path.insert(0, read(path)["verl_src"])
             from .preflight import cpu
             result = cpu(path)
+        elif a.command == "repair-te":
+            result = control.repair_te(path)
+        elif a.command == "retry-qualification":
+            result = control.retry_qualification(path, ARMS if a.arm == "both" else (a.arm,))
         elif a.command == "guardian":
             control.guardian(path)
             return

@@ -9,6 +9,119 @@ from d4_teachers.common import read, write
 from d4_training_continuation.scheduler import Unknown
 
 
+def blocked_qualifications(manifest, tmp_path, monkeypatch):
+    from d4_mopd import preflight, ARMS
+    states = {}
+    for i, arm in enumerate(ARMS):
+        folder = tmp_path / "qualification" / arm / "attempts" / "failed"
+        folder.mkdir(parents=True)
+        (folder / "pbs.log").write_text("OSError: GLIBC_2.38 not found")
+        states["qualification:"+arm] = dict(phase="qualification", arm=arm, status="BLOCKED", pending=None,
+            error="Unclassified terminal job; inspect logs",
+            job=dict(folder=str(folder), job_name="0390_mp_q"+arm, job_id=f"{10+i}.pbs1"))
+    abi = dict(status="PASS", files=[dict(sha256="repaired")], incompatible=[])
+    write(tmp_path / "states.json", states)
+    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], versions={}, native_abi=abi))
+    write(tmp_path / "pipeline.json", dict(schema="d4-mopd-pipeline-v1", identity=manifest["identity"], arms=list(ARMS)))
+    monkeypatch.setattr(control, "verify", lambda _:manifest)
+    monkeypatch.setattr(preflight, "environment", lambda **_: {})
+    monkeypatch.setattr(preflight, "native_abi", lambda:abi)
+    class PBS:
+        def observe(self, job): return dict(job_state="F", Exit_status=1)
+    monkeypatch.setattr(control, "PBS", PBS)
+    return states, abi
+
+
+def test_explicit_retry_preserves_failures_and_parallel_pipeline_barrier(manifest, tmp_path, monkeypatch):
+    from d4_mopd import ARMS
+    states, _ = blocked_qualifications(manifest, tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(control, "start", lambda *args:calls.append(args) or dict(status="REGISTERED"))
+    control.retry_qualification(manifest["manifest_path"], ARMS)
+    current = read(tmp_path / "states.json")
+    assert calls == [(manifest["manifest_path"], "pipeline", list(ARMS))]
+    assert {s["status"] for s in current.values()} == {"READY"}
+    for key, old in states.items():
+        assert current[key]["previous_job"] == old["job"]
+        assert Path(old["job"]["folder"], "pbs.log").read_text().startswith("OSError")
+        assert read(current[key]["explicit_retry"])["before"] == states
+    control.advance_pipeline(manifest, current)
+    assert not any(s["phase"] == "train" for s in current.values())
+    # A repeated command cannot erase a fresh pending/running submission.
+    with pytest.raises(RuntimeError, match="BLOCKED"):
+        control.retry_qualification(manifest["manifest_path"], ARMS)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("condition", ["active", "unknown", "pending", "checkpoint", "old_proof", "binary_change", "guardian"])
+def test_explicit_retry_refuses_ambiguous_or_changed_state(manifest, tmp_path, monkeypatch, condition):
+    from contextlib import ExitStack
+    from d4_mopd import ARMS, preflight
+    from d4_training_continuation.common import locked
+    states, abi = blocked_qualifications(manifest, tmp_path, monkeypatch)
+    key = "qualification:domain_mix"
+    if condition in ("active", "unknown"):
+        class PBS:
+            def observe(self, job):
+                if condition == "unknown": raise Unknown("qstat timeout")
+                return dict(job_state="R")
+        monkeypatch.setattr(control, "PBS", PBS)
+    if condition == "pending":
+        states[key]["pending"] = {"folder":"ambiguous"}
+        write(tmp_path / "states.json", states)
+    if condition == "checkpoint":
+        (tmp_path / "qualification/domain_mix/checkpoints/global_step_4").mkdir(parents=True)
+    if condition == "old_proof":
+        write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], versions={}))
+    if condition == "binary_change":
+        monkeypatch.setattr(preflight, "native_abi", lambda:dict(abi, files=[dict(sha256="changed")]))
+    monkeypatch.setattr(control, "start", lambda *a:pytest.fail("must not launch"))
+    with ExitStack() as stack:
+        if condition == "guardian": stack.enter_context(locked(tmp_path / "guardian.lock"))
+        with pytest.raises((RuntimeError, BlockingIOError, Unknown)):
+            control.retry_qualification(manifest["manifest_path"], ARMS)
+    assert read(tmp_path / "states.json") == states
+    assert not list((tmp_path / "qualification_retries").glob("*.json"))
+
+
+def test_structured_node_error_blocks_instead_of_external_retry(manifest, tmp_path):
+    folder, job, state = running(manifest, tmp_path)
+    write(folder / "gpu_node_1.json", dict(status="FAIL", error="GLIBC_2.38 not found"))
+    class PBS:
+        def observe(self, job): return dict(job_state="F", Exit_status=271, comment="terminated by root@login3")
+    control.tick(manifest, state, PBS())
+    s = state["train:domain_mix"]
+    assert s["status"] == "BLOCKED" and "GLIBC_2.38" in s["error"]
+
+
+@pytest.mark.parametrize("build_fails", [False, True])
+def test_environment_repair_keeps_states_frozen_and_requires_new_preflight(manifest, tmp_path, monkeypatch, build_fails):
+    import subprocess
+    import importlib.metadata
+    from types import SimpleNamespace
+    states, _ = blocked_qualifications(manifest, tmp_path, monkeypatch)
+    before = read(tmp_path / "cpu_preflight.json")
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda:[SimpleNamespace(metadata={"Name":"torch"}, version="2.13.0")])
+    def build(args, **kwargs):
+        assert args[3] == "--rebuild-te"
+        assert read(tmp_path / "cpu_preflight.json")["status"] == "INVALIDATED"
+        assert control.active(tmp_path / "guardian.lock")
+        if build_fails: raise subprocess.CalledProcessError(1, args)
+        write(Path(args[4]) / "build_receipt.json", dict(source_revision="pinned", sha256="wheel"))
+    monkeypatch.setattr(control.subprocess, "run", build)
+    if build_fails:
+        with pytest.raises(subprocess.CalledProcessError): control.repair_te(manifest["manifest_path"])
+    else:
+        assert control.repair_te(manifest["manifest_path"])["status"] == "PASS"
+    assert read(tmp_path / "states.json") == states
+    assert read(tmp_path / "cpu_preflight.json")["status"] == "INVALIDATED"
+    audits = list((tmp_path / "environment_repairs").iterdir())
+    assert len(audits) == 1
+    assert read(audits[0] / "previous_cpu_preflight.json") == before
+    assert read(audits[0] / "result.json")["status"] == ("FAIL" if build_fails else "PASS")
+    assert not control.active(tmp_path / "guardian.lock")
+
+
 def checkpoint(root, step, identity="id", arm="domain_mix"):
     folder = root / f"global_step_{step}"
     actor = folder / "actor"
@@ -436,7 +549,7 @@ def test_wrong_arm_job_success_is_not_a_qualification_pass(manifest, tmp_path):
 def test_pipeline_start_persists_intent_is_idempotent_and_respects_stop(manifest, tmp_path, monkeypatch):
     monkeypatch.setattr(control, "verify", lambda _: manifest)
     monkeypatch.setattr(control, "active", lambda _: True)
-    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"]))
+    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], native_abi={"status":"PASS"}))
     for _ in range(2):
         result = control.start(manifest["manifest_path"], "pipeline", ("domain_mix", "domain_only"))
         assert result["automatic_pipeline"]
@@ -476,7 +589,7 @@ def legacy_advance_pipeline_v1(m, state):
 def test_existing_frozen_guardian_adds_only_without_restarting_mix(manifest, tmp_path, monkeypatch, pending, registration):
     pipeline(manifest)
     write(tmp_path / "manifest.json", manifest)
-    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"]))
+    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], native_abi={"status":"PASS"}))
     frozen = tmp_path / "runtime/d4_mopd/control.py"
     frozen.parent.mkdir(parents=True)
     frozen.write_text("frozen runtime must remain unchanged\n")

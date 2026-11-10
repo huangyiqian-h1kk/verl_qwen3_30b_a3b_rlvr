@@ -2,7 +2,7 @@
 
 这份实现用于 mix rl 的基础实验：固定 Math50、IF70、CP80、Logic30，比较 **rollout=1 的 domain-mix 与 domain-only optimizer batch**。训练只有蒸馏信号。原 teacher campaign 作为只读输入，新实验、环境、日志和 checkpoint 使用独立目录。
 
-**验收状态：本地 CPU 测试和 ABCI CPU preflight 已通过；ABCI GPU 资格测试已提交，尚无通过记录。** 本地没有 ABCI 模型文件、PBS 或 GPU，不能据此宣称 Qwen3-30B-A3B 的分布式训练已经跑通。`start --phase pipeline --arm both` 会并行调度两组 GPU 资格测试，全部通过后自动提交两个正式训练任务，随后各自执行最终 test。
+**验收状态：两组 ABCI GPU 资格测试在 Transformer Engine 导入时失败，尚未进入 Ray/训练。** `2893794.pbs1`、`2893931.pbs1` 均为 exit 1，wheelhouse 的 `libtransformer_engine.so` 要求 `GLIBC_2.38`。此前 CPU preflight 只验包版本，未拦住系统 ABI 不兼容；本次补上原生库检查、同版本源码重建及显式重试入口。本地没有 ABCI 模型文件、PBS 或 GPU，不能据此宣称源码构建或 Qwen3-30B-A3B 分布式训练已经跑通。`start --phase pipeline --arm both` 会并行调度两组 GPU 资格测试，全部通过后自动提交两个正式训练任务，随后各自执行最终 test。
 
 ## 1. 依据与固定版本
 
@@ -86,7 +86,7 @@ Validation 的 verifier performance 不参与训练采样、teacher 路由、los
 - Teacher 节点：4 个冻结 teacher，各 1 个 TP2 实例，总共 8 GPU。
 - 同时启动两个 arm 需要 4 节点/32 GPU。Domain-only 仍保留相同 teacher 资源预算，即使当前 batch 只用一个 teacher。
 
-该 pinned verl 的 `uv.lock` 使用 **PyTorch 2.13 / CUDA 13 / vLLM 0.32**。不能直接在原 teacher 的 CUDA 12.8 环境里 `pip install -U`。Bootstrap 创建单独环境；GPU preflight 检查扩展导入、BF16 运算和显存。ABCI driver 与该 CUDA 13 栈是否兼容仍需实机验证，检查不通过时不提交正式训练。
+该 pinned verl 的 `uv.lock` 使用 **PyTorch 2.13 / CUDA 13 / vLLM 0.32**。不能直接在原 teacher 的 CUDA 12.8 环境里 `pip install -U`。Bootstrap 创建单独环境；CPU preflight 用 `readelf` 检查 TE、Apex、FlashAttention 的 ELF **version needs**，要求不高于运行主机和 ABCI compute glibc 2.34 中的较低版本，并保存二进制 SHA256。它不加载 GPU，不验证 GLIBCXX、CUDA 或全部动态依赖；GPU preflight 继续检查真实扩展导入、BF16 运算和显存。ABCI driver 与该 CUDA 13 栈是否兼容仍需实机验证。
 
 两个正式 arm 在 200 步内共创建 80 份完整 checkpoint，但滚动保留每组最近 2 份和 validation 最佳，正常最多各 3 份；最佳在最近两份内时不重复保存。step200 终点属于最近两份，始终保留。另保留 4 份 qualification checkpoint 作为恢复证据。CPU preflight 分别估算稳态保留空间和两组各新增一份尚未清理时的峰值空间，按 BF16 权重×7 估算完整 Adam 训练状态；不包含中断留下的半成品，也不能验证项目 quota，需结合 ABCI quota 核对。
 
@@ -97,8 +97,8 @@ Teacher 推理 `max_model_len` 为 padding 上界与 prompt-logprob API 预留�
 | 层级 | 检查内容 | 当前证据 |
 |---|---|---|
 | 本地 CPU 软件测试 | 官方 Hydra/dataclass、原生 loss 与梯度、原生 teacher routing、数据 factory、token 对齐、采样/loader 恢复、checkpoint 与 PBS 状态机 | `tests/mopd` 已通过，见下面复跑命令 |
-| ABCI CPU preflight | 实际 base/teacher 导出身份、数据分割、prompt token hash、tokenizer、冻结 verifier、依赖与配置 | 用户回传 v3 的 PASS，时间为 2026-11-09T21:43:45Z |
-| ABCI GPU qualification | 真实四 teacher scoring、Megatron forward/backward/update、原生完整 checkpoint；step4 正常退出，再由新 PBS 进程恢复到 step8 | 用户回传 Mix 已提交；两个 arm 均尚无通过记录 |
+| ABCI CPU preflight | 实际导出/数据/分割/tokenizer/verifier/配置，以及原生 ELF glibc 要求 | 原 v3 PASS 未包含 ABI 检查；修复后必须重新执行 |
+| ABCI GPU qualification | 真实四 teacher scoring、Megatron forward/backward/update、原生完整 checkpoint；step4 正常退出，再由新 PBS 进程恢复到 step8 | 两组均在 TE 导入失败；尚无通过记录 |
 
 Qualification 使用 **B=8、8 updates、response 上限256**，从每域最长的两个训练 prompts 取测试样本；调试评估每域一个样本。这些数值是本项目适配层新增的 smoke/reload 调试设置，来自工程实现，不来自原始 MOPD 论文，也不属于正式训练超参数。路径位于 `qualification/`，不参与正式选模。它验证基本执行与恢复，**不证明 B2048/64K 的最坏长度吞吐和显存容量**。正式运行出现 OOM 会停在 BLOCKED，不会改 batch 或截断长度来伪装通过。
 
@@ -206,7 +206,35 @@ timeout 20s qstat -u "$USER" || true
 "$mopd_python" -I scripts/mopd.py resume-control --manifest "$mopd_manifest"
 ```
 
-## 9. 查看结果与测量时间
+## 9. 修复 2026-11-10 的 TE/glibc 启动失败
+
+失败发生在 `gpu-node` 导入 `transformer_engine.pytorch` 时；两台计算节点均报告 `libtransformer_engine.so` 需要 `GLIBC_2.38`。PBS exit 1 作为应用错误保持 BLOCKED。`start` / `resume-control` 不清除该状态。用户后来中断 `sleep` 不影响此前已失败的独立 PBS job。
+
+本次使用 NVIDIA TE v2.20.2 源码 commit `6ea2a74a9e98c99e6d7b164a33775cc457520027` 重建整个 monolithic wheel；遵循 [NVIDIA 源码安装方式](https://docs.nvidia.com/deeplearning/transformer-engine/installation.html)，并保持 [verl cu130 wheelhouse](https://github.com/verl-project/verl-wheelhouse/blob/main/ci/build_scripts/transformer_engine.sh) 的 PyTorch-only / `NVTE_WITH_NCCL_EP=0` 设置。使用 gcc13.2/CUDA13.0.1、现有环境的 cuDNN/NCCL 头文件，只编译 H200 的 SM90；编译并发为 1。已有依赖版本必须全部保持不变，只允许补入缺少的 wheel、pybind11 构建工具。先生成 wheel，再 `--no-deps --reinstall`；不会修改系统 glibc。
+
+`repair-te` 可从任一 ABCI 登录节点运行，不需要原 guardian 所在主机。它持有共享控制锁、验证旧 PBS 作业已终止且资格测试没有 checkpoint，备份并作废旧 CPU PASS，记录源码、编译参数、二进制哈希和依赖清单；构建失败时不放行任务。也支持尚未提交任何任务的新 manifest。命令有现场编译过程，完成前请保持会话；如被中断，后续从同一命令重新构建，原任务记录保持 BLOCKED。源码构建 wheel 保存在实验的 `environment_repairs/<id>/wheels/`，详细输出在 `build.log`。构建成功不代表 GPU 验收成功。
+
+```bash
+(
+set -euo pipefail
+cd /groups/gcg51557/experiments/0390_rlsd/RLVR/data_mixture_rl_4d_mopd
+git fetch --no-tags origin codex/d4-mopd-baseline
+git merge --ff-only FETCH_HEAD
+mopd_python=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd/.venv/bin/python
+mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_roll2_v3/manifest.json"
+"$mopd_python" -I scripts/mopd.py repair-te --manifest "$mopd_manifest"
+"$mopd_python" -I scripts/mopd.py preflight --manifest "$mopd_manifest"
+"$mopd_python" -I scripts/mopd.py retry-qualification --manifest "$mopd_manifest" --arm both
+"$mopd_python" -I scripts/mopd.py status --manifest "$mopd_manifest"
+timeout 20s qstat -u "$USER" || true
+)
+```
+
+`retry-qualification` 重验 ABI 文件哈希和版本、重新查询旧 job 的 PBS 终态，归档原 state 后一次性放行两个 arm；UNKNOWN、仍运行、已有 checkpoint、guardian 活跃或待确认 qsub 时拒绝重置，不 qdel，不清理旧 attempt。重新启动现有并行 pipeline：两组各完成 step4→新进程恢复到 step8 后，才自动开始正式训练。失败仍为 BLOCKED，不循环重试应用错误；271 等外部中断恢复策略不变。
+
+本次保留 v3 的 manifest、冻结 runtime、模型、数据及训练设置；同版本 TE 的编译来源另存审计。新增的 GPU 失败 JSON 和 shell 早期退出记录只会进入**以后新 prepare 的 runtime**，不原地修改 v3 快照。当前 v3 通过新版 checkout 执行 CPU preflight 和显式重试，再由原有冻结 guardian 接管。修复后不要手工 `uv sync`，它会重新安装锁文件里的 wheelhouse 包；bootstrap 看到源码构建标记也会拒绝覆盖。新实验第一次提交可在修复、preflight 后使用普通 `start`。
+
+## 10. 查看结果与测量时间
 
 `status` 返回 guardian 锁、heartbeat、自动流程计划、每个任务及上次 PBS 观察，以及每个 arm 的 checkpoint 保留/删除记录。每个 `runs/<arm>/attempts/<id>/` 保留：
 

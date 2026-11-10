@@ -5,21 +5,6 @@ mopd_request=${1:?}
 mopd_folder=$(dirname "$mopd_request")
 mopd_rank=${OMPI_COMM_WORLD_RANK:?MPI allocation required}
 mopd_python=$(cat "$mopd_folder/python.txt")
-export D4_MOPD_ATTEMPT
-D4_MOPD_ATTEMPT=$(basename "$mopd_folder")
-export PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
-export CUDA_DEVICE_MAX_CONNECTIONS=1 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-# Both packages come from this experiment's immutable snapshot/pinned upstream.
-export PYTHONPATH
-PYTHONPATH=$("$mopd_python" -I "$mopd_folder/entry.py" paths --request "$mopd_request")
-unset PYTHONHOME
-export RAY_TMPDIR="${PBS_LOCALDIR:?}/mopd_${D4_MOPD_ATTEMPT}"
-mkdir -p "$RAY_TMPDIR"
-# Drop MPI rank variables before spawning Ray/torch distributed workers.
-while IFS='=' read -r mopd_env _; do
-  case "$mopd_env" in OMPI_*|PMI_*|PMIX_*|MPI_*) unset "$mopd_env" ;; esac
-done < <(env)
-"$mopd_python" -I "$mopd_folder/entry.py" gpu-node --request "$mopd_request" --rank "$mopd_rank"
 mopd_ray_started=0
 cleanup() {
   mopd_status=$?
@@ -36,6 +21,21 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
+export D4_MOPD_ATTEMPT
+D4_MOPD_ATTEMPT=$(basename "$mopd_folder")
+export PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+# Both packages come from this experiment's immutable snapshot/pinned upstream.
+export PYTHONPATH
+PYTHONPATH=$("$mopd_python" -I "$mopd_folder/entry.py" paths --request "$mopd_request")
+unset PYTHONHOME
+export RAY_TMPDIR="${PBS_LOCALDIR:?}/mopd_${D4_MOPD_ATTEMPT}"
+mkdir -p "$RAY_TMPDIR"
+# Drop MPI rank variables before spawning Ray/torch distributed workers.
+while IFS='=' read -r mopd_env _; do
+  case "$mopd_env" in OMPI_*|PMI_*|PMIX_*|MPI_*) unset "$mopd_env" ;; esac
+done < <(env)
+"$mopd_python" -I "$mopd_folder/entry.py" gpu-node --request "$mopd_request" --rank "$mopd_rank"
 mopd_ip=$("$mopd_python" -c 'import socket; print(socket.gethostbyname(socket.gethostname()))')
 if [[ "$mopd_rank" == 0 ]]; then
   mopd_port=$("$mopd_python" -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
