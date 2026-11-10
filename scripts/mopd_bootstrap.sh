@@ -1,5 +1,49 @@
 #!/bin/bash
 # Separate upstream installation: do not upgrade the deployed teacher environment.
+
+mopd_te_toolchain() {
+  local mopd_python=$1 mopd_audit=$2 mopd_candidate mopd_cuda_module='' mopd_nvcc
+  if ! type module >/dev/null 2>&1; then source /etc/profile.d/modules.sh; fi
+  module -t avail cuda > "$mopd_audit/cuda_modules.txt" 2>&1 || true
+  : > "$mopd_audit/module_probe.log"
+  # ABCI uses cuda/<major.minor>/<toolkit version>. Some installations also
+  # expose the flat name. Probe exact names; never select an unpinned default.
+  for mopd_candidate in cuda/13.0/13.0.1 cuda/13.0.1; do
+    if module show "$mopd_candidate" >> "$mopd_audit/module_probe.log" 2>&1; then
+      mopd_cuda_module=$mopd_candidate
+      break
+    fi
+  done
+  if [[ -z $mopd_cuda_module ]]; then
+    printf 'CUDA 13.0.1 module not found. Checked cuda/13.0/13.0.1 and cuda/13.0.1. Available CUDA modules:\n' >&2
+    cat "$mopd_audit/cuda_modules.txt" >&2
+    return 1
+  fi
+  printf 'TE build modules: gcc/13.2.0 %s cmake/4.1.1\n' "$mopd_cuda_module"
+  module load gcc/13.2.0 "$mopd_cuda_module" cmake/4.1.1 || return 1
+  module list > "$mopd_audit/loaded_modules.txt" 2>&1
+  mopd_nvcc=$(command -v nvcc) || { printf 'Loaded CUDA module has no nvcc on PATH\n' >&2; return 1; }
+  export CUDACXX CUDA_HOME CUDA_PATH
+  CUDACXX=$(readlink -f "$mopd_nvcc")
+  CUDA_HOME=$(dirname "$(dirname "$CUDACXX")")
+  CUDA_PATH=$CUDA_HOME
+  "$mopd_python" -I - "$mopd_audit" "$mopd_cuda_module" <<'PY'
+import json, os, re, subprocess, sys
+from pathlib import Path
+nvcc = subprocess.check_output([os.environ['CUDACXX'], '--version'], text=True)
+print(nvcc, flush=True)
+release = re.search(r'\brelease\s+(\d+\.\d+),', nvcc)
+record = dict(cuda_module=sys.argv[2], cuda_home=os.environ['CUDA_HOME'],
+              nvcc_path=os.environ['CUDACXX'], nvcc=nvcc,
+              status='PASS' if release and release[1] == '13.0' else 'FAIL')
+Path(sys.argv[1], 'toolchain.json').write_text(json.dumps(record, indent=2)+'\n')
+if record['status'] != 'PASS':
+    raise SystemExit('TE build requires nvcc release 13.0 to match pinned PyTorch CUDA 13.0; refusing this compiler')
+PY
+}
+
+# Allow the toolchain check to be exercised without cloning/building/installing.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return; fi
 set -euo pipefail
 mopd_upstream=${1:?Usage: bash scripts/mopd_bootstrap.sh NEW_VERL_DIRECTORY}
 mopd_revision=482f86fd09959912c99c0acf2b90329f9e061da7
@@ -12,13 +56,9 @@ if [[ ${2:-} == --rebuild-te ]]; then
   mopd_python="$mopd_upstream/.venv/bin/python"
   [[ $(git -C "$mopd_upstream" rev-parse HEAD) == "$mopd_revision" ]]
   [[ -z $(git -C "$mopd_upstream" status --porcelain) ]]
-  if ! type module >/dev/null 2>&1; then source /etc/profile.d/modules.sh; fi
-  module load gcc/13.2.0 cuda/13.0.1 cmake/4.1.1
-  export PATH="$mopd_upstream/.venv/bin:$PATH"
-  export CUDA_HOME CUDA_PATH CUDNN_PATH CUDNN_HOME NCCL_HOME
-  CUDA_HOME=$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")
-  CUDA_PATH=$CUDA_HOME
-  nvcc --version
+  mopd_te_toolchain "$mopd_python" "$mopd_audit"
+  export PATH="$CUDA_HOME/bin:$mopd_upstream/.venv/bin:$PATH"
+  export CUDNN_PATH CUDNN_HOME NCCL_HOME
   "$mopd_python" -I - <<'PY'
 import os, torch, importlib.metadata as md
 assert tuple(map(int, os.confstr('CS_GNU_LIBC_VERSION').split()[1].split('.'))) <= (2, 34), 'Build on an ABCI glibc <=2.34 host'
@@ -61,6 +101,7 @@ from pathlib import Path
 audit, wheel = map(Path, sys.argv[1:3])
 record = dict(source_revision=sys.argv[3], wheel=str(wheel), sha256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
               host=platform.node(), glibc=os.confstr('CS_GNU_LIBC_VERSION'), python=sys.version,
+              toolchain=json.loads((audit/'toolchain.json').read_text()),
               compiler=subprocess.check_output(['g++','--version'],text=True).splitlines()[0],
               nvcc=subprocess.check_output(['nvcc','--version'],text=True),
               flags={k:v for k,v in os.environ.items() if k.startswith('NVTE_') or k in ('MAX_JOBS','CMAKE_BUILD_PARALLEL_LEVEL')})

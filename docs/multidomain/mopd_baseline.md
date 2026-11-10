@@ -212,6 +212,8 @@ timeout 20s qstat -u "$USER" || true
 
 本次使用 NVIDIA TE v2.20.2 源码 commit `6ea2a74a9e98c99e6d7b164a33775cc457520027` 重建整个 monolithic wheel；遵循 [NVIDIA 源码安装方式](https://docs.nvidia.com/deeplearning/transformer-engine/installation.html)，并保持 [verl cu130 wheelhouse](https://github.com/verl-project/verl-wheelhouse/blob/main/ci/build_scripts/transformer_engine.sh) 的 PyTorch-only / `NVTE_WITH_NCCL_EP=0` 设置。使用 gcc13.2/CUDA13.0.1、现有环境的 cuDNN/NCCL 头文件，只编译 H200 的 SM90；编译并发为 1。已有依赖版本必须全部保持不变，只允许补入缺少的 wheel、pybind11 构建工具。先生成 wheel，再 `--no-deps --reinstall`；不会修改系统 glibc。
 
+ABCI 的 CUDA 模块按层级命名，例如官方文档中的 `cuda/12.6/12.6.1`（[模块使用说明](https://docs.abci.ai/v3/en/environment-modules/)、[CUDA 主次版本表](https://docs.abci.ai/v3/en/tips/gds/)）。旧修复脚本误写了扁平的 `cuda/13.0.1`，会在编译前报 modulefile 不存在。现先探测 `cuda/13.0/13.0.1`，兼容确实存在的同版本扁平名称；不选择默认版本。加载后核验实际 `nvcc` 为 13.0，并固定 `CUDACXX`、`CUDA_HOME`。模块清单、探测输出、已加载模块及工具链记录分别保存在 `cuda_modules.txt`、`module_probe.log`、`loaded_modules.txt`、`toolchain.json`，后者也进入 wheel 收据。模块缺失或编译器版本不符时，在下载源码及安装前停止。更新 checkout 后重新运行下面的 `repair-te` 即可；此次模块加载失败没有安装 TE，也没有重新提交资格测试。
+
 `repair-te` 可从任一 ABCI 登录节点运行，不需要原 guardian 所在主机。它持有共享控制锁、验证旧 PBS 作业已终止且资格测试没有 checkpoint，备份并作废旧 CPU PASS，记录源码、编译参数、二进制哈希和依赖清单；构建失败时不放行任务。也支持尚未提交任何任务的新 manifest。命令有现场编译过程，完成前请保持会话；如被中断，后续从同一命令重新构建，原任务记录保持 BLOCKED。源码构建 wheel 保存在实验的 `environment_repairs/<id>/wheels/`，详细输出在 `build.log`。构建成功不代表 GPU 验收成功。
 
 ```bash

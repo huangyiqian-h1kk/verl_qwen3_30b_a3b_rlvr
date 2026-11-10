@@ -9,6 +9,74 @@ from d4_teachers.common import read, write
 from d4_training_continuation.scheduler import Unknown
 
 
+@pytest.mark.parametrize("available,release,load_fails,selected,success", [
+    ("nested", "13.0", False, "cuda/13.0/13.0.1", True),
+    ("flat", "13.0", False, "cuda/13.0.1", True),
+    ("both", "13.0", False, "cuda/13.0/13.0.1", True),
+    ("neither", "13.0", False, None, False),
+    ("nested", "12.8", False, "cuda/13.0/13.0.1", False),
+    ("nested", "13.1", False, "cuda/13.0/13.0.1", False),
+    ("nested", "13.0", True, "cuda/13.0/13.0.1", False),
+])
+def test_te_toolchain_resolves_abci_module_and_refuses_wrong_cuda(
+        tmp_path, available, release, load_fails, selected, success):
+    """Run the production shell check against a synthetic Modules installation."""
+    import os
+    import subprocess
+    import sys
+    cuda = tmp_path / "cuda" / "bin"
+    cuda.mkdir(parents=True)
+    nvcc = cuda / "nvcc"
+    nvcc.write_text(f'#!/bin/sh\nprintf "Cuda compilation tools, release {release}, V{release}.88\\n"\n')
+    nvcc.chmod(0o755)
+    audit = tmp_path / "audit"
+    audit.mkdir()
+    script = Path(__file__).resolve().parents[2] / "scripts/mopd_bootstrap.sh"
+    env = dict(os.environ, MOCK_AVAILABLE=available, MOCK_LOAD_FAIL=str(int(load_fails)),
+               MOCK_CUDA=str(cuda), MOCK_AUDIT=str(audit))
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", r'''
+module() {
+  case "$1" in
+    -t) printf '/apps/modules:\ncuda/12.8/12.8.1\ncuda/13.0/13.0.1\n' >&2 ;;
+    show)
+      if [[ $2 == cuda/13.0/13.0.1 && ( $MOCK_AVAILABLE == nested || $MOCK_AVAILABLE == both ) ]] ||
+         [[ $2 == cuda/13.0.1 && ( $MOCK_AVAILABLE == flat || $MOCK_AVAILABLE == both ) ]]; then
+        printf 'modulefile %s\n' "$2" >&2
+      else
+        printf 'ERROR: Unable to locate a modulefile for %s\n' "$2" >&2
+        return 1
+      fi ;;
+    load)
+      printf '%s\n' "$*" > "$MOCK_AUDIT/load_called.txt"
+      [[ $MOCK_LOAD_FAIL == 0 ]] || return 1
+      export PATH="$MOCK_CUDA:$PATH" ;;
+    list) printf 'loaded modules\n' >&2 ;;
+    *) return 2 ;;
+  esac
+}
+source "$1"
+mopd_te_toolchain "$2" "$3"
+touch "$3/build_permitted"
+''', "toolchain-test", str(script), sys.executable, str(audit)],
+        env=env, capture_output=True, text=True, timeout=20)
+    assert (result.returncode == 0) == success, result.stdout + result.stderr
+    assert (audit / "build_permitted").exists() == success
+    assert "cuda/12.8/12.8.1" in (audit / "cuda_modules.txt").read_text()
+    if selected:
+        assert (audit / "load_called.txt").read_text().strip() == f"load gcc/13.2.0 {selected} cmake/4.1.1"
+    else:
+        assert not (audit / "load_called.txt").exists()
+        assert "CUDA 13.0.1 module not found" in result.stderr
+    if selected and not load_fails:
+        proof = read(audit / "toolchain.json")
+        assert proof["status"] == ("PASS" if success else "FAIL")
+        assert proof["cuda_module"] == selected
+        assert proof["cuda_home"] == str(cuda.parent)
+        assert proof["nvcc_path"] == str(nvcc)
+        if not success:
+            assert "requires nvcc release 13.0" in result.stderr
+
+
 def blocked_qualifications(manifest, tmp_path, monkeypatch):
     from d4_mopd import preflight, ARMS
     states = {}
