@@ -9,6 +9,95 @@ from d4_teachers.common import read, write
 from d4_training_continuation.scheduler import Unknown
 
 
+@pytest.mark.parametrize("location", ["path", "local", "cargo", "venv", "custom", "explicit", "missing", "bad_explicit", "old_cli"])
+def test_uv_resolution_does_not_require_login_shell_path(tmp_path, location):
+    import os
+    import shutil
+    import subprocess
+    import sys
+    root = tmp_path / "paths with spaces"
+    bins, user, upstream, audit = (root / p for p in ("bin", "user", "upstream", "audit"))
+    for p in (bins, user, upstream, audit): p.mkdir(parents=True)
+    (bins / "readlink").symlink_to(shutil.which("readlink"))
+    locations = dict(path=bins / "uv", local=user / ".local/bin/uv", cargo=user / ".cargo/bin/uv",
+                     venv=upstream / ".venv/bin/uv", custom=root / "custom/uv", explicit=root / "chosen/uv",
+                     old_cli=user / ".local/bin/uv")
+    uv = locations.get(location)
+    if uv:
+        uv.parent.mkdir(parents=True, exist_ok=True)
+        uv.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf "uv 0.13.6\\n"; exit 0; fi\n'
+                      + ('exit 2\n' if location == "old_cli" else 'exit 0\n'))
+        uv.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k not in ("MOPD_UV", "UV_INSTALL_DIR", "UV_UNMANAGED_INSTALL")}
+    env["PATH"] = str(bins)
+    if location == "explicit": env["MOPD_UV"] = str(uv)
+    if location == "bad_explicit": env["MOPD_UV"] = str(root / "absent/uv")
+    if location == "custom": env["UV_INSTALL_DIR"] = str(uv.parent)
+    script = Path(__file__).resolve().parents[2] / "scripts/mopd_bootstrap.sh"
+    # The missing case is the initial bootstrap, which has no Python yet.
+    python = "" if location == "missing" else sys.executable
+    audit_arg = "" if location == "missing" else str(audit)
+    result = subprocess.run([shutil.which("bash"), "-euo", "pipefail", "-c",
+        'source "$1"; mopd_resolve_uv "$2" "$3" "$4" "$5"', "uv-test", str(script),
+        str(upstream), python, audit_arg, str(user)], env=env, capture_output=True, text=True, timeout=20)
+    success = location not in ("missing", "bad_explicit", "old_cli")
+    assert (result.returncode == 0) == success, result.stdout + result.stderr
+    assert not (audit / "uv-tool").exists()
+    if success:
+        import hashlib
+        record = read(audit / "uv.json")
+        assert record["path"] == str(uv)
+        assert record["sha256"] == hashlib.sha256(uv.read_bytes()).hexdigest()
+        assert record["version"] == "uv 0.13.6"
+    else:
+        assert not (audit / "uv.json").exists()
+    if location == "missing": assert "uv was not found" in result.stderr
+    if location == "bad_explicit": assert "MOPD_UV must be" in result.stderr
+
+
+def test_uv_fallback_installs_cli_outside_training_environment(tmp_path):
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+    bins, user, upstream, audit = (tmp_path / p for p in ("bin", "user", "upstream", "audit"))
+    for p in (bins, user, upstream, audit): p.mkdir()
+    (bins / "readlink").symlink_to(shutil.which("readlink"))
+    calls = tmp_path / "calls.jsonl"
+    wrapper = upstream / "python"
+    wrapper.write_text(f'#!{sys.executable}\n'+r'''
+import json, os, shutil, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[:3] == ['-I', '-m', 'venv']:
+    with open(os.environ['MOCK_CALLS'], 'a') as f: f.write(json.dumps(['venv', args[3]])+'\n')
+    folder = Path(args[3]) / 'bin'; folder.mkdir(parents=True)
+    shutil.copy2(__file__, folder / 'python')
+elif args[:4] == ['-I', '-m', 'pip', '--isolated']:
+    with open(os.environ['MOCK_CALLS'], 'a') as f: f.write(json.dumps(['pip', __file__, args])+'\n')
+    uv = Path(__file__).with_name('uv')
+    uv.write_text('#!/bin/sh\nprintf "uv 0.13.6\\n"\n')
+    uv.chmod(0o755)
+else:
+    os.execv(sys.executable, [sys.executable] + args)
+''')
+    wrapper.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k not in ("MOPD_UV", "UV_INSTALL_DIR", "UV_UNMANAGED_INSTALL")}
+    env.update(PATH=str(bins), MOCK_CALLS=str(calls))
+    script = Path(__file__).resolve().parents[2] / "scripts/mopd_bootstrap.sh"
+    result = subprocess.run([shutil.which("bash"), "-euo", "pipefail", "-c",
+        'source "$1"; mopd_resolve_uv "$2" "$3" "$4" "$5"', "uv-test", str(script),
+        str(upstream), str(wrapper), str(audit), str(user)], env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    events = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert events[0] == ["venv", str(audit / "uv-tool")]
+    assert events[1][1] == str(audit / "uv-tool/bin/python")
+    assert events[1][2][-2:] == ["--no-deps", "uv==0.13.6"]
+    assert read(audit / "uv.json")["path"] == str(audit / "uv-tool/bin/uv")
+    assert list(upstream.iterdir()) == [wrapper]
+
+
 @pytest.mark.parametrize("available,release,load_fails,selected,success", [
     ("nested", "13.0", False, "cuda/13.0/13.0.1", True),
     ("flat", "13.0", False, "cuda/13.0.1", True),
@@ -187,6 +276,30 @@ def test_environment_repair_keeps_states_frozen_and_requires_new_preflight(manif
     assert len(audits) == 1
     assert read(audits[0] / "previous_cpu_preflight.json") == before
     assert read(audits[0] / "result.json")["status"] == ("FAIL" if build_fails else "PASS")
+    assert not control.active(tmp_path / "guardian.lock")
+
+
+@pytest.mark.parametrize("change", ["build_tools", "runtime_addition", "runtime_upgrade"])
+def test_environment_repair_limits_package_changes(manifest, tmp_path, monkeypatch, change):
+    import importlib.metadata
+    from types import SimpleNamespace
+    states, _ = blocked_qualifications(manifest, tmp_path, monkeypatch)
+    packages = {"torch": "2.13.0"}
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: [
+        SimpleNamespace(metadata={"Name": name}, version=version) for name, version in packages.items()])
+    def build(args, **kwargs):
+        packages.update(setuptools="80.10.2", wheel="0.48.0", pybind11="3.0.4", ninja="1.13.0")
+        if change == "runtime_addition": packages["unexpected-runtime"] = "1.0"
+        if change == "runtime_upgrade": packages["torch"] = "2.14.0"
+        write(Path(args[4]) / "build_receipt.json", dict(source_revision="pinned", sha256="wheel"))
+    monkeypatch.setattr(control.subprocess, "run", build)
+    if change == "build_tools":
+        assert control.repair_te(manifest["manifest_path"])["status"] == "PASS"
+    else:
+        with pytest.raises(RuntimeError, match="dependency"):
+            control.repair_te(manifest["manifest_path"])
+    assert read(tmp_path / "states.json") == states
+    assert read(tmp_path / "cpu_preflight.json")["status"] == "INVALIDATED"
     assert not control.active(tmp_path / "guardian.lock")
 
 

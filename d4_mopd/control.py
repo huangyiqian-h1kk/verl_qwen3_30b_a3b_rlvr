@@ -322,7 +322,7 @@ def repair_te(manifest_path):
             subprocess.run(["bash", str(audit / "build.sh"), m["verl_src"], "--rebuild-te", str(audit)], check=True)
             after = packages()
             need(all(after.get(k) == v for k, v in before.items()), "An existing dependency version changed")
-            need(set(after) - set(before) <= {"wheel", "pybind11"}, "Unexpected new dependency")
+            need(set(after) - set(before) <= {"setuptools", "wheel", "pybind11", "ninja"}, "Unexpected new dependency")
             need(environment(gpu_packages=True) == versions, "Pinned training environment changed")
             abi = native_abi()
             require_native_abi(abi)
