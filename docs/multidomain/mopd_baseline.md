@@ -222,7 +222,13 @@ ABCI 的 CUDA 模块按层级命名，例如官方文档中的 `cuda/12.6/12.6.1
 
 完整 CUDA 编译前先执行真实 G++ 头文件编译探测（`header_probe.json` / `.log`），再读取上游 `setup_pytorch_extension` 产生的源文件、include 路径和宏，对每个 C++ 翻译单元运行 `-fsyntax-only`（`torch_source_probe.json` / `.log`，逐文件输出进度）。该检查无需 GPU，可提前发现搜索路径、头文件和 C++ API 错误；最终链接、CUDA 编译和 GPU 功能仍由后续构建及资格测试验证。探测结果进入 wheel 收据。此次构建失败未安装新 TE、未重提资格测试；上游核心 CMake 临时目录在核心阶段成功后已清除，本轮仍完整重建 wheel。
 
-`repair-te` 可从任一 ABCI 登录节点运行，不需要原 guardian 所在主机。它持有共享控制锁、验证旧 PBS 作业已终止且资格测试没有 checkpoint，备份并作废旧 CPU PASS，记录源码、编译参数、二进制哈希和依赖清单；构建失败时不放行任务。也支持尚未提交任何任务的新 manifest。命令有现场编译过程，完成前请保持会话；如被中断，后续从同一命令重新构建，原任务记录保持 BLOCKED。源码构建 wheel 保存在实验的 `environment_repairs/<id>/wheels/`，详细输出在 `build.log`。构建成功不代表 GPU 验收成功。
+`repair-te` 可从任一 ABCI 登录节点运行，不需要原 guardian 所在主机。它持有共享控制锁、验证旧 PBS 作业已终止且资格测试没有 checkpoint，备份并作废旧 CPU PASS，记录源码、编译参数、二进制哈希和依赖清单；构建失败时不放行任务。也支持尚未提交任何任务的新 manifest。源码构建 wheel 保存在实验的 `environment_repairs/<id>/wheels/`，详细输出在 `build.log`。构建成功不代表 GPU 验收成功。
+
+已有两组 BLOCKED qualification 的实验使用 **`repair-and-retry`**：立即启动独立 session 的后台进程，stdin 为 `/dev/null`，stdout/stderr 写共享日志，SSH 退出不终止该流程。它依次执行 `repair-te` → CPU `preflight` → `retry-qualification`，每一阶段必须返回已验证的成功结果才进入下一阶段；失败写明阶段并停止，不循环重试构建或应用错误。已有的两个 arm 并行资格测试和“两组全部通过后正式训练”的条件保持不变。该命令仅用于已注册的两组自动 pipeline；新 manifest 仍用前台 `repair-te`、`preflight` 和 `start`。
+
+后台流程将启动时的管理代码复制到独立 `repair_pipelines/<id>/code/` 并记录文件哈希，后续更新 checkout 不改变正在执行的修复；原 manifest 和冻结训练 runtime 不修改。共享 `repair_pipeline.json` 指向此次目录，`pipeline.log` 包含完整编译和接续日志，`status.json` 每五秒更新主机、PID、阶段和心跳。各阶段结果另存 JSON。`status` 输出新增 `repair_pipeline`。其中 `COMPLETE` 表示修复、preflight 和资格测试登记完成，**不表示 GPU qualification 或正式训练完成**。
+
+训练 venv 下的 `mopd_environment_repair.lock` 在启动时获取并传给后台 worker，构建 shell 也继承此锁；同一环境的其他 manifest 同样受保护。重复启动在持锁时返回 `REPAIR_LOCK_HELD`，已有成功接续记录时返回 `ALREADY_COMPLETED`，不重复构建或 qsub。若 worker 已退出但构建 shell 仍活着，锁会继续保持；心跳过期与锁状态分别报告，不能把日志暂时不增长当成编译结束。若整台登录节点终止进程，本流程不会自动迁移构建。旧版前台修复未继承此锁，因此升级前已中断的尝试，应先在原编译节点确认残留进程和 wheel/安装记录；不能仅凭控制锁空闲重启。没有完整 wheel 的旧尝试会在新审计目录完整重建，旧日志保留。
 
 ```bash
 (
@@ -232,13 +238,13 @@ git fetch --no-tags origin codex/d4-mopd-baseline
 git merge --ff-only FETCH_HEAD
 mopd_python=/groups/gcg51557/experiments/0390_rlsd/envs/verl_mopd_482f86fd/.venv/bin/python
 mopd_manifest="$PWD/outputs/mopd/qwen30b_d4_plain_r1_seed42_val1024_roll2_v3/manifest.json"
-"$mopd_python" -I scripts/mopd.py repair-te --manifest "$mopd_manifest"
-"$mopd_python" -I scripts/mopd.py preflight --manifest "$mopd_manifest"
-"$mopd_python" -I scripts/mopd.py retry-qualification --manifest "$mopd_manifest" --arm both
+"$mopd_python" -u -I scripts/mopd.py repair-and-retry --manifest "$mopd_manifest"
 "$mopd_python" -I scripts/mopd.py status --manifest "$mopd_manifest"
 timeout 20s qstat -u "$USER" || true
 )
 ```
+
+`LAUNCHED` 表示后台进程已经启动，编译期间 qstat 仍可能为空。以后从任一登录节点用同一条 `status` 命令读取进度；`repair_pipeline.log` 字段给出日志路径。构建期间无需保持终端，也无需重新启动训练 guardian。单独的前台 `repair-te` 命令仍可用于调试，但不会自动执行后续 preflight/重提。
 
 `retry-qualification` 重验 ABI 文件哈希和版本、重新查询旧 job 的 PBS 终态，归档原 state 后一次性放行两个 arm；UNKNOWN、仍运行、已有 checkpoint、guardian 活跃或待确认 qsub 时拒绝重置，不 qdel，不清理旧 attempt。重新启动现有并行 pipeline：两组各完成 step4→新进程恢复到 step8 后，才自动开始正式训练。失败仍为 BLOCKED，不循环重试应用错误；271 等外部中断恢复策略不变。
 

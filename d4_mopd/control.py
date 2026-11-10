@@ -290,9 +290,10 @@ def quiescent_qualifications(m, state, pbs):
     return observations
 
 
-def repair_te(manifest_path):
+def repair_te(manifest_path, *, lease_fd=None):
     """Rebuild the pinned package without changing the frozen learner/runtime."""
     from .preflight import environment, native_abi, require_native_abi
+    from .repair_pipeline import environment_lease
     import importlib.metadata
     import shutil
     m = verify(manifest_path)
@@ -302,7 +303,8 @@ def repair_te(manifest_path):
         return {d.metadata["Name"].lower().replace("_", "-"): d.version
                 for d in importlib.metadata.distributions()}
     # Shared locks, no PID signalling or original-login-host requirement.
-    with lock(root / "launch.lock"), locked(root / "guardian.lock"), lock(root / "states.lock"):
+    with environment_lease(m, lease_fd) as build_lease, lock(root / "launch.lock"), \
+            locked(root / "guardian.lock"), lock(root / "states.lock"):
         states = read(root / "states.json") if (root / "states.json").exists() else {}
         observations = quiescent_qualifications(m, states, PBS()) if states else {}
         before = packages()
@@ -319,7 +321,8 @@ def repair_te(manifest_path):
         write(proof, dict(status="INVALIDATED", reason="Transformer Engine native rebuild", at_utc=now()))
         try:
             print("Native build log and audit: " + str(audit), flush=True)
-            subprocess.run(["bash", str(audit / "build.sh"), m["verl_src"], "--rebuild-te", str(audit)], check=True)
+            subprocess.run(["bash", str(audit / "build.sh"), m["verl_src"], "--rebuild-te", str(audit)],
+                           check=True, pass_fds=(build_lease,))
             after = packages()
             need(all(after.get(k) == v for k, v in before.items()), "An existing dependency version changed")
             need(set(after) - set(before) <= {"setuptools", "wheel", "pybind11", "ninja"}, "Unexpected new dependency")

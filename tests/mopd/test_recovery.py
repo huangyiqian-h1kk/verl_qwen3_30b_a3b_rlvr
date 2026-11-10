@@ -328,6 +328,7 @@ def test_structured_node_error_blocks_instead_of_external_retry(manifest, tmp_pa
 
 @pytest.mark.parametrize("build_fails", [False, True])
 def test_environment_repair_keeps_states_frozen_and_requires_new_preflight(manifest, tmp_path, monkeypatch, build_fails):
+    import os
     import subprocess
     import importlib.metadata
     from types import SimpleNamespace
@@ -336,6 +337,10 @@ def test_environment_repair_keeps_states_frozen_and_requires_new_preflight(manif
     monkeypatch.setattr(importlib.metadata, "distributions", lambda:[SimpleNamespace(metadata={"Name":"torch"}, version="2.13.0")])
     def build(args, **kwargs):
         assert args[3] == "--rebuild-te"
+        from d4_mopd.repair_pipeline import lock_path
+        assert len(kwargs["pass_fds"]) == 1
+        assert os.fstat(kwargs["pass_fds"][0]).st_ino == lock_path(manifest).stat().st_ino
+        assert control.active(lock_path(manifest))
         assert read(tmp_path / "cpu_preflight.json")["status"] == "INVALIDATED"
         assert control.active(tmp_path / "guardian.lock")
         if build_fails: raise subprocess.CalledProcessError(1, args)

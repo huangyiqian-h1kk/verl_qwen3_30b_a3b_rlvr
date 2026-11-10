@@ -85,13 +85,17 @@ def main():
     create.add_argument("--verl-src", required=True)
     create.add_argument("--python", required=True, help="New upstream uv environment; never the teacher environment")
     create.add_argument("--spec")
-    for name in ("preflight", "guardian", "status", "stop", "resume-control", "start", "repair-te", "retry-qualification"):
+    for name in ("preflight", "guardian", "status", "stop", "resume-control", "start", "repair-te", "retry-qualification",
+                 "repair-and-retry", "repair-worker"):
         q = sub.add_parser(name)
         q.add_argument("--manifest", required=True)
         if name == "start":
             q.add_argument("--phase", choices=("pipeline", "qualification", "train", "test"), required=True)
         if name in ("start", "retry-qualification"):
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
+        if name == "repair-worker":
+            q.add_argument("--repair-folder", required=True)
+            q.add_argument("--lease-fd", type=int, required=True)
     for name in ("execute", "gpu-node", "paths"):
         q = sub.add_parser(name)
         q.add_argument("--request", required=True)
@@ -122,6 +126,13 @@ def main():
             result = cpu(path)
         elif a.command == "repair-te":
             result = control.repair_te(path)
+        elif a.command == "repair-and-retry":
+            from .repair_pipeline import start
+            result = start(path)
+        elif a.command == "repair-worker":
+            from .repair_pipeline import worker
+            worker(path, a.repair_folder, a.lease_fd)
+            return
         elif a.command == "retry-qualification":
             result = control.retry_qualification(path, ARMS if a.arm == "both" else (a.arm,))
         elif a.command == "guardian":
@@ -146,8 +157,10 @@ def main():
                         control.start(path, phase, arms)
             result = {"status": "CONTROL_RESUMED", "blocked_jobs": "remain blocked for inspection"}
         else:
+            from .repair_pipeline import status as repair_status
             result = {"manifest": str(path), "guardian_lock_held": active(root / "guardian.lock"),
                       "stopped": (root / "STOP").exists(),
+                      "repair_pipeline": repair_status(path),
                       "pipeline": read(root / "pipeline.json") if (root / "pipeline.json").exists() else None,
                       "checkpoint_retention": {arm: read(root / "runs" / arm / "retention.json")
                           for arm in ARMS if (root / "runs" / arm / "retention.json").exists()},
