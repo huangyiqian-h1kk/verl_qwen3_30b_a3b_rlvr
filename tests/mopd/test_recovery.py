@@ -9,6 +9,81 @@ from d4_teachers.common import read, write
 from d4_training_continuation.scheduler import Unknown
 
 
+@pytest.mark.parametrize("mode", ["missing_path", "working", "invalid_header"])
+def test_te_header_probe_compiles_using_inherited_include_paths(tmp_path, mode):
+    """A real compiler catches the difference between existing and usable headers."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    assert shutil.which("g++"), "Compiler probe regression requires g++"
+    root = tmp_path / "build paths with spaces"
+    cuda, cudnn, nccl, inherited, audit = (root / p for p in ("cuda", "cudnn", "nccl", "inherited", "audit"))
+    for path in (cuda, cudnn, nccl, inherited):
+        (path / "include").mkdir(parents=True)
+        (path / "lib").mkdir()
+    audit.mkdir()
+    (cuda / "include/cuda_runtime.h").write_text("#pragma once\n")
+    (cudnn / "include/cudnn.h").write_text("#error broken_header\n" if mode == "invalid_header" else "#pragma once\n")
+    (nccl / "include/nccl.h").write_text("#pragma once\n")
+    env = {k: v for k, v in os.environ.items() if k not in ("CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH")}
+    env.update(CUDA_HOME=str(cuda), CUDNN_PATH=str(cudnn), NCCL_HOME=str(nccl), CXX=shutil.which("g++"),
+               CPATH=str(inherited / "include"), LIBRARY_PATH=str(inherited / "lib"),
+               LD_LIBRARY_PATH=str(inherited / "lib"))
+    script = Path(__file__).resolve().parents[2] / "scripts/mopd_bootstrap.sh"
+    setup = "" if mode == "missing_path" else "mopd_te_include_environment; "
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c",
+        'source "$1"; '+setup+'mopd_te_header_probe "$2" "$3"', "header-test",
+        str(script), sys.executable, str(audit)], env=env, capture_output=True, text=True, timeout=30)
+    assert (result.returncode == 0) == (mode == "working"), result.stdout + result.stderr
+    proof = read(audit / "header_probe.json")
+    assert proof["status"] == ("PASS" if mode == "working" else "FAIL")
+    if mode == "working":
+        assert (audit / "header_probe.o").is_file()
+        assert proof["environment"]["CPATH"] == f"{cudnn}/include:{nccl}/include:{inherited}/include"
+        for key in ("LIBRARY_PATH", "LD_LIBRARY_PATH"):
+            assert proof["environment"][key] == f"{cudnn}/lib:{nccl}/lib:{inherited}/lib"
+    else:
+        assert ("broken_header" if mode == "invalid_header" else "cudnn.h") in result.stderr
+        assert "TE compiler header probe: PASS" not in result.stdout
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_te_source_probe_checks_every_translation_unit_before_cuda_build(tmp_path, broken):
+    import os
+    import shutil
+    import subprocess
+    import sys
+    source, audit, includes = (tmp_path / p for p in ("source", "audit", "include"))
+    for path in (source / "build_tools", audit, includes): path.mkdir(parents=True)
+    (source / "build_tools/__init__.py").write_text("")
+    (source / "build_tools/pytorch.py").write_text('''
+from pathlib import Path
+from types import SimpleNamespace
+def setup_pytorch_extension(*args):
+    root = Path(__file__).parents[1]
+    return SimpleNamespace(sources=[str(root / p) for p in ('a.cpp', 'b.cpp')],
+        extra_compile_args={'cxx': ['-DREQUIRED_FLAG=7']}, include_dirs=[str(root.parent / 'include')],
+        define_macros=[('REQUIRED_MACRO', '3')])
+''')
+    (includes / "required.h").write_text("#pragma once\n")
+    (source / "a.cpp").write_text('#include <Python.h>\n#include <required.h>\n'
+        '#if REQUIRED_FLAG != 7 || REQUIRED_MACRO != 3\n#error missing_flags\n#endif\n'
+        '#ifndef TORCH_EXTENSION_NAME\n#error missing_torch_define\n#endif\nint a() { return 0; }\n')
+    (source / "b.cpp").write_text("#error later_source_broken\n" if broken else "int b() { return 0; }\n")
+    script = Path(__file__).resolve().parents[2] / "scripts/mopd_bootstrap.sh"
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c",
+        'source "$1"; mopd_te_torch_source_probe "$2" "$3" "$4"', "source-test",
+        str(script), sys.executable, str(audit), str(source)], env=dict(os.environ, CXX=shutil.which("g++")),
+        capture_output=True, text=True, timeout=30)
+    assert (result.returncode == 0) != broken, result.stdout + result.stderr
+    proof = read(audit / "torch_source_probe.json")
+    assert proof["status"] == ("FAIL" if broken else "PASS")
+    assert len(proof["checked_sources"]) == proof["expected_sources"] == 2
+    assert not list(source.glob("*.o"))
+    if broken: assert "later_source_broken" in result.stderr
+
+
 @pytest.mark.parametrize("location", ["path", "local", "cargo", "venv", "custom", "explicit", "missing", "bad_explicit", "old_cli"])
 def test_uv_resolution_does_not_require_login_shell_path(tmp_path, location):
     import os

@@ -82,6 +82,78 @@ import ninja
 PY
 }
 
+mopd_te_include_environment() {
+  # CUDNN_PATH is consumed by the core CMake build, but TE's PyTorch
+  # CppExtension does not add it to include_dirs. CPATH reaches both g++ and
+  # nvcc; LD_LIBRARY_PATH alone has no effect on header or link-time discovery.
+  export CPATH="$CUDNN_PATH/include:$NCCL_HOME/include${CPATH:+:$CPATH}"
+  export LIBRARY_PATH="$CUDNN_PATH/lib:$NCCL_HOME/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+  export LD_LIBRARY_PATH="$CUDNN_PATH/lib:$NCCL_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+}
+
+mopd_te_header_probe() {
+  "$1" -I - "$2" <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+audit = Path(sys.argv[1])
+source = audit / 'header_probe.cpp'
+source.write_text('#include <cuda_runtime.h>\n#include <cudnn.h>\n#include <nccl.h>\nint probe() { return 0; }\n')
+# Deliberately no explicit -I for cuDNN/NCCL: exercise the environment inherited
+# by the upstream PyTorch extension, which omits those include directories.
+command = [os.environ.get('CXX', 'g++'), '-std=c++20', '-fPIC', '-c', str(source),
+           '-I', str(Path(os.environ['CUDA_HOME']) / 'include'),
+           '-o', str(audit / 'header_probe.o')]
+print('TE compiler header probe: compiling CUDA/cuDNN/NCCL includes', flush=True)
+result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+(audit / 'header_probe.log').write_text(result.stdout)
+record = dict(status='PASS' if result.returncode == 0 else 'FAIL', command=command,
+              returncode=result.returncode,
+              environment={k: os.environ.get(k, '') for k in ('CPATH', 'LIBRARY_PATH', 'LD_LIBRARY_PATH')})
+(audit / 'header_probe.json').write_text(json.dumps(record, indent=2)+'\n')
+if result.returncode:
+    raise SystemExit('TE compiler header probe failed:\n'+result.stdout)
+print('TE compiler header probe: PASS', flush=True)
+PY
+}
+
+mopd_te_torch_source_probe() {
+  "$1" -I - "$2" "$3" <<'PY'
+import json, os, subprocess, sys, sysconfig
+from pathlib import Path
+audit, source = map(Path, sys.argv[1:])
+sys.path.insert(0, str(source))
+from build_tools.pytorch import setup_pytorch_extension
+extension = setup_pytorch_extension(source / 'transformer_engine/pytorch/csrc',
+    source / 'transformer_engine/pytorch/csrc', source / 'transformer_engine')
+flags = extension.extra_compile_args['cxx']
+prefix = [os.environ.get('CXX', 'g++'), '-std=c++20', '-fPIC', '-fsyntax-only',
+          '-DTORCH_API_INCLUDE_EXTENSION_H', '-DTORCH_EXTENSION_NAME=transformer_engine_torch',
+          '-I', sysconfig.get_path('include'), *flags]
+for directory in extension.include_dirs:
+    prefix.extend(['-I', directory])
+for name, value in extension.define_macros or []:
+    prefix.append('-D'+name+('='+str(value) if value is not None else ''))
+records = []
+sources = sorted(extension.sources)
+for index, path in enumerate(sources, 1):
+    print(f'TE PyTorch source probe [{index}/{len(sources)}]: {Path(path).name}', flush=True)
+    command = [*prefix, path]
+    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with (audit / 'torch_source_probe.log').open('a') as stream:
+        stream.write(path+'\n'+result.stdout+'\n')
+    records.append(dict(source=path, returncode=result.returncode))
+    status = 'FAIL' if result.returncode else ('PASS' if index == len(sources) else 'RUNNING')
+    record = dict(status=status, compiler_flags=prefix,
+                  expected_sources=len(sources), checked_sources=records)
+    (audit / 'torch_source_probe.json').write_text(json.dumps(record, indent=2)+'\n')
+    if result.returncode:
+        raise SystemExit('TE PyTorch source probe failed:\n'+result.stdout)
+if not sources:
+    raise SystemExit('TE PyTorch source probe found no sources')
+print(f'TE PyTorch source probe: PASS ({len(sources)} translation units; no GPU execution)', flush=True)
+PY
+}
+
 mopd_te_build_preflight() {
   "$1" -I - "$2" <<'PY'
 import importlib.metadata as md, json, os, re, shutil, subprocess, sys, sysconfig
@@ -190,9 +262,11 @@ PY
   CUDNN_PATH=$("$mopd_python" -I -c "$mopd_header_root" nvidia-cudnn-cu13 cudnn.h)
   CUDNN_HOME=$CUDNN_PATH
   NCCL_HOME=$("$mopd_python" -I -c "$mopd_header_root" nvidia-nccl-cu13 nccl.h)
-  export LD_LIBRARY_PATH="$CUDNN_PATH/lib:$NCCL_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export CC=gcc CXX=g++
+  mopd_te_include_environment
   mopd_te_build_tools "$mopd_python" "$mopd_audit"
   mopd_te_build_preflight "$mopd_python" "$mopd_audit"
+  mopd_te_header_probe "$mopd_python" "$mopd_audit"
   mopd_te_revision=6ea2a74a9e98c99e6d7b164a33775cc457520027
   mopd_source="$mopd_audit/TransformerEngine"
   git clone --depth 1 --branch v2.20.2 https://github.com/NVIDIA/TransformerEngine.git "$mopd_source"
@@ -206,7 +280,7 @@ PY
   export NVTE_WITH_CUBLASMP=0 NVTE_WITH_CUSOLVERMP=0 NVTE_BUILD_ACTIVATION_WITH_FAST_MATH=0
   export MAX_JOBS=1 NVTE_BUILD_MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NVTE_BUILD_THREADS_PER_JOB=1
   export NVTE_CMAKE_EXTRA_ARGS="-DNCCL_INCLUDE_DIR=$NCCL_HOME/include"
-  export CC=gcc CXX=g++
+  mopd_te_torch_source_probe "$mopd_python" "$mopd_audit" "$mopd_source"
   cd "$mopd_source"
   "$mopd_uv" build --python "$mopd_python" --wheel --no-build-isolation --out-dir "$mopd_audit/wheels" .
   mopd_wheels=("$mopd_audit"/wheels/transformer_engine-2.20.2-*.whl)
@@ -220,6 +294,8 @@ record = dict(source_revision=sys.argv[3], wheel=str(wheel), sha256=hashlib.sha2
               toolchain=json.loads((audit/'toolchain.json').read_text()),
               uv=json.loads((audit/'uv.json').read_text()),
               build_prerequisites=json.loads((audit/'build_prerequisites.json').read_text()),
+              header_probe=json.loads((audit/'header_probe.json').read_text()),
+              torch_source_probe=json.loads((audit/'torch_source_probe.json').read_text()),
               compiler=subprocess.check_output(['g++','--version'],text=True).splitlines()[0],
               nvcc=subprocess.check_output(['nvcc','--version'],text=True),
               flags={k:v for k,v in os.environ.items() if k.startswith('NVTE_') or k in ('MAX_JOBS','CMAKE_BUILD_PARALLEL_LEVEL')})

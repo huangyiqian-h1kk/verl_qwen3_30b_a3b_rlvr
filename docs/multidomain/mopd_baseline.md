@@ -218,6 +218,10 @@ ABCI 的 CUDA 模块按层级命名，例如官方文档中的 `cuda/12.6/12.6.1
 
 `PackageNotFoundError: wheel` 在旧脚本中来自“缺少则安装”的探测；真正使本次尝试退出的是后面的 `uv: command not found`。现在正常缺包直接记录补装计划，不打印异常栈。`build_tools_plan.json` 记录保留的版本及补装项；编译前的 `build_prerequisites.json` 集中记录 git、G++、CMake、Ninja 和 Python/CUDA/cuDNN/NCCL 头文件、库文件检查。检查、安装或构建失败均不会重提资格测试。`--no-build-isolation` 配合 `NVTE_FRAMEWORK=pytorch` 使用已有 PyTorch；不会为通用 pyproject 的 JAX/Flax 构建项安装另一套训练依赖。
 
+随后的一次修复完成了核心库的 110 个构建目标（4362.10 秒），但 PyTorch 扩展在首个源文件上报 `fatal error: cudnn.h: No such file or directory`。固定版本的 [TE PyTorch 构建入口](https://github.com/NVIDIA/TransformerEngine/blob/6ea2a74a9e98c99e6d7b164a33775cc457520027/build_tools/pytorch.py) 没有把 `CUDNN_PATH` 加入 `CppExtension.include_dirs`。核心 CMake 能找到 cuDNN，不能证明后续 G++ 能找到同一头文件。现将已解析的 cuDNN/NCCL include 路径前置到 `CPATH`，库目录前置到 `LIBRARY_PATH` 和 `LD_LIBRARY_PATH`，保留已有搜索路径。头文件和依赖版本均沿用当前环境。
+
+完整 CUDA 编译前先执行真实 G++ 头文件编译探测（`header_probe.json` / `.log`），再读取上游 `setup_pytorch_extension` 产生的源文件、include 路径和宏，对每个 C++ 翻译单元运行 `-fsyntax-only`（`torch_source_probe.json` / `.log`，逐文件输出进度）。该检查无需 GPU，可提前发现搜索路径、头文件和 C++ API 错误；最终链接、CUDA 编译和 GPU 功能仍由后续构建及资格测试验证。探测结果进入 wheel 收据。此次构建失败未安装新 TE、未重提资格测试；上游核心 CMake 临时目录在核心阶段成功后已清除，本轮仍完整重建 wheel。
+
 `repair-te` 可从任一 ABCI 登录节点运行，不需要原 guardian 所在主机。它持有共享控制锁、验证旧 PBS 作业已终止且资格测试没有 checkpoint，备份并作废旧 CPU PASS，记录源码、编译参数、二进制哈希和依赖清单；构建失败时不放行任务。也支持尚未提交任何任务的新 manifest。命令有现场编译过程，完成前请保持会话；如被中断，后续从同一命令重新构建，原任务记录保持 BLOCKED。源码构建 wheel 保存在实验的 `environment_repairs/<id>/wheels/`，详细输出在 `build.log`。构建成功不代表 GPU 验收成功。
 
 ```bash
