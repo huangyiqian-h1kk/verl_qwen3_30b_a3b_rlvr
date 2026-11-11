@@ -121,6 +121,9 @@ def _cpu(manifest_path):
     abi = native_abi()
     write(Path(manifest_path).parent / "native_abi.json", abi)
     require_native_abi(abi)
+    from .megatron_repair import inspect as inspect_megatron_import
+    import_guard = inspect_megatron_import()
+    write(Path(manifest_path).parent / "megatron_import_guard.json", import_guard)
     import verl
     need(Path(verl.__file__).resolve().parent.parent == Path(m["verl_src"]), "Another verl shadows the pinned checkout")
     base = AutoTokenizer.from_pretrained(m["student"]["path"], local_files_only=True)
@@ -172,7 +175,8 @@ def _cpu(manifest_path):
                        input='{"import_only":true}', capture_output=True, text=True, timeout=120)
     need(p.returncode == 0, "Original verifier environment failed to import: " + p.stderr[-3000:])
     proof = dict(status="PASS", identity=m["identity"], scope="cpu-assets-config-tokenization",
-                 versions=versions, native_abi=abi, configs=configs, tokenizer_fingerprint=fingerprint,
+                 versions=versions, native_abi=abi, megatron_import_guard=import_guard,
+                 configs=configs, tokenizer_fingerprint=fingerprint,
                  prompt_budget_matched=True, domain_exposure=exposure,
                  validation=m["data_summary"]["validation"],
                  domain_only_schedule="iid_uniform; exposure equal only in expectation",

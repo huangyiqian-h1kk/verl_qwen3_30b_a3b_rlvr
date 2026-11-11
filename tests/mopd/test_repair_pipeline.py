@@ -38,11 +38,17 @@ def wait_for(predicate, seconds=10):
     pytest.fail("Timed out waiting for child-process evidence")
 
 
-def test_background_repair_survives_client_hangup_and_reuses_active_operation(repair_case, tmp_path):
+@pytest.mark.parametrize("repair_kind", ["te", "megatron-import"])
+def test_background_repair_survives_client_hangup_and_reuses_active_operation(repair_case, tmp_path, repair_kind):
     m = repair_case
+    if repair_kind == "megatron-import":
+        old = tmp_path / "repair_pipelines" / "earlier_te"
+        write(old / "status.json", dict(status="COMPLETE", identity=m["identity"], repair_kind="te"))
+        write(tmp_path / "repair_pipeline.json", dict(folder=str(old), identity=m["identity"]))
+    expected_pipelines = 2 if repair_kind == "megatron-import" else 1
     driver = tmp_path / "driver.py"
     repo = Path(__file__).resolve().parents[2]
-    driver.write_text(f"import sys\nsys.path.insert(0, {str(repo)!r})\n" + r'''
+    driver.write_text(f"import sys\nsys.path.insert(0, {str(repo)!r})\nrepair_kind={repair_kind!r}\n" + r'''
 import json, os, time
 from pathlib import Path
 from d4_mopd import control, preflight, repair_pipeline as repair
@@ -54,7 +60,7 @@ repair.lock_path = lambda _: root / "environment.lock"
 if sys.argv[1] == "client":
     repair.worker_command = lambda m, folder, fd: [sys.executable, "-u", "-I", __file__,
                                                  "worker", str(root), str(folder), str(fd)]
-    write(root / "launched.json", repair.start(root / "manifest.json"))
+    write(root / "launched.json", repair.start(root / "manifest.json", repair_kind=repair_kind))
     while True:
         time.sleep(1)
 else:
@@ -66,7 +72,10 @@ else:
         while not (root / "finish_build").exists():
             time.sleep(0.05)
         return dict(status="PASS")
-    control.repair_te = build
+    def forbidden(*args, **kwargs):
+        raise RuntimeError("Wrong repair action")
+    control.repair_te = build if repair_kind == "te" else forbidden
+    control.repair_megatron_import = build if repair_kind == "megatron-import" else forbidden
     preflight.cpu = lambda _: dict(status="PASS")
     def register(path, arms):
         write(root / "registered.json", list(arms))
@@ -84,8 +93,8 @@ else:
                                 if (tmp_path / "build_started.json").exists() else None)
             worker_pid = evidence["pid"]
             assert evidence["sid"] == worker_pid and worker_pid != client.pid
-            assert repair.start(tmp_path / "manifest.json")["status"] == "REPAIR_LOCK_HELD"
-            assert len(list((tmp_path / "repair_pipelines").iterdir())) == 1
+            assert repair.start(tmp_path / "manifest.json", repair_kind=repair_kind)["status"] == "REPAIR_LOCK_HELD"
+            assert len(list((tmp_path / "repair_pipelines").iterdir())) == expected_pipelines
             os.killpg(client.pid, signal.SIGHUP)
             assert client.wait(timeout=5) == -signal.SIGHUP
             # Disconnect does not close the shared environment lease or the log.
@@ -97,8 +106,9 @@ else:
                                          == "COMPLETE" and not s["environment_lock_held"] else None))
             assert read(tmp_path / "registered.json") == list(ARMS)
             assert "retry_qualification: PASS" in Path(completed["log"]).read_text()
-            assert repair.start(tmp_path / "manifest.json")["status"] == "ALREADY_COMPLETED"
-            assert len(list((tmp_path / "repair_pipelines").iterdir())) == 1
+            assert completed["repair_kind"] == repair_kind
+            assert repair.start(tmp_path / "manifest.json", repair_kind=repair_kind)["status"] == "ALREADY_COMPLETED"
+            assert len(list((tmp_path / "repair_pipelines").iterdir())) == expected_pipelines
         finally:
             if client.poll() is None:
                 os.killpg(client.pid, signal.SIGKILL)

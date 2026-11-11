@@ -250,6 +250,27 @@ timeout 20s qstat -u "$USER" || true
 
 本次保留 v3 的 manifest、冻结 runtime、模型、数据及训练设置；同版本 TE 的编译来源另存审计。新增的 GPU 失败 JSON 和 shell 早期退出记录只会进入**以后新 prepare 的 runtime**，不原地修改 v3 快照。当前 v3 通过新版 checkout 执行 CPU preflight 和显式重试，再由原有冻结 guardian 接管。修复后不要手工 `uv sync`，它会重新安装锁文件里的 wheelhouse 包；bootstrap 看到源码构建标记也会拒绝覆盖。新实验第一次提交可在修复、preflight 后使用普通 `start`。
 
+## 9.1 修复可选 FA4 导入错误（2026-11-11）
+
+TE 源码构建完成后，资格测试 2906181 / 2906182 在 `gpu-node -> megatron.bridge -> megatron.core.transformer.attention -> flash_attn.cute` 报 `cutlass.cute.core.ThrMma` 缺失。此时 Ray、learner 和正式训练均未启动。
+
+锁文件排除了独立的 `flash-attn-4`，但 FA2 2.8.3 wheel 包含早期 `flash_attn/cute` 源码。MCore 0.19.2 在检查 FA4 distribution metadata 之前导入这段源码，导致不应启用的可选组件也能中止进程。[上游 metadata-first 导入顺序](https://github.com/NVIDIA/Megatron-LM/blob/5bce4b3f7ca0824600761ed2d53619a7c1e44e62/megatron/core/transformer/attention.py) 已解决这一问题。
+
+恢复命令：
+
+```bash
+"$mopd_python" -u -I scripts/mopd.py repair-and-retry --manifest "$mopd_manifest" --repair-kind megatron-import
+"$mopd_python" -u -I scripts/mopd.py status --manifest "$mopd_manifest"
+```
+
+新修复模式使用既有 detached worker、环境锁及两组资格测试门禁。先确认 PBS 作业均已结束、两组 BLOCKED 且没有 checkpoint，再对 MCore 0.19.2 的单个 `attention.py` 回移导入检查；不重编译 TE，不降级 CUTLASS，不安装其他包，不改训练参数或 v3 冻结 runtime。上一次 `repair_kind=te` 的 COMPLETE 不会阻挡本次不同类型的修复；重复本次命令复用已有修复记录。
+
+尚未注册作业的新 campaign 可先运行 `repair-megatron-import --manifest ...`，再 preflight / start。直接修复入口不会提交作业；有已登记任务时仍要求全部资格测试 BLOCKED、PBS 已结束且无训练进度。
+
+目标必须位于 manifest 的 venv，版本为 MCore 0.19.2 / FA2 2.8.3，且未安装独立 FA4。整个原文件必须匹配锁定源码 commit `4b4acac9a1d28ea6829c8d4f566d75698a21249d` 的 SHA256 `a019cd00a708a22237383456a7ba85bf522201c14a5b7cb0c1e4f0f12eac9837`；唯一允许的补丁结果为 `a733e2a6b5eb24e99fe4ca55a68f88bddf56ab0e5fd7ffd56a4b231c7262f5c8`。未知文件修改会停止修复。原文件、结果、校验和、依赖版本、原 CPU preflight 与 PBS 状态写入 `environment_repairs/<id>/`；Python 文件通过原子替换写入。所有已安装包的版本以及 TE/APEX/FA2 native ELF 校验和必须不变。
+
+CPU preflight 新增 `megatron_import_guard`：核验已安装文件并执行其中的 metadata guard，确认独立 FA4 缺失时不导入 CuTe；不会在登录节点加载模型或执行 GPU kernel。旧 PASS 或检查后的文件变化不能通过新版显式重试。修复后自动执行 CPU preflight 并重提 Mix/Only；两组完成 step4→新作业恢复至 step8 后，原冻结 guardian 才开始正式训练。v3 的失败日志仍从 `pbs.log` 查看，新增 GPU 错误 JSON 只适用于以后新 prepare 的 runtime。
+
 ## 10. 查看结果与测量时间
 
 `status` 返回 guardian 锁、heartbeat、自动流程计划、每个任务及上次 PBS 观察，以及每个 arm 的 checkpoint 保留/删除记录。每个 `runs/<arm>/attempts/<id>/` 保留：

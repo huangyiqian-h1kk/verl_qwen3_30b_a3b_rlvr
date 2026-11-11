@@ -340,9 +340,59 @@ def repair_te(manifest_path, *, lease_fd=None):
             raise
 
 
+def repair_megatron_import(manifest_path, *, lease_fd=None):
+    """Apply the audited upstream FA4 guard before any learner progress exists."""
+    import importlib.metadata
+    import shutil
+    from . import megatron_repair
+    from .preflight import environment, native_abi, require_native_abi
+    from .repair_pipeline import environment_lease
+    m = verify(manifest_path)
+    root = Path(manifest_path).parent
+    need(Path(sys.executable).absolute() == Path(m["python"]).absolute(), "Use the manifest interpreter")
+
+    def packages():
+        return {d.metadata["Name"].lower().replace("_", "-"): d.version
+                for d in importlib.metadata.distributions()}
+
+    with environment_lease(m, lease_fd), lock(root / "launch.lock"), \
+            locked(root / "guardian.lock"), lock(root / "states.lock"):
+        need(not (root / "STOP").exists(), "Experiment is stopped")
+        states = read(root / "states.json") if (root / "states.json").exists() else {}
+        observations = quiescent_qualifications(m, states, PBS()) if states else {}
+        before, versions, abi = packages(), environment(gpu_packages=True), native_abi()
+        require_native_abi(abi)
+        audit = root / "environment_repairs" / uuid.uuid4().hex
+        audit.mkdir(parents=True)
+        write(audit / "before.json", dict(identity=m["identity"], packages=before, states=states,
+                                          pbs=observations, native_abi=abi, at_utc=now()))
+        proof = root / "cpu_preflight.json"
+        if proof.exists():
+            shutil.copy2(proof, audit / "previous_cpu_preflight.json")
+        write(proof, dict(status="INVALIDATED", reason="MCore optional FA4 import backport", at_utc=now()))
+        try:
+            print("Megatron import repair audit: " + str(audit), flush=True)
+            patch = megatron_repair.apply(audit)
+            need(packages() == before and environment(gpu_packages=True) == versions,
+                 "A dependency version changed during the import repair")
+            after_abi = native_abi()
+            require_native_abi(after_abi)
+            need(after_abi["files"] == abi["files"], "Native binaries changed during the import repair")
+            result = dict(status="PASS", identity=m["identity"], kind="megatron-import", patch=patch,
+                          native_abi=after_abi, versions=versions, at_utc=now(),
+                          next_step="CPU preflight then both qualifications; GPU tests have not passed yet")
+            write(audit / "result.json", result)
+            write(root / "megatron_import_repair.json", dict(result, audit=str(audit)))
+            return result
+        except Exception as exc:
+            write(audit / "result.json", dict(status="FAIL", error=str(exc), at_utc=now()))
+            raise
+
+
 def retry_qualification(manifest_path, arms):
     """Explicit one-shot rearm after repair; ordinary start never clears BLOCKED."""
     from .preflight import environment, native_abi, require_native_abi
+    from .megatron_repair import inspect as inspect_megatron_import
     m = verify(manifest_path)
     root = Path(manifest_path).parent
     need(list(arms) == [a for a in ARMS if a in arms] and arms, "Invalid arms")
@@ -355,6 +405,10 @@ def retry_qualification(manifest_path, arms):
         abi = native_abi()
         require_native_abi(abi)
         need(abi["files"] == proof["native_abi"]["files"], "Native binaries changed after preflight")
+        need(proof.get("megatron_import_guard", {}).get("status") == "PASS",
+             "Repeat CPU preflight with the Megatron FA4 import check")
+        need(inspect_megatron_import() == proof["megatron_import_guard"],
+             "Megatron import guard changed after preflight")
         state = read(root / "states.json")
         observations = quiescent_qualifications(m, state, PBS())
         keys = ["qualification:" + a for a in arms]

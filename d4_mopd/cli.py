@@ -85,7 +85,7 @@ def main():
     create.add_argument("--verl-src", required=True)
     create.add_argument("--python", required=True, help="New upstream uv environment; never the teacher environment")
     create.add_argument("--spec")
-    for name in ("preflight", "guardian", "status", "stop", "resume-control", "start", "repair-te", "retry-qualification",
+    for name in ("preflight", "guardian", "status", "stop", "resume-control", "start", "repair-te", "repair-megatron-import", "retry-qualification",
                  "repair-and-retry", "repair-worker"):
         q = sub.add_parser(name)
         q.add_argument("--manifest", required=True)
@@ -93,6 +93,8 @@ def main():
             q.add_argument("--phase", choices=("pipeline", "qualification", "train", "test"), required=True)
         if name in ("start", "retry-qualification"):
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
+        if name == "repair-and-retry":
+            q.add_argument("--repair-kind", choices=("te", "megatron-import"), default="te")
         if name == "repair-worker":
             q.add_argument("--repair-folder", required=True)
             q.add_argument("--lease-fd", type=int, required=True)
@@ -126,9 +128,11 @@ def main():
             result = cpu(path)
         elif a.command == "repair-te":
             result = control.repair_te(path)
+        elif a.command == "repair-megatron-import":
+            result = control.repair_megatron_import(path)
         elif a.command == "repair-and-retry":
             from .repair_pipeline import start
-            result = start(path)
+            result = start(path, repair_kind=a.repair_kind)
         elif a.command == "repair-worker":
             from .repair_pipeline import worker
             worker(path, a.repair_folder, a.lease_fd)

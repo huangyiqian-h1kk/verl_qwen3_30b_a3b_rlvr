@@ -74,12 +74,13 @@ def worker_command(m, folder, fd):
             "--repair-folder", str(folder), "--lease-fd", str(fd)]
 
 
-def start(manifest_path):
+def start(manifest_path, repair_kind="te"):
+    need(repair_kind in ("te", "megatron-import"), "Unknown environment repair kind")
     m = verify(manifest_path)
     root = Path(manifest_path).parent
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(), "Use the manifest interpreter")
     previous = status(manifest_path)
-    if previous and previous["status"] == "COMPLETE":
+    if previous and previous["status"] == "COMPLETE" and previous.get("repair_kind", "te") == repair_kind:
         need(previous["identity"] == m["identity"], "Repair pipeline identity changed")
         return dict(status="ALREADY_COMPLETED", repair_pipeline=previous)
     try:
@@ -101,9 +102,9 @@ def start(manifest_path):
         folder = root / "repair_pipelines" / uuid.uuid4().hex
         folder.mkdir(parents=True)
         code_files = snapshot(folder)
-        write(folder / "request.json", dict(manifest=str(manifest_path), identity=m["identity"],
+        write(folder / "request.json", dict(manifest=str(manifest_path), identity=m["identity"], repair_kind=repair_kind,
                                             code_files=code_files, at_utc=now()))
-        pointer = dict(folder=str(folder), identity=m["identity"])
+        pointer = dict(folder=str(folder), identity=m["identity"], repair_kind=repair_kind)
         write(root / "repair_pipeline.json", pointer)
         try:
             with (folder / "pipeline.log").open("ab") as log:
@@ -130,9 +131,11 @@ def worker(manifest_path, folder, inherited_fd):
 
     folder, root = Path(folder), Path(manifest_path).parent
     request = read(folder / "request.json")
+    repair_kind = request.get("repair_kind", "te")
+    need(repair_kind in ("te", "megatron-import"), "Unknown environment repair kind")
     need(request["manifest"] == str(manifest_path), "Repair request manifest mismatch")
     need(folder.parent == root / "repair_pipelines", "Invalid repair worker directory")
-    record = dict(status="RUNNING", phase="verify", identity=request["identity"],
+    record = dict(status="RUNNING", phase="verify", identity=request["identity"], repair_kind=repair_kind,
                   host=socket.gethostname(), pid=os.getpid(), started_utc=now())
     mutex, stop = threading.Lock(), threading.Event()
 
@@ -156,8 +159,10 @@ def worker(manifest_path, folder, inherited_fd):
             m = verify(manifest_path)
             need(m["identity"] == request["identity"], "Repair manifest changed")
             with environment_lease(m, inherited.fileno()) as fd:
+                repair_name, repair_action = ("repair_te", control.repair_te) if repair_kind == "te" else (
+                    "repair_megatron_import", control.repair_megatron_import)
                 stages = (
-                    ("repair_te", lambda: control.repair_te(manifest_path, lease_fd=fd)),
+                    (repair_name, lambda: repair_action(manifest_path, lease_fd=fd)),
                     ("preflight", lambda: cpu(manifest_path)),
                     ("retry_qualification", lambda: control.retry_qualification(manifest_path, ARMS)),
                 )

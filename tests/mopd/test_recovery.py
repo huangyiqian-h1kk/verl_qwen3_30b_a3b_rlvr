@@ -243,6 +243,7 @@ touch "$3/build_permitted"
 
 def blocked_qualifications(manifest, tmp_path, monkeypatch):
     from d4_mopd import preflight, ARMS
+    from d4_mopd import megatron_repair
     states = {}
     for i, arm in enumerate(ARMS):
         folder = tmp_path / "qualification" / arm / "attempts" / "failed"
@@ -253,11 +254,14 @@ def blocked_qualifications(manifest, tmp_path, monkeypatch):
             job=dict(folder=str(folder), job_name="0390_mp_q"+arm, job_id=f"{10+i}.pbs1"))
     abi = dict(status="PASS", files=[dict(sha256="repaired")], incompatible=[])
     write(tmp_path / "states.json", states)
-    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], versions={}, native_abi=abi))
+    guard = dict(status="PASS", sha256="guard")
+    write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], versions={},
+                                              native_abi=abi, megatron_import_guard=guard))
     write(tmp_path / "pipeline.json", dict(schema="d4-mopd-pipeline-v1", identity=manifest["identity"], arms=list(ARMS)))
     monkeypatch.setattr(control, "verify", lambda _:manifest)
     monkeypatch.setattr(preflight, "environment", lambda **_: {})
     monkeypatch.setattr(preflight, "native_abi", lambda:abi)
+    monkeypatch.setattr(megatron_repair, "inspect", lambda:guard)
     class PBS:
         def observe(self, job): return dict(job_state="F", Exit_status=1)
     monkeypatch.setattr(control, "PBS", PBS)
@@ -285,7 +289,8 @@ def test_explicit_retry_preserves_failures_and_parallel_pipeline_barrier(manifes
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("condition", ["active", "unknown", "pending", "checkpoint", "old_proof", "binary_change", "guardian"])
+@pytest.mark.parametrize("condition", ["active", "unknown", "pending", "checkpoint", "old_proof", "binary_change", "guardian",
+                                       "guard_change", "missing_guard"])
 def test_explicit_retry_refuses_ambiguous_or_changed_state(manifest, tmp_path, monkeypatch, condition):
     from contextlib import ExitStack
     from d4_mopd import ARMS, preflight
@@ -307,6 +312,13 @@ def test_explicit_retry_refuses_ambiguous_or_changed_state(manifest, tmp_path, m
         write(tmp_path / "cpu_preflight.json", dict(status="PASS", identity=manifest["identity"], versions={}))
     if condition == "binary_change":
         monkeypatch.setattr(preflight, "native_abi", lambda:dict(abi, files=[dict(sha256="changed")]))
+    if condition == "guard_change":
+        from d4_mopd import megatron_repair
+        monkeypatch.setattr(megatron_repair, "inspect", lambda:dict(status="PASS", sha256="changed"))
+    if condition == "missing_guard":
+        proof = read(tmp_path / "cpu_preflight.json")
+        proof.pop("megatron_import_guard")
+        write(tmp_path / "cpu_preflight.json", proof)
     monkeypatch.setattr(control, "start", lambda *a:pytest.fail("must not launch"))
     with ExitStack() as stack:
         if condition == "guardian": stack.enter_context(locked(tmp_path / "guardian.lock"))
@@ -1037,3 +1049,67 @@ def test_retention_refuses_deletion_when_identity_or_protected_state_is_invalid(
     with pytest.raises((RuntimeError, FileNotFoundError)):
         checkpoints.prune(tmp_path, "id", "domain_mix", "sampler", 2, 200)
     assert all((root / f"global_step_{s}/data.pt").exists() for s in (5,10,15,20))
+
+
+@pytest.mark.parametrize('failure', [None, 'patch', 'package_change', 'native_change', 'active_job', 'new_campaign'])
+def test_megatron_import_repair_is_quiescent_and_preserves_frozen_experiment(
+        manifest, tmp_path, monkeypatch, failure):
+    import importlib.metadata
+    from types import SimpleNamespace
+    from d4_mopd import megatron_repair, preflight
+    from d4_mopd.repair_pipeline import lock_path
+    states, abi = blocked_qualifications(manifest, tmp_path, monkeypatch)
+    old_proof = read(tmp_path / 'cpu_preflight.json')
+    if failure == 'new_campaign':
+        (tmp_path / 'states.json').unlink()
+        (tmp_path / 'cpu_preflight.json').unlink()
+    versions = {'torch': '2.13.0', 'megatron-core': '0.19.2'}
+    monkeypatch.setattr(importlib.metadata, 'distributions', lambda: [
+        SimpleNamespace(metadata={'Name': n}, version=v) for n, v in versions.items()])
+    calls = []
+    abi_state = {'changed': False}
+    monkeypatch.setattr(preflight, 'native_abi', lambda: dict(abi,
+        files=[dict(sha256='new')] if abi_state['changed'] else abi['files']))
+    if failure == 'active_job':
+        class PBS:
+            def observe(self, job): return dict(job_state='R')
+        monkeypatch.setattr(control, 'PBS', PBS)
+
+    def apply(audit):
+        calls.append('patch')
+        assert control.active(lock_path(manifest))
+        assert control.active(tmp_path / 'guardian.lock')
+        assert read(tmp_path / 'cpu_preflight.json')['status'] == 'INVALIDATED'
+        if failure == 'patch':
+            raise RuntimeError('Unrecognized source fingerprint')
+        if failure == 'package_change':
+            versions['megatron-core'] = '0.20.0'
+        if failure == 'native_change':
+            abi_state['changed'] = True
+        return dict(status='PASS', changed=True)
+
+    monkeypatch.setattr(megatron_repair, 'apply', apply)
+    monkeypatch.setattr(control, 'start', lambda *a: pytest.fail('Repair must not submit jobs'))
+    monkeypatch.setattr(control, 'repair_te', lambda *a, **k: pytest.fail('Must preserve built TE'))
+    protected = tmp_path / 'runtime'
+    protected.mkdir()
+    (protected / 'original.py').write_text('frozen runtime')
+    if failure not in (None, 'new_campaign'):
+        with pytest.raises(RuntimeError):
+            control.repair_megatron_import(manifest['manifest_path'])
+    else:
+        proof = control.repair_megatron_import(manifest['manifest_path'])
+        assert proof['status'] == 'PASS' and proof['kind'] == 'megatron-import'
+    if failure == 'new_campaign':
+        assert not (tmp_path / 'states.json').exists()
+    else:
+        assert read(tmp_path / 'states.json') == states
+    assert (protected / 'original.py').read_text() == 'frozen runtime'
+    assert not control.active(lock_path(manifest))
+    if failure == 'active_job':
+        assert calls == [] and read(tmp_path / 'cpu_preflight.json') == old_proof
+    else:
+        assert calls == ['patch']
+        assert read(tmp_path / 'cpu_preflight.json')['status'] == 'INVALIDATED'
+        audit = next((tmp_path / 'environment_repairs').iterdir())
+        assert read(audit / 'result.json')['status'] == ('PASS' if failure in (None, 'new_campaign') else 'FAIL')
