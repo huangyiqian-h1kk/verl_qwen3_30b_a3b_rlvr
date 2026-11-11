@@ -289,6 +289,27 @@ ABCI 的实际 MCore 版本为 `0.19.2+4b4acac9a`：`+` 后为锁文件源码提
 
 更新 Git 后仍使用 `repair-and-retry --repair-kind megatron-import`：新后台快照执行导入修复、CPU preflight、两组资格测试登记；不会重新编译 TE。先前的版本核验失败没有修改 MCore 文件，CPU preflight 已被标为 INVALIDATED，需由这次流程重新完成。
 
+## 9.4 修复 Ray Unix socket 路径过长（2026-11-12）
+
+资格测试 2917679 / 2917684 的四份 `gpu_node_<rank>.json` 均为 PASS，已完成包导入、GPU 识别和 BF16 检查。随后 head 的 `ray_start_0.log` 报 `AF_UNIX path length cannot exceed 107 bytes`，未进入 learner，`result.json` 尚未生成。原路径的作业本地目录、32 位 attempt ID、Ray session 名和 socket 文件名合计 121 字节。
+
+新启动器使用 `$PBS_LOCALDIR/r`。PBS 本身已按作业和节点隔离本地目录，保留完整 attempt ID 的共享文件系统日志位置不变。同一条报错中的 socket 路径缩为 85 字节；启动前还按 Ray 2.55.1 的 session 格式和十位 PID 检查最坏路径长度，超过 107 字节会在启动 Ray 前明确报错。worker 继承 Ray head 发布的 temp directory。
+
+已 prepare 的 v3 不会随 Git 更新自动更换启动器。使用下面的专用入口：
+
+```bash
+"$mopd_python" -u -I scripts/mopd.py repair-and-retry --manifest "$mopd_manifest" --repair-kind ray-temp
+"$mopd_python" -u -I scripts/mopd.py status --manifest "$mopd_manifest"
+```
+
+后台先持有环境、launch、guardian、states 锁，确认两组 BLOCKED、PBS 已结束、没有 checkpoint / receipt / learner result，且两组日志均包含这次 socket 路径错误。PBS 超时继续按既有 WAITING_PBS 策略等待。
+
+修复复制原冻结 runtime 到 `launcher_revisions/<内容摘要>/runtime`，只修改两处文件：`node.sh` 的临时目录和长度检查；`control.py` 的监护入口及 PBS 启动器定位，让后续资格恢复、训练和 test 都沿用这份启动器。所有 learner/config/data/verifier 代码均逐文件校验不变。GPU 作业的 `entry.py` 继续导入原 `runtime`；不修改原 manifest、原 runtime、Python 环境或训练参数。`receipt.json` 保留前后文件哈希、旧状态与 PBS 证据，`launcher_repair.json` 记录唯一采用版本。重复运行会核验并复用同一版本，额外或被修改的文件会被拒绝。
+
+随后重新执行 CPU preflight，并验证其记录的 launcher 与实际采用版本一致，再登记两组新资格测试。两组各完成 step4→独立新进程恢复到 step8 后才开始正式训练；save5、val10、checkpoint 滚动保留和外部中断恢复策略均保持原样。旧失败作业和日志完整保留。
+
+回归覆盖部署过的 v3 原始启动器和控制器（测试 fixture 来自提交 `8fe8456de27d9a98a14f7e7269225d28e79e2324`）、修复幂等性、状态/身份/进度门禁、PBS Unknown 重查、各阶段 PBS 使用新 shell 而 GPU Python 保持原 runtime、双 arm 门禁及 detached worker 的 SSH 断开恢复。路径测试直接执行安装的 Ray 2.55.1 校验函数，并运行 head/worker shell 的替身进程；这些 CPU 测试不代表真实 Ray 服务或分布式训练已通过。
+
 ## 10. 查看结果与测量时间
 
 `status` 返回 guardian 锁、heartbeat、自动流程计划、每个任务及上次 PBS 观察，以及每个 arm 的 checkpoint 保留/删除记录。每个 `runs/<arm>/attempts/<id>/` 保留：

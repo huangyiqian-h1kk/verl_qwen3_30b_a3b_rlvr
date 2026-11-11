@@ -115,6 +115,8 @@ def _cpu(manifest_path):
     from multidomain.template import render, tokenizer_fingerprint
     from .spec import plan_indices
     m = verify(manifest_path)
+    from .launcher_repair import active_runtime
+    launcher_runtime = str(active_runtime(m))
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(),
          "Run CPU preflight with the NEW pinned verl interpreter recorded at prepare")
     versions = environment(gpu_packages=True)
@@ -175,6 +177,7 @@ def _cpu(manifest_path):
                        input='{"import_only":true}', capture_output=True, text=True, timeout=120)
     need(p.returncode == 0, "Original verifier environment failed to import: " + p.stderr[-3000:])
     proof = dict(status="PASS", identity=m["identity"], scope="cpu-assets-config-tokenization",
+                 launcher_runtime=launcher_runtime,
                  versions=versions, native_abi=abi, megatron_import_guard=import_guard,
                  configs=configs, tokenizer_fingerprint=fingerprint,
                  prompt_budget_matched=True, domain_exposure=exposure,

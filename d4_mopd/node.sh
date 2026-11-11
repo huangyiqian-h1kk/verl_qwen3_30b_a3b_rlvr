@@ -29,8 +29,19 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export PYTHONPATH
 PYTHONPATH=$("$mopd_python" -I "$mopd_folder/entry.py" paths --request "$mopd_request")
 unset PYTHONHOME
-export RAY_TMPDIR="${PBS_LOCALDIR:?}/mopd_${D4_MOPD_ATTEMPT}"
+export RAY_TMPDIR="${PBS_LOCALDIR:?}/r"
 mkdir -p "$RAY_TMPDIR"
+# PBS_LOCALDIR already isolates each job on each node. Ray adds a session name;
+# including the full attempt UUID here would exceed Linux's AF_UNIX limit.
+"$mopd_python" -I - "$RAY_TMPDIR" <<'PY'
+import os
+import sys
+path = sys.argv[1] + "/session_9999-12-31_23-59-59_999999_2147483647/sockets/plasma_store"
+size = len(os.fsencode(path))
+if size > 107:
+    raise RuntimeError(f"Ray socket path needs up to {size} bytes (>107); PBS_LOCALDIR is too long: {sys.argv[1]}")
+print(f"[0390] Ray temp directory: {sys.argv[1]}; socket path budget: {size}/107 bytes", flush=True)
+PY
 # Drop MPI rank variables before spawning Ray/torch distributed workers.
 while IFS='=' read -r mopd_env _; do
   case "$mopd_env" in OMPI_*|PMI_*|PMIX_*|MPI_*) unset "$mopd_env" ;; esac

@@ -87,7 +87,7 @@ def wait_for_pbs_retry(root, seconds):
 
 
 def start(manifest_path, repair_kind="te"):
-    need(repair_kind in ("te", "megatron-import"), "Unknown environment repair kind")
+    need(repair_kind in ("te", "megatron-import", "ray-temp"), "Unknown environment repair kind")
     m = verify(manifest_path)
     root = Path(manifest_path).parent
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(), "Use the manifest interpreter")
@@ -144,7 +144,7 @@ def worker(manifest_path, folder, inherited_fd):
     folder, root = Path(folder), Path(manifest_path).parent
     request = read(folder / "request.json")
     repair_kind = request.get("repair_kind", "te")
-    need(repair_kind in ("te", "megatron-import"), "Unknown environment repair kind")
+    need(repair_kind in ("te", "megatron-import", "ray-temp"), "Unknown environment repair kind")
     need(request["manifest"] == str(manifest_path), "Repair request manifest mismatch")
     need(folder.parent == root / "repair_pipelines", "Invalid repair worker directory")
     record = dict(status="RUNNING", phase="verify", identity=request["identity"], repair_kind=repair_kind,
@@ -184,8 +184,12 @@ def worker(manifest_path, folder, inherited_fd):
             m = verify(manifest_path)
             need(m["identity"] == request["identity"], "Repair manifest changed")
             with environment_lease(m, inherited.fileno()) as fd:
-                repair_name, repair_action = ("repair_te", control.repair_te) if repair_kind == "te" else (
-                    "repair_megatron_import", control.repair_megatron_import)
+                from .launcher_repair import repair as repair_launcher
+                repair_name, repair_action = {
+                    "te": ("repair_te", control.repair_te),
+                    "megatron-import": ("repair_megatron_import", control.repair_megatron_import),
+                    "ray-temp": ("repair_ray_temp", repair_launcher),
+                }[repair_kind]
                 stages = (
                     (repair_name, lambda: repair_action(manifest_path, lease_fd=fd,
                                                         on_pbs_unknown=on_pbs_unknown)),
@@ -205,7 +209,7 @@ def worker(manifest_path, folder, inherited_fd):
                     write(folder / (phase + ".json"), result)
                     print(f"[{now()}] {phase}: PASS", flush=True)
                 report(status="COMPLETE", phase="qualification_registered", completed_utc=now(),
-                       note="Environment repaired; both qualifications registered. GPU results are pending.")
+                       note="Repair completed; both qualifications registered. GPU results are pending.")
         except BaseException as exc:
             report(status="FAIL", error=str(exc), traceback=traceback.format_exc(), completed_utc=now())
             raise

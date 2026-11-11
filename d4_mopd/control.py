@@ -24,8 +24,9 @@ def task_root(m, phase, arm):
 
 
 def entry_command(m):
-    root = Path(m["manifest_path"]).parent
-    bootstrap = ("import sys; sys.path[:0]=" + repr([str(root / "runtime"), m["verl_src"]])
+    from .launcher_repair import active_runtime
+    runtime = active_runtime(m)
+    bootstrap = ("import sys; sys.path[:0]=" + repr([str(runtime), m["verl_src"]])
                  + "; from d4_mopd.cli import main; main()")
     return [m["python"], "-I", "-c", bootstrap]
 
@@ -413,6 +414,8 @@ def retry_qualification(manifest_path, arms, *, on_pbs_unknown=None):
     from .preflight import environment, native_abi, require_native_abi
     from .megatron_repair import inspect as inspect_megatron_import
     m = verify(manifest_path)
+    from .launcher_repair import active_runtime
+    launcher_runtime = active_runtime(m)
     root = Path(manifest_path).parent
     need(list(arms) == [a for a in ARMS if a in arms] and arms, "Invalid arms")
     need(not (root / "STOP").exists(), "Experiment is stopped")
@@ -420,6 +423,9 @@ def retry_qualification(manifest_path, arms, *, on_pbs_unknown=None):
         proof = read(root / "cpu_preflight.json")
         need(proof.get("status") == "PASS" and proof.get("identity") == m["identity"]
              and proof.get("native_abi", {}).get("status") == "PASS", "Repeat the updated CPU preflight first")
+        if (root / "launcher_repair.json").exists():
+            need(proof.get("launcher_runtime") == str(launcher_runtime),
+                 "Repeat CPU preflight after the launcher repair")
         need(environment(gpu_packages=True) == proof["versions"], "Environment changed after preflight")
         abi = native_abi()
         require_native_abi(abi)

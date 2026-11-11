@@ -94,7 +94,7 @@ def main():
         if name in ("start", "retry-qualification"):
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
         if name == "repair-and-retry":
-            q.add_argument("--repair-kind", choices=("te", "megatron-import"), default="te")
+            q.add_argument("--repair-kind", choices=("te", "megatron-import", "ray-temp"), default="te")
         if name == "repair-worker":
             q.add_argument("--repair-folder", required=True)
             q.add_argument("--lease-fd", type=int, required=True)
@@ -165,6 +165,7 @@ def main():
             result = {"manifest": str(path), "guardian_lock_held": active(root / "guardian.lock"),
                       "stopped": (root / "STOP").exists(),
                       "repair_pipeline": repair_status(path),
+                      "launcher_repair": read(root / "launcher_repair.json") if (root / "launcher_repair.json").exists() else None,
                       "pipeline": read(root / "pipeline.json") if (root / "pipeline.json").exists() else None,
                       "checkpoint_retention": {arm: read(root / "runs" / arm / "retention.json")
                           for arm in ARMS if (root / "runs" / arm / "retention.json").exists()},
