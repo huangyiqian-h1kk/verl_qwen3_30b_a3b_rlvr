@@ -69,18 +69,31 @@ def test_fixed_guard_preserves_available_fa4_and_does_not_hide_broken_install(mo
     assert calls == ["metadata", "cute"]
 
 
-@pytest.fixture
-def installation(tmp_path, monkeypatch):
+@pytest.fixture(params=("0.19.2", "0.19.2+4b4acac9a"), ids=("release", "pinned-git"))
+def installation(tmp_path, monkeypatch, request):
     source = ("# fixture for pinned source\n" + repair.BEFORE +
               "\ntry:\n    from flash_mla import unused\nexcept ImportError:\n    pass\n").encode()
     updated = source.decode().replace(repair.BEFORE, repair.AFTER).encode()
     monkeypatch.setattr(repair, "ORIGINAL_SHA256", repair.sha(source))
     monkeypatch.setattr(repair, "PATCHED_SHA256", repair.sha(updated))
-    target = tmp_path / "attention.py"
+    prefix = tmp_path / "venv"
+    site = prefix / "lib/python3.12/site-packages"
+    relative = "megatron/core/transformer/attention.py"
+    target = site / relative
+    target.parent.mkdir(parents=True)
     target.write_bytes(source)
     target.chmod(0o640)
-    monkeypatch.setattr(repair, "installed_path", lambda: target)
-    versions = {"megatron-core": "0.19.2", "flash-attn": "2.8.3", "nvidia-cutlass-dsl": "4.8.0"}
+    metadata = site / f"megatron_core-{request.param}.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: megatron-core\nVersion: {request.param}\n")
+    (metadata / "RECORD").write_text(relative + ",,\n")
+    distribution = md.Distribution.at(metadata)
+    original_distribution = md.distribution
+    monkeypatch.setattr(md, "distribution", lambda name: distribution if name == "megatron-core"
+                        else original_distribution(name))
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    versions = {"megatron-core": request.param, "flash-attn": "2.8.3", "nvidia-cutlass-dsl": "4.8.0"}
 
     def version(name):
         if name not in versions:
@@ -92,7 +105,8 @@ def installation(tmp_path, monkeypatch):
 
 
 def test_apply_is_atomic_audited_idempotent_and_preflight_rejects_old_source(installation, tmp_path):
-    target, source, updated, _ = installation
+    target, source, updated, versions = installation
+    assert repair.installed_path() == target
     with pytest.raises(RuntimeError, match="Missing metadata-first"):
         repair.inspect()
     native = tmp_path / "libtransformer_engine.so"
@@ -100,33 +114,54 @@ def test_apply_is_atomic_audited_idempotent_and_preflight_rejects_old_source(ins
     before_modules = set(sys.modules)
     proof = repair.apply(tmp_path / "first")
     assert proof["status"] == "PASS" and proof["changed"] is True
+    assert proof["versions"] == versions
     assert target.read_bytes() == updated and target.stat().st_mode & 0o777 == 0o640
     assert (tmp_path / "first/attention.before.py").read_bytes() == source
     assert read(tmp_path / "first/patch_plan.json")["after_sha256"] == repair.sha(updated)
-    assert repair.inspect()["status"] == "PASS"
+    inspected = repair.inspect()
+    assert inspected["status"] == "PASS" and inspected["versions"] == versions
     assert not repair.apply(tmp_path / "second")["changed"]
     assert target.read_bytes() == updated and native.read_bytes() == b"unchanged native binary"
     assert not any(m.startswith(("megatron", "flash_attn", "cutlass")) for m in set(sys.modules) - before_modules)
 
 
-@pytest.mark.parametrize("problem", ["source_changed", "fa4_installed", "wrong_version"])
+@pytest.mark.parametrize("problem", ["source_changed", "fa4_installed", "wrong_version",
+                                     "wrong_git_version", "wrong_flash_version"])
 def test_targeted_repair_refuses_unknown_environment_without_overwriting(installation, tmp_path, problem):
     target, _, _, versions = installation
     if problem == "source_changed":
         target.write_bytes(target.read_bytes() + b"# unrelated local change\n")
     elif problem == "fa4_installed":
         versions["flash-attn-4"] = "4.0.0b20"
+    elif problem == "wrong_git_version":
+        versions["megatron-core"] = "0.19.2+deadbeef0"
+    elif problem == "wrong_flash_version":
+        versions["flash-attn"] = "2.8.4"
     else:
         versions["megatron-core"] = "0.20.0"
     original = target.read_bytes()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as error:
         repair.apply(tmp_path / "audit")
     assert target.read_bytes() == original
+    assert not (tmp_path / "audit/patch_plan.json").exists()
+    if problem in ("wrong_version", "wrong_git_version"):
+        assert versions["megatron-core"] in str(error.value)
+    elif problem == "wrong_flash_version":
+        assert versions["flash-attn"] in str(error.value)
 
 
-def test_package_lookup_does_not_allow_patching_outside_manifest_venv(monkeypatch, tmp_path):
+@pytest.mark.parametrize("version", ["0.19.2", "0.19.2+4b4acac9a"])
+def test_package_lookup_does_not_allow_patching_outside_manifest_venv(monkeypatch, tmp_path, version):
     relative = "megatron/core/transformer/attention.py"
-    fake = SimpleNamespace(version="0.19.2", files=[relative], locate_file=lambda _: tmp_path / "attention.py")
+    fake = SimpleNamespace(version=version, files=[relative], locate_file=lambda _: tmp_path / "attention.py")
     monkeypatch.setattr(md, "distribution", lambda _: fake)
     with pytest.raises(RuntimeError, match="outside"):
         repair.installed_path()
+
+
+@pytest.mark.parametrize("version", ["0.19.2+deadbeef0", "0.19.2rc1", "0.19.2.post1", "0.20.0"])
+def test_package_lookup_rejects_unreviewed_build_and_reports_actual_version(monkeypatch, version):
+    monkeypatch.setattr(md, "distribution", lambda _: SimpleNamespace(version=version))
+    with pytest.raises(RuntimeError) as error:
+        repair.installed_path()
+    assert version in str(error.value)

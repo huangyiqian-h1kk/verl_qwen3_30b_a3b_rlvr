@@ -281,6 +281,14 @@ CPU preflight 新增 `megatron_import_guard`：核验已安装文件并执行其
 
 重试仅包围 `PBS.observe`，不会重放编译、补丁、CPU preflight 或 qsub。重提前出现查询超时，已经成功的修复和 CPU preflight 保持完成。新 worker 仍从当前 checkout 创建独立快照，原 manifest、训练 runtime 及两组资格测试到正式训练的条件不变。已有 FAIL 记录可更新 Git 后用同一条 `repair-and-retry --repair-kind megatron-import` 命令重新启动；SSH 断开不影响后台等待与接续。
 
+## 9.3 接受锁定提交生成的 MCore 本地版本（2026-11-11）
+
+ABCI 的实际 MCore 版本为 `0.19.2+4b4acac9a`：`+` 后为锁文件源码提交的前九位。失败当时与当前版本一致，FA2 为 `2.8.3`、独立 FA4 未安装，`attention.py` 的 SHA256 也与上述锁定原文件完全相同。旧修复在 `package_evidence()` 和 `installed_path()` 两处与 `0.19.2` 做严格字符串比较，误拒绝了这个 Git 构建。
+
+两处现共用版本核验，接受 `0.19.2` 和 `0.19.2+4b4acac9a`，其他源码后缀或版本继续拒绝；错误信息包含实际版本。完整原文件／补丁结果 SHA256、venv 路径、FA4 缺失、依赖及 native ELF 不变检查均保留。审计记录保留完整安装版本，不删除或改写 metadata 中的后缀。测试覆盖真实格式的 dist-info、两种版本的 apply/inspect/重复运行、错误构建和源码变动拒绝。
+
+更新 Git 后仍使用 `repair-and-retry --repair-kind megatron-import`：新后台快照执行导入修复、CPU preflight、两组资格测试登记；不会重新编译 TE。先前的版本核验失败没有修改 MCore 文件，CPU preflight 已被标为 INVALIDATED，需由这次流程重新完成。
+
 ## 10. 查看结果与测量时间
 
 `status` 返回 guardian 锁、heartbeat、自动流程计划、每个任务及上次 PBS 观察，以及每个 arm 的 checkpoint 保留/删除记录。每个 `runs/<arm>/attempts/<id>/` 保留：

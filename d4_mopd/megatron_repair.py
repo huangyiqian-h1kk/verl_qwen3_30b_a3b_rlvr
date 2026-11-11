@@ -13,6 +13,7 @@ from d4_teachers.common import need, write
 from d4_training_continuation.common import atomic_text
 
 SOURCE_REVISION = "4b4acac9a1d28ea6829c8d4f566d75698a21249d"
+MCORE_VERSIONS = ("0.19.2", "0.19.2+" + SOURCE_REVISION[:9])
 UPSTREAM_FIX = "https://github.com/NVIDIA/Megatron-LM/blob/5bce4b3f7ca0824600761ed2d53619a7c1e44e62/megatron/core/transformer/attention.py"
 ORIGINAL_SHA256 = "a019cd00a708a22237383456a7ba85bf522201c14a5b7cb0c1e4f0f12eac9837"
 PATCHED_SHA256 = "a733e2a6b5eb24e99fe4ca55a68f88bddf56ab0e5fd7ffd56a4b231c7262f5c8"
@@ -51,9 +52,16 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def require_mcore_version(version):
+    # The locked Git build appends its source revision to the release version.
+    # Accept that exact build, retaining the full version in all audit evidence.
+    need(version in MCORE_VERSIONS,
+         f"FA4 import backport requires megatron-core in {MCORE_VERSIONS}; found {version!r}")
+
+
 def installed_path():
     dist = md.distribution("megatron-core")
-    need(dist.version == "0.19.2", "FA4 import backport requires megatron-core==0.19.2")
+    require_mcore_version(dist.version)
     relative = Path("megatron/core/transformer/attention.py")
     need(any(str(f) == str(relative) for f in dist.files or ()), "MCore source missing from package record")
     path = Path(dist.locate_file(relative)).resolve()
@@ -64,8 +72,9 @@ def installed_path():
 def package_evidence():
     versions = {name: md.version(name) for name in
                 ("megatron-core", "flash-attn", "nvidia-cutlass-dsl")}
-    need(versions["megatron-core"] == "0.19.2" and versions["flash-attn"] == "2.8.3",
-         "Unexpected MCore/FlashAttention version; refusing this targeted repair")
+    require_mcore_version(versions["megatron-core"])
+    need(versions["flash-attn"] == "2.8.3",
+         f"FA4 import backport requires flash-attn==2.8.3; found {versions['flash-attn']!r}")
     try:
         fa4 = md.version("flash-attn-4")
     except md.PackageNotFoundError:
