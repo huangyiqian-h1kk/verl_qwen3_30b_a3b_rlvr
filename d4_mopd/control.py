@@ -274,23 +274,42 @@ def start(manifest_path, phase, arms):
                 note="Use status to confirm the guardian heartbeat and PBS submission")
 
 
-def quiescent_qualifications(m, state, pbs):
+def quiescent_qualifications(m, state, pbs, *, on_pbs_unknown=None):
     """Environment repair is only supported before qualification has progressed."""
     need(state and all(s["phase"] == "qualification" and s["status"] == "BLOCKED"
                        and s.get("job") and not s.get("pending") for s in state.values()),
          "Repair requires only BLOCKED qualification jobs, with no pending submissions")
-    observations = {}
-    for key, s in state.items():
-        observations[key] = pbs.observe(s["job"])
-        need(finished(observations[key]), "Qualification PBS job is still active: " + key)
-        run = task_root(m, "qualification", s["arm"])
-        need(not (run / "receipt.json").exists()
-             and not any((run / "checkpoints").glob("global_step_*")),
-             "Qualification already produced progress; environment replacement requires a new experiment")
-    return observations
+    root = Path(m["manifest_path"]).parent
+
+    def require_no_progress():
+        for s in state.values():
+            run = task_root(m, "qualification", s["arm"])
+            need(not (run / "receipt.json").exists()
+                 and not any((run / "checkpoints").glob("global_step_*")),
+                 "Qualification already produced progress; environment replacement requires a new experiment")
+
+    while True:
+        need(not (root / "STOP").exists(), "Experiment STOP requested during PBS observation")
+        require_no_progress()
+        observations = {}
+        for key, s in state.items():
+            try:
+                observations[key] = pbs.observe(s["job"])
+            except Unknown as exc:
+                if on_pbs_unknown is None:
+                    raise
+                on_pbs_unknown(s["job"], exc)
+                break
+            need(finished(observations[key]), "Qualification PBS job is still active: " + key)
+        else:
+            need(not (root / "STOP").exists(), "Experiment STOP requested during PBS observation")
+            require_no_progress()
+            return observations
+        # Discard the partial pass: every job must be freshly observed before
+        # changing the environment or rearming tasks. Never retry a mutation.
 
 
-def repair_te(manifest_path, *, lease_fd=None):
+def repair_te(manifest_path, *, lease_fd=None, on_pbs_unknown=None):
     """Rebuild the pinned package without changing the frozen learner/runtime."""
     from .preflight import environment, native_abi, require_native_abi
     from .repair_pipeline import environment_lease
@@ -306,7 +325,7 @@ def repair_te(manifest_path, *, lease_fd=None):
     with environment_lease(m, lease_fd) as build_lease, lock(root / "launch.lock"), \
             locked(root / "guardian.lock"), lock(root / "states.lock"):
         states = read(root / "states.json") if (root / "states.json").exists() else {}
-        observations = quiescent_qualifications(m, states, PBS()) if states else {}
+        observations = quiescent_qualifications(m, states, PBS(), on_pbs_unknown=on_pbs_unknown) if states else {}
         before = packages()
         versions = environment(gpu_packages=True)
         audit = root / "environment_repairs" / uuid.uuid4().hex
@@ -340,7 +359,7 @@ def repair_te(manifest_path, *, lease_fd=None):
             raise
 
 
-def repair_megatron_import(manifest_path, *, lease_fd=None):
+def repair_megatron_import(manifest_path, *, lease_fd=None, on_pbs_unknown=None):
     """Apply the audited upstream FA4 guard before any learner progress exists."""
     import importlib.metadata
     import shutil
@@ -359,7 +378,7 @@ def repair_megatron_import(manifest_path, *, lease_fd=None):
             locked(root / "guardian.lock"), lock(root / "states.lock"):
         need(not (root / "STOP").exists(), "Experiment is stopped")
         states = read(root / "states.json") if (root / "states.json").exists() else {}
-        observations = quiescent_qualifications(m, states, PBS()) if states else {}
+        observations = quiescent_qualifications(m, states, PBS(), on_pbs_unknown=on_pbs_unknown) if states else {}
         before, versions, abi = packages(), environment(gpu_packages=True), native_abi()
         require_native_abi(abi)
         audit = root / "environment_repairs" / uuid.uuid4().hex
@@ -389,7 +408,7 @@ def repair_megatron_import(manifest_path, *, lease_fd=None):
             raise
 
 
-def retry_qualification(manifest_path, arms):
+def retry_qualification(manifest_path, arms, *, on_pbs_unknown=None):
     """Explicit one-shot rearm after repair; ordinary start never clears BLOCKED."""
     from .preflight import environment, native_abi, require_native_abi
     from .megatron_repair import inspect as inspect_megatron_import
@@ -410,7 +429,7 @@ def retry_qualification(manifest_path, arms):
         need(inspect_megatron_import() == proof["megatron_import_guard"],
              "Megatron import guard changed after preflight")
         state = read(root / "states.json")
-        observations = quiescent_qualifications(m, state, PBS())
+        observations = quiescent_qualifications(m, state, PBS(), on_pbs_unknown=on_pbs_unknown)
         keys = ["qualification:" + a for a in arms]
         need(all(k in state for k in keys), "Requested qualification is not registered")
         audit = root / "qualification_retries" / (uuid.uuid4().hex + ".json")

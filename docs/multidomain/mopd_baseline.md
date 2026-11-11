@@ -271,6 +271,16 @@ TE 源码构建完成后，资格测试 2906181 / 2906182 在 `gpu-node -> megat
 
 CPU preflight 新增 `megatron_import_guard`：核验已安装文件并执行其中的 metadata guard，确认独立 FA4 缺失时不导入 CuTe；不会在登录节点加载模型或执行 GPU kernel。旧 PASS 或检查后的文件变化不能通过新版显式重试。修复后自动执行 CPU preflight 并重提 Mix/Only；两组完成 step4→新作业恢复至 step8 后，原冻结 guardian 才开始正式训练。v3 的失败日志仍从 `pbs.log` 查看，新增 GPU 错误 JSON 只适用于以后新 prepare 的 runtime。
 
+## 9.2 修复流程等待 PBS 查询恢复（2026-11-11）
+
+修复流程 `c8e37027e2834fcc85243c5422148452` 在读取旧作业 `2906181.pbs1` 时，`qstat -xf -F json` 超过 20 秒，旧版 worker 因 `scheduler.Unknown` 退出。失败发生在修改环境和作废 CPU preflight 之前；这次尚未执行 Megatron 补丁，也未重提 GPU 作业。
+
+新版 `repair-and-retry` 在**修复前**以及**重提前**的 PBS 只读查询处持续等待：单次 qstat 仍限时 20 秒，首次不确定结果等待 30 秒，后续等待 60 秒再查。状态为 `WAITING_PBS`，`pbs_wait` 记录作业、错误、次数和下一次重查时间；心跳继续每 5 秒更新。查询期间与等待期间持有环境和控制锁，不修改旧 BLOCKED 状态，不提交作业。等待间隔每秒检查 STOP；如果进程退出、环境锁已释放，status 显示 `INTERRUPTED`。
+
+一轮查询只完成部分作业时，丢弃该轮结果；下一轮重新查询所有旧作业。只有本轮全部通过 owner、queue、job name、提交路径校验并确认终态，且查询前后均无 checkpoint / receipt / STOP，才继续当前阶段。超时、Unknown Job Id 或缺失记录均不视为作业已结束；持续查不到记录会一直等待，需要检查 PBS 记录或主动 STOP。实际运行中的作业、身份不符、出现训练进度、补丁或编译错误仍停止并报告。
+
+重试仅包围 `PBS.observe`，不会重放编译、补丁、CPU preflight 或 qsub。重提前出现查询超时，已经成功的修复和 CPU preflight 保持完成。新 worker 仍从当前 checkout 创建独立快照，原 manifest、训练 runtime 及两组资格测试到正式训练的条件不变。已有 FAIL 记录可更新 Git 后用同一条 `repair-and-retry --repair-kind megatron-import` 命令重新启动；SSH 断开不影响后台等待与接续。
+
 ## 10. 查看结果与测量时间
 
 `status` 返回 guardian 锁、heartbeat、自动流程计划、每个任务及上次 PBS 观察，以及每个 arm 的 checkpoint 保留/删除记录。每个 `runs/<arm>/attempts/<id>/` 保留：

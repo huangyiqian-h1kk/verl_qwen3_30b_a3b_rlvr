@@ -1113,3 +1113,139 @@ def test_megatron_import_repair_is_quiescent_and_preserves_frozen_experiment(
         assert read(tmp_path / 'cpu_preflight.json')['status'] == 'INVALIDATED'
         audit = next((tmp_path / 'environment_repairs').iterdir())
         assert read(audit / 'result.json')['status'] == ('PASS' if failure in (None, 'new_campaign') else 'FAIL')
+
+
+@pytest.mark.parametrize("outcome", ["recover", "stop", "active_job", "identity_mismatch", "progress",
+                                      "stop_after_query", "progress_after_query"])
+def test_repair_pipeline_waits_for_fresh_pbs_evidence_without_replaying_mutations(
+        manifest, tmp_path, monkeypatch, outcome):
+    import getpass
+    import importlib.metadata
+    import json
+    import os
+    import subprocess
+    from types import SimpleNamespace
+    from d4_mopd import megatron_repair, preflight, repair_pipeline as repair
+    from d4_training_continuation import scheduler
+
+    states, _ = blocked_qualifications(manifest, tmp_path, monkeypatch)
+    old_proof = read(tmp_path / "cpu_preflight.json")
+    write(tmp_path / "manifest.json", manifest)
+    monkeypatch.setattr(repair, "verify", lambda _: manifest)
+    monkeypatch.setattr(repair, "lock_path", lambda _: tmp_path / "environment.lock")
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: [])
+    monkeypatch.setattr(control, "PBS", scheduler.PBS)
+    monkeypatch.setattr(control, "repair_te", lambda *a, **k: pytest.fail("TE must not be rebuilt"))
+    jobs = {s["job"]["job_id"]: s["job"] for s in states.values()}
+    events, queries, delays = [], [], []
+    counts = {"before_patch": 0, "after_patch": 0}
+    frozen = tmp_path / "runtime" / "original.py"
+    frozen.parent.mkdir()
+    frozen.write_text("frozen runtime")
+
+    def command(args, **kwargs):
+        # Exercise the real PBS timeout, JSON parsing and job-identity checks.
+        assert args[:4] == ["qstat", "-xf", "-F", "json"]
+        assert kwargs["timeout"] == 20
+        stage = "after_patch" if "patch" in events else "before_patch"
+        counts[stage] += 1
+        n, jid = counts[stage], args[4]
+        queries.append((stage, jid))
+        if (stage, n) == ("before_patch", 1):
+            raise subprocess.TimeoutExpired(args, 20)
+        if (stage, n) == ("before_patch", 3):
+            return SimpleNamespace(returncode=153, stdout="", stderr="qstat: Unknown Job Id " + jid)
+        if (stage, n) == ("after_patch", 1):
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"pbs_server": "pbs1", "Jobs": {}}), stderr="")
+        job = jobs[jid]
+        row = dict(job_state="F", Exit_status=1, Job_Owner=getpass.getuser() + "@login2",
+                   queue=scheduler.QUEUE, Job_Name=job["job_name"],
+                   Submit_arguments=str(Path(job["folder"]) / "stage.pbs"))
+        if stage == "before_patch" and n == 4:
+            if outcome == "active_job":
+                row["job_state"] = "R"
+            elif outcome == "identity_mismatch":
+                row["Job_Owner"] = "different-user@login2"
+        if stage == "before_patch" and n == 5:
+            if outcome == "stop_after_query":
+                (tmp_path / "STOP").touch()
+            elif outcome == "progress_after_query":
+                (tmp_path / "qualification/domain_mix/checkpoints/global_step_4").mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"Jobs": {jid: row}}), stderr="")
+
+    monkeypatch.setattr(scheduler.subprocess, "run", command)
+    real_wait = repair.wait_for_pbs_retry
+
+    def wait(root, delay):
+        current = repair.status(tmp_path / "manifest.json")
+        assert current["status"] == "WAITING_PBS"
+        assert current["environment_lock_held"] and not current["heartbeat_stale"]
+        assert current["pbs_wait"]["retry_after_seconds"] == delay
+        assert read(tmp_path / "states.json") == states
+        assert not list((tmp_path / "qualification_retries").glob("*.json"))
+        if current["phase"] == "repair_megatron_import":
+            assert events == []
+        else:
+            assert current["phase"] == "retry_qualification" and events == ["patch", "preflight"]
+        assert read(tmp_path / "cpu_preflight.json") == old_proof
+        delays.append(delay)
+        if outcome == "stop":
+            (tmp_path / "STOP").touch()
+        elif outcome == "progress":
+            (tmp_path / "qualification/domain_mix/checkpoints/global_step_4").mkdir(parents=True)
+        real_wait(root, 0)
+
+    monkeypatch.setattr(repair, "wait_for_pbs_retry", wait)
+
+    def patch(audit):
+        assert events == [] and counts["before_patch"] == 5
+        assert read(tmp_path / "cpu_preflight.json")["status"] == "INVALIDATED"
+        events.append("patch")
+        return dict(status="PASS")
+
+    def cpu(path):
+        assert events == ["patch"]
+        events.append("preflight")
+        write(tmp_path / "cpu_preflight.json", old_proof)
+        return old_proof
+
+    def register(path, phase, arms):
+        assert events == ["patch", "preflight"] and counts["after_patch"] == 3
+        assert phase == "pipeline" and arms == list(control.ARMS)
+        assert {s["status"] for s in read(tmp_path / "states.json").values()} == {"READY"}
+        events.append("register")
+        return dict(status="REGISTERED")
+
+    monkeypatch.setattr(megatron_repair, "apply", patch)
+    monkeypatch.setattr(preflight, "cpu", cpu)
+    monkeypatch.setattr(control, "start", register)
+    folder = tmp_path / "repair_pipelines" / "observations"
+    folder.mkdir(parents=True)
+    code = repair.snapshot(folder)
+    write(folder / "request.json", dict(manifest=manifest["manifest_path"], identity=manifest["identity"],
+                                       repair_kind="megatron-import", code_files=code))
+    write(tmp_path / "repair_pipeline.json", dict(folder=str(folder), identity=manifest["identity"]))
+    with repair.environment_lease(manifest) as fd:
+        if outcome == "recover":
+            repair.worker(tmp_path / "manifest.json", folder, os.dup(fd))
+        else:
+            with pytest.raises(RuntimeError):
+                repair.worker(tmp_path / "manifest.json", folder, os.dup(fd))
+
+    final = repair.status(tmp_path / "manifest.json")
+    assert not final["environment_lock_held"]
+    assert frozen.read_text() == "frozen runtime"
+    assert final["pbs_observation_retries"] == len(delays)
+    if outcome == "recover":
+        assert final["status"] == "COMPLETE" and final["pbs_wait"] is None
+        assert events == ["patch", "preflight", "register"] and delays == [30, 60, 60]
+        assert queries == [("before_patch", j) for j in ("10.pbs1", "10.pbs1", "11.pbs1", "10.pbs1", "11.pbs1")] + [
+            ("after_patch", j) for j in ("10.pbs1", "10.pbs1", "11.pbs1")]
+        assert len(list((tmp_path / "environment_repairs").iterdir())) == 1
+        assert len(list((tmp_path / "qualification_retries").glob("*.json"))) == 1
+    else:
+        assert final["status"] == "FAIL" and events == []
+        assert read(tmp_path / "states.json") == states
+        assert read(tmp_path / "cpu_preflight.json") == old_proof
+        assert not (tmp_path / "environment_repairs").exists()
+        assert not list((tmp_path / "qualification_retries").glob("*.json"))

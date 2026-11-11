@@ -1,5 +1,6 @@
 """Detached, one-shot environment repair followed by qualification registration."""
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 import fcntl
 import os
 from pathlib import Path
@@ -52,7 +53,7 @@ def status(manifest_path):
     held = active(lock_path(read(manifest_path)))
     result = dict(pointer, **state, environment_lock_held=held, log=str(folder / "pipeline.log"))
     result["heartbeat_stale"] = not state.get("heartbeat_utc") or age_seconds(state["heartbeat_utc"]) > 60
-    if state.get("status", "STARTING") in ("STARTING", "RUNNING") and not held:
+    if state.get("status", "STARTING") in ("STARTING", "RUNNING", "WAITING_PBS") and not held:
         result["status"] = "INTERRUPTED"
     return result
 
@@ -72,6 +73,17 @@ def worker_command(m, folder, fd):
     return [m["python"], "-u", "-I", str(folder / "code/scripts/mopd.py"),
             "repair-worker", "--manifest", m["manifest_path"],
             "--repair-folder", str(folder), "--lease-fd", str(fd)]
+
+
+def wait_for_pbs_retry(root, seconds):
+    """Back off read-only observations while remaining responsive to STOP."""
+    deadline = time.monotonic() + seconds
+    while True:
+        need(not (root / "STOP").exists(), "Experiment STOP requested while waiting for PBS")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1, remaining))
 
 
 def start(manifest_path, repair_kind="te"):
@@ -136,7 +148,8 @@ def worker(manifest_path, folder, inherited_fd):
     need(request["manifest"] == str(manifest_path), "Repair request manifest mismatch")
     need(folder.parent == root / "repair_pipelines", "Invalid repair worker directory")
     record = dict(status="RUNNING", phase="verify", identity=request["identity"], repair_kind=repair_kind,
-                  host=socket.gethostname(), pid=os.getpid(), started_utc=now())
+                  host=socket.gethostname(), pid=os.getpid(), started_utc=now(),
+                  pbs_observation_retries=0, pbs_wait=None)
     mutex, stop = threading.Lock(), threading.Event()
 
     def report(**changes):
@@ -147,6 +160,18 @@ def worker(manifest_path, folder, inherited_fd):
     def heartbeat():
         while not stop.wait(5):
             report()
+
+    def on_pbs_unknown(job, exc):
+        attempt = record["pbs_observation_retries"] + 1
+        delay = 30 if attempt == 1 else 60
+        observed = now()
+        evidence = dict(job=job, error=str(exc), attempt=attempt, observed_utc=observed,
+                        retry_after_seconds=delay,
+                        next_retry_utc=(datetime.fromisoformat(observed) + timedelta(seconds=delay)).isoformat())
+        report(status="WAITING_PBS", pbs_observation_retries=attempt, pbs_wait=evidence)
+        print(f"[{observed}] WAITING_PBS {job['job_id']}: {exc}; recheck in {delay}s", flush=True)
+        wait_for_pbs_retry(root, delay)
+        report(status="RUNNING", pbs_wait=None)
 
     # The parent passed an already-locked open file description. Keep its
     # original descriptor open until the entire handoff is finished.
@@ -162,9 +187,11 @@ def worker(manifest_path, folder, inherited_fd):
                 repair_name, repair_action = ("repair_te", control.repair_te) if repair_kind == "te" else (
                     "repair_megatron_import", control.repair_megatron_import)
                 stages = (
-                    (repair_name, lambda: repair_action(manifest_path, lease_fd=fd)),
+                    (repair_name, lambda: repair_action(manifest_path, lease_fd=fd,
+                                                        on_pbs_unknown=on_pbs_unknown)),
                     ("preflight", lambda: cpu(manifest_path)),
-                    ("retry_qualification", lambda: control.retry_qualification(manifest_path, ARMS)),
+                    ("retry_qualification", lambda: control.retry_qualification(
+                        manifest_path, ARMS, on_pbs_unknown=on_pbs_unknown)),
                 )
                 # CPU preflight must import the pinned verl checkout.
                 sys.path.insert(0, m["verl_src"])

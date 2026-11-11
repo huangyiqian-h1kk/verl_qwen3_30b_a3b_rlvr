@@ -38,8 +38,9 @@ def wait_for(predicate, seconds=10):
     pytest.fail("Timed out waiting for child-process evidence")
 
 
-@pytest.mark.parametrize("repair_kind", ["te", "megatron-import"])
-def test_background_repair_survives_client_hangup_and_reuses_active_operation(repair_case, tmp_path, repair_kind):
+@pytest.mark.parametrize("repair_kind,waiting_pbs", [("te", False), ("megatron-import", False), ("megatron-import", True)])
+def test_background_repair_survives_client_hangup_and_reuses_active_operation(
+        repair_case, tmp_path, repair_kind, waiting_pbs):
     m = repair_case
     if repair_kind == "megatron-import":
         old = tmp_path / "repair_pipelines" / "earlier_te"
@@ -48,7 +49,7 @@ def test_background_repair_survives_client_hangup_and_reuses_active_operation(re
     expected_pipelines = 2 if repair_kind == "megatron-import" else 1
     driver = tmp_path / "driver.py"
     repo = Path(__file__).resolve().parents[2]
-    driver.write_text(f"import sys\nsys.path.insert(0, {str(repo)!r})\nrepair_kind={repair_kind!r}\n" + r'''
+    driver.write_text(f"import sys\nsys.path.insert(0, {str(repo)!r})\nrepair_kind={repair_kind!r}\nwaiting_pbs={waiting_pbs!r}\n" + r'''
 import json, os, time
 from pathlib import Path
 from d4_mopd import control, preflight, repair_pipeline as repair
@@ -64,20 +65,27 @@ if sys.argv[1] == "client":
     while True:
         time.sleep(1)
 else:
-    def build(path, *, lease_fd):
+    def build(path, *, lease_fd, on_pbs_unknown):
         assert sys.stdin.read() == ""
         assert os.fstat(lease_fd).st_ino == (root / "environment.lock").stat().st_ino
         write(root / "build_started.json", dict(pid=os.getpid(), sid=os.getsid(0)))
         print("test native build started", flush=True)
-        while not (root / "finish_build").exists():
-            time.sleep(0.05)
+        def wait_for_release(*args):
+            while not (root / "finish_build").exists():
+                time.sleep(0.05)
+        if waiting_pbs:
+            from d4_training_continuation.scheduler import Unknown
+            repair.wait_for_pbs_retry = wait_for_release
+            on_pbs_unknown({"job_id": "10.pbs1"}, Unknown("qstat timeout"))
+        else:
+            wait_for_release()
         return dict(status="PASS")
     def forbidden(*args, **kwargs):
         raise RuntimeError("Wrong repair action")
     control.repair_te = build if repair_kind == "te" else forbidden
     control.repair_megatron_import = build if repair_kind == "megatron-import" else forbidden
     preflight.cpu = lambda _: dict(status="PASS")
-    def register(path, arms):
+    def register(path, arms, *, on_pbs_unknown):
         write(root / "registered.json", list(arms))
         return dict(status="REGISTERED")
     control.retry_qualification = register
@@ -93,6 +101,8 @@ else:
                                 if (tmp_path / "build_started.json").exists() else None)
             worker_pid = evidence["pid"]
             assert evidence["sid"] == worker_pid and worker_pid != client.pid
+            if waiting_pbs:
+                wait_for(lambda: repair.status(tmp_path / "manifest.json")["status"] == "WAITING_PBS")
             assert repair.start(tmp_path / "manifest.json", repair_kind=repair_kind)["status"] == "REPAIR_LOCK_HELD"
             assert len(list((tmp_path / "repair_pipelines").iterdir())) == expected_pipelines
             os.killpg(client.pid, signal.SIGHUP)
@@ -107,6 +117,8 @@ else:
             assert read(tmp_path / "registered.json") == list(ARMS)
             assert "retry_qualification: PASS" in Path(completed["log"]).read_text()
             assert completed["repair_kind"] == repair_kind
+            assert completed["pbs_wait"] is None
+            assert completed["pbs_observation_retries"] == int(waiting_pbs)
             assert repair.start(tmp_path / "manifest.json", repair_kind=repair_kind)["status"] == "ALREADY_COMPLETED"
             assert len(list((tmp_path / "repair_pipelines").iterdir())) == expected_pipelines
         finally:
@@ -120,7 +132,7 @@ else:
                     pass
 
 
-@pytest.mark.parametrize("failure", ["build", "preflight", "bad_preflight", "stop", "code_changed"])
+@pytest.mark.parametrize("failure", ["build", "build_unknown", "preflight", "bad_preflight", "stop", "code_changed"])
 def test_failed_or_stopped_repair_never_registers_gpu_jobs(repair_case, tmp_path, monkeypatch, failure):
     folder = tmp_path / "repair_pipelines" / "test"
     folder.mkdir(parents=True)
@@ -130,10 +142,13 @@ def test_failed_or_stopped_repair_never_registers_gpu_jobs(repair_case, tmp_path
     write(tmp_path / "repair_pipeline.json", dict(folder=str(folder), identity=repair_case["identity"]))
     calls = []
 
-    def build(path, *, lease_fd):
+    def build(path, *, lease_fd, on_pbs_unknown):
         calls.append("build")
         if failure == "build":
             raise RuntimeError("native build failed")
+        if failure == "build_unknown":
+            from d4_training_continuation.scheduler import Unknown
+            raise Unknown("An error outside read-only PBS observation must not replay this action")
         if failure == "stop":
             (tmp_path / "STOP").touch()
         return dict(status="PASS")
@@ -146,7 +161,7 @@ def test_failed_or_stopped_repair_never_registers_gpu_jobs(repair_case, tmp_path
 
     monkeypatch.setattr(control, "repair_te", build)
     monkeypatch.setattr(preflight, "cpu", cpu)
-    monkeypatch.setattr(control, "retry_qualification", lambda *a: pytest.fail("GPU registration forbidden"))
+    monkeypatch.setattr(control, "retry_qualification", lambda *a, **k: pytest.fail("GPU registration forbidden"))
     if failure == "code_changed":
         (folder / "code/scripts/mopd_bootstrap.sh").write_text("changed")
     with repair.environment_lease(repair_case) as fd:
@@ -156,7 +171,7 @@ def test_failed_or_stopped_repair_never_registers_gpu_jobs(repair_case, tmp_path
     assert result["status"] == "FAIL" and not result["environment_lock_held"]
     assert not (folder / "retry_qualification.json").exists()
     assert calls == ([] if failure == "code_changed" else
-                     ["build"] if failure in ("build", "stop") else ["build", "preflight"])
+                     ["build"] if failure in ("build", "build_unknown", "stop") else ["build", "preflight"])
 
 
 def test_build_shell_keeps_environment_lease_after_controller_exit(repair_case, tmp_path):
@@ -208,8 +223,9 @@ def test_background_start_refuses_nonquiescent_pipeline(repair_case, tmp_path, m
     assert not (tmp_path / "repair_pipelines").exists()
 
 
-def test_interrupted_worker_status_does_not_report_running(repair_case, tmp_path):
+@pytest.mark.parametrize("status", ["RUNNING", "WAITING_PBS"])
+def test_interrupted_worker_status_does_not_report_running(repair_case, tmp_path, status):
     folder = tmp_path / "repair_pipelines" / "test"
     write(tmp_path / "repair_pipeline.json", dict(folder=str(folder), identity=repair_case["identity"]))
-    write(folder / "status.json", dict(status="RUNNING", phase="repair_te"))
+    write(folder / "status.json", dict(status=status, phase="repair_te"))
     assert repair.status(tmp_path / "manifest.json")["status"] == "INTERRUPTED"
