@@ -94,7 +94,7 @@ def main():
         if name in ("start", "retry-qualification"):
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
         if name == "repair-and-retry":
-            q.add_argument("--repair-kind", choices=("te", "megatron-import", "ray-temp", "cuda-runtime"), default="te")
+            q.add_argument("--repair-kind", choices=("te", "megatron-import", "ray-temp", "cuda-runtime", "batch-metadata"), default="te")
         if name == "repair-worker":
             q.add_argument("--repair-folder", required=True)
             q.add_argument("--lease-fd", type=int, required=True)

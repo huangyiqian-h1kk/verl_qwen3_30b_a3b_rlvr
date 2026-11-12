@@ -108,6 +108,25 @@ def cpu(manifest_path):
         raise
 
 
+def batch_metadata_probe(m, runtime):
+    """Import the exact selected adapter in a clean child, including Ray paths."""
+    runtime = Path(runtime).resolve()
+    if not (runtime / "d4_mopd/batch_contract.py").is_file():
+        return None  # Historical revisions predate this contract probe.
+    code = ("import json, sys; from pathlib import Path; sys.path[:0]="
+            + repr([str(runtime), m["verl_src"]])
+            + "; import d4_mopd.integration as integration; "
+            + "assert Path(integration.__file__).resolve().parent.parent == Path(" + repr(str(runtime)) + ")"
+            + "; from d4_mopd.batch_contract import probe; print('BATCH_CONTRACT_JSON='+json.dumps(probe()))")
+    p = subprocess.run([m["python"], "-I", "-c", code], capture_output=True, text=True, timeout=180)
+    need(p.returncode == 0, "Selected batch metadata adapter failed CPU replay: " + (p.stdout + p.stderr)[-6000:])
+    lines = [v.removeprefix("BATCH_CONTRACT_JSON=") for v in p.stdout.splitlines() if v.startswith("BATCH_CONTRACT_JSON=")]
+    need(len(lines) == 1, "Batch metadata probe did not return one receipt")
+    result = json.loads(lines[0])
+    need(result.get("status") == "PASS", "Batch metadata probe failed")
+    return dict(result, identity=m["identity"], runtime=str(runtime))
+
+
 def _cpu(manifest_path):
     import pyarrow.parquet as pq
     from transformers import AutoTokenizer
@@ -128,6 +147,9 @@ def _cpu(manifest_path):
     write(Path(manifest_path).parent / "megatron_import_guard.json", import_guard)
     import verl
     need(Path(verl.__file__).resolve().parent.parent == Path(m["verl_src"]), "Another verl shadows the pinned checkout")
+    batch_contract = batch_metadata_probe(m, launcher_runtime)
+    if batch_contract is not None:
+        write(Path(manifest_path).parent / "batch_metadata_preflight.json", batch_contract)
     base = AutoTokenizer.from_pretrained(m["student"]["path"], local_files_only=True)
     fingerprint = tokenizer_fingerprint(base)
     for t in m["teachers"].values():
@@ -178,6 +200,7 @@ def _cpu(manifest_path):
     need(p.returncode == 0, "Original verifier environment failed to import: " + p.stderr[-3000:])
     proof = dict(status="PASS", identity=m["identity"], scope="cpu-assets-config-tokenization",
                  launcher_runtime=launcher_runtime,
+                 batch_metadata=batch_contract,
                  versions=versions, native_abi=abi, megatron_import_guard=import_guard,
                  configs=configs, tokenizer_fingerprint=fingerprint,
                  prompt_budget_matched=True, domain_exposure=exposure,

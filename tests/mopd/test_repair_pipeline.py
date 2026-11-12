@@ -40,7 +40,8 @@ def wait_for(predicate, seconds=10):
 
 @pytest.mark.parametrize("repair_kind,waiting_pbs", [("te", False), ("megatron-import", False),
                                                   ("megatron-import", True), ("ray-temp", False), ("ray-temp", True),
-                                                  ("cuda-runtime", False), ("cuda-runtime", True)])
+                                                  ("cuda-runtime", False), ("cuda-runtime", True),
+                                                  ("batch-metadata", False), ("batch-metadata", True)])
 def test_background_repair_survives_client_hangup_and_reuses_active_operation(
         repair_case, tmp_path, repair_kind, waiting_pbs):
     m = repair_case
@@ -54,7 +55,7 @@ def test_background_repair_survives_client_hangup_and_reuses_active_operation(
     driver.write_text(f"import sys\nsys.path.insert(0, {str(repo)!r})\nrepair_kind={repair_kind!r}\nwaiting_pbs={waiting_pbs!r}\n" + r'''
 import json, os, time
 from pathlib import Path
-from d4_mopd import control, preflight, repair_pipeline as repair, launcher_repair, cuda_repair
+from d4_mopd import control, preflight, repair_pipeline as repair, launcher_repair, cuda_repair, metadata_repair
 from d4_teachers.common import read, write
 root = Path(sys.argv[2])
 m = read(root / "manifest.json")
@@ -88,6 +89,7 @@ else:
     control.repair_megatron_import = build if repair_kind == "megatron-import" else forbidden
     launcher_repair.repair = build if repair_kind == "ray-temp" else forbidden
     cuda_repair.repair = build if repair_kind == "cuda-runtime" else forbidden
+    metadata_repair.repair = build if repair_kind == "batch-metadata" else forbidden
     preflight.cpu = lambda _: dict(status="PASS")
     def register(path, arms, *, on_pbs_unknown):
         write(root / "registered.json", list(arms))

@@ -41,7 +41,8 @@ def make_batch():
                     "teacher_ids": torch.tensor([[[6],[7],[8],[0],[0]]]*4),
                     "teacher_logprobs": -torch.ones(4,5,1), "old_log_probs": -torch.ones(4,3)*2,
                     "token_level_rewards": torch.zeros(4,3)}, batch_size=[4])
-    return DataProto(batch=td, non_tensor_batch={"data_source":np.array(DOMAINS),"index":np.array(DOMAINS)})
+    return DataProto(batch=td, non_tensor_batch={"data_source":np.array(DOMAINS),
+        "extra_info":np.array([{"sample_id":d} for d in DOMAINS], dtype=object)})
 
 
 def test_actual_padding_alignment_and_batch_balance_reorder(spec):
@@ -58,7 +59,7 @@ def test_refuse_silent_experiment_corruption(spec, corruption):
     if corruption == "nan": batch.batch["teacher_logprobs"][0,1,0] = float("nan")
     if corruption == "reward": batch.batch["token_level_rewards"][0,0] = 1
     if corruption == "empty": batch.batch["response_mask"][0,:] = 0
-    if corruption == "ids": batch.non_tensor_batch["index"][0] = "bad"
+    if corruption == "ids": batch.non_tensor_batch["extra_info"][0]["sample_id"] = "bad"
     if corruption == "domain": batch.non_tensor_batch["data_source"][0] = "if"
     with pytest.raises(RuntimeError):
         check_batch(batch, dict(spec, train_batch_size=4), "domain_mix", 1, list(DOMAINS))

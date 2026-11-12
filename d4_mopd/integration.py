@@ -50,7 +50,12 @@ def check_batch(batch, spec, arm, step, expected_ids):
     else:
         target = domain_order(spec)[step-1]
         need(counts == {target: b}, "Domain-only optimizer update mixes domains or changes schedule")
-    ids = list(batch.non_tensor_batch["index"])
+    # verl moves top-level index into the generation request. extra_info stays
+    # with the optimizer batch through rollout, repeat and token balancing.
+    extra = batch.non_tensor_batch.get("extra_info", ())
+    need(len(extra) == b and all(isinstance(v, dict) and isinstance(v.get("sample_id"), str)
+                                and v["sample_id"] for v in extra), "Missing stable prompt IDs")
+    ids = [v["sample_id"] for v in extra]
     need(Counter(ids) == Counter(expected_ids), "DataLoader resumed at the wrong prompt position")
     mask = batch.batch["response_mask"].bool()
     need(bool(mask.any(dim=-1).all()), "Fully masked response")
