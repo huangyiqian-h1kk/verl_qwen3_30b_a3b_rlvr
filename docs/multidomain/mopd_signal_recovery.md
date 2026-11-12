@@ -55,3 +55,24 @@ Regression coverage includes the installed Ray Cython exception constructor,
 the actual driver catch/finally path with interrupted cleanup, legacy receipts
 without markers, negative failure cases, revision migration and fresh-process
 driver/worker imports. These CPU checks do not establish GPU qualification success.
+
+## Login-node C++ runtime for CPU replay
+
+The metadata replay imports the real selected trainer. Its transitive PEFT
+import loads Transformer Engine even on a login node. TE was built with
+`gcc/13.2.0`; a plain login Python can instead resolve the older system
+`libstdc++.so.6` and fail with `GLIBCXX_3.4.32 not found` before replay begins.
+
+CPU preflight now starts this child through `cpu_replay.sh`, loads the same GCC
+module, locates its C++ library through that compiler, and sets the loader path
+before starting Python. The child checks the actually mapped library before and
+after native imports, and records its path and hash in the replay receipt.
+Missing modules, a shadowed library, or native import/replay failures still fail
+preflight. No GPU dependency is mocked or silently skipped.
+
+This correction belongs to the checkout-side preflight runner. Existing v4
+runtime snapshots remain byte-identical. After updating Git, rerun the same
+`repair-and-retry --repair-kind pbs-sigterm` command for a failed preflight; it
+reuses the verified v4 revision, reruns CPU checks, and registers both arms only
+after those checks pass. It does not rebuild TE. Actual GPU qualification remains
+required before formal training.

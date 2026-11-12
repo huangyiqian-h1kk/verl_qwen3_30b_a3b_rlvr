@@ -9,7 +9,7 @@ import sys
 from omegaconf import OmegaConf
 import pytest
 
-from d4_mopd import ARMS, cli, control, job_exit, job_exit_v2 as exits, launcher_repair, metadata_repair, sigterm_repair
+from d4_mopd import ARMS, cli, control, job_exit, job_exit_v2 as exits, launcher_repair, metadata_repair, preflight, sigterm_repair
 from d4_teachers.common import files, read, write
 from d4_training_continuation.scheduler import Unknown
 from test_batch_metadata import metadata_case
@@ -181,7 +181,7 @@ def test_real_ray_exception_is_saved_even_if_cleanup_interrupts(signal_case, tmp
     assert read(folder / "result.json")["error"] == "1"
 
 
-def test_repaired_guardian_driver_and_workers_share_checked_snapshot(signal_case, tmp_path):
+def test_repaired_guardian_driver_and_workers_share_checked_snapshot(signal_case, tmp_path, cpu_modules):
     m = signal_case
     sigterm_repair.repair(m["manifest_path"])
     selected = launcher_repair.active_runtime(m)
@@ -203,6 +203,14 @@ def test_repaired_guardian_driver_and_workers_share_checked_snapshot(signal_case
         env={**os.environ, "PYTHONPATH": driver.stdout.strip()}, cwd=tmp_path,
         capture_output=True, text=True, check=True, timeout=30)
     assert worker.stdout.strip() == str(selected / "d4_mopd/job_exit_v2.py")
+    # The new preflight runner must work with an existing frozen v4 snapshot,
+    # which does not contain the new login-node bootstrap files.
+    assert not (selected / "d4_mopd/cpu_replay.sh").exists()
+    inventory = files(selected)
+    proof = preflight.batch_metadata_probe(m, selected)
+    assert proof["status"] == "PASS" and len(proof["cases"]) == 8
+    assert proof["compiler_runtime"]["library"] == str(cpu_modules.library)
+    assert files(selected) == inventory
 
 
 @pytest.mark.parametrize("change", ["update", "checkpoint", "resume", "generic-exit", "app-error", "identity",

@@ -34,7 +34,7 @@ def frozen(manifest, tmp_path, monkeypatch):
     from d4_mopd.sigterm_repair import NEW_FAILURE, OLD_FAILURE
     cli.write_text(cli.read_text().replace("from .job_exit_v2 import failure_record\n", "")
                    .replace(NEW_FAILURE, OLD_FAILURE).replace("import time\n", "import time\nimport traceback\n"))
-    for name in ("job_exit_v2.py", "sigterm_repair.py"):
+    for name in ("job_exit_v2.py", "sigterm_repair.py", "cpu_replay.sh", "cpu_replay.py"):
         (runtime / "d4_mopd" / name).unlink()
     manifest["runtime_files"] = files(runtime)
     write(tmp_path / "manifest.json", manifest)

@@ -167,7 +167,7 @@ def test_migration_preserves_previous_revision_and_model_recipe(metadata_case, t
     assert (selected / "config/mopd/baseline.json").read_bytes() == (tmp_path / "runtime/config/mopd/baseline.json").read_bytes()
 
 
-def test_driver_worker_and_cpu_probe_use_the_same_frozen_correction(metadata_case, tmp_path):
+def test_driver_worker_and_cpu_probe_use_the_same_frozen_correction(metadata_case, tmp_path, cpu_modules):
     m = metadata_case
     metadata_repair.repair(m["manifest_path"])
     selected = launcher_repair.active_runtime(m)
@@ -191,6 +191,7 @@ def test_driver_worker_and_cpu_probe_use_the_same_frozen_correction(metadata_cas
     assert worker.stdout.strip() == str(selected / "d4_mopd/__init__.py")
     proof = preflight.batch_metadata_probe(m, selected)
     assert proof["status"] == "PASS" and proof["runtime"] == str(selected) and len(proof["cases"]) == 8
+    assert proof["compiler_runtime"]["library"] == str(cpu_modules.library)
 
 
 @pytest.mark.parametrize("change", ["update", "checkpoint", "resume", "missing-resume", "wrong-identity", "wrong-error",

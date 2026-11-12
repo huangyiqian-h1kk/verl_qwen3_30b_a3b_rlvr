@@ -109,16 +109,14 @@ def cpu(manifest_path):
 
 
 def batch_metadata_probe(m, runtime):
-    """Import the exact selected adapter in a clean child, including Ray paths."""
+    """Replay the selected adapter with the build/compute GCC runtime on login nodes."""
     runtime = Path(runtime).resolve()
     if not (runtime / "d4_mopd/batch_contract.py").is_file():
         return None  # Historical revisions predate this contract probe.
-    code = ("import json, sys; from pathlib import Path; sys.path[:0]="
-            + repr([str(runtime), m["verl_src"]])
-            + "; import d4_mopd.integration as integration; "
-            + "assert Path(integration.__file__).resolve().parent.parent == Path(" + repr(str(runtime)) + ")"
-            + "; from d4_mopd.batch_contract import probe; print('BATCH_CONTRACT_JSON='+json.dumps(probe()))")
-    p = subprocess.run([m["python"], "-I", "-c", code], capture_output=True, text=True, timeout=180)
+    support = Path(__file__).parent
+    p = subprocess.run(["bash", str(support / "cpu_replay.sh"), m["python"], "-u", "-I",
+                        str(support / "cpu_replay.py"), str(runtime), m["verl_src"]],
+                       capture_output=True, text=True, timeout=180)
     need(p.returncode == 0, "Selected batch metadata adapter failed CPU replay: " + (p.stdout + p.stderr)[-6000:])
     lines = [v.removeprefix("BATCH_CONTRACT_JSON=") for v in p.stdout.splitlines() if v.startswith("BATCH_CONTRACT_JSON=")]
     need(len(lines) == 1, "Batch metadata probe did not return one receipt")
