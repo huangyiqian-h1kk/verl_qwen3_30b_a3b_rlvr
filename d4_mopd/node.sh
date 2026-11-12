@@ -29,6 +29,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export PYTHONPATH
 PYTHONPATH=$("$mopd_python" -I "$mopd_folder/entry.py" paths --request "$mopd_request")
 unset PYTHONHOME
+source "$(dirname "${BASH_SOURCE[0]}")/cuda_runtime.sh"
 export RAY_TMPDIR="${PBS_LOCALDIR:?}/r"
 mkdir -p "$RAY_TMPDIR"
 # PBS_LOCALDIR already isolates each job on each node. Ray adds a session name;

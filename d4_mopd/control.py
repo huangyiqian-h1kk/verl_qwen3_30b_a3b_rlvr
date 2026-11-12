@@ -11,6 +11,7 @@ import uuid
 
 from . import ARMS
 from .assets import verify
+from .job_exit import entry_script, failure_result, retry_allowed
 from d4_teachers.common import active, file_sha, lock, need, now, read, write
 from d4_training_continuation.common import atomic_text, locked
 from d4_training_continuation.scheduler import PBS, Unknown, finished
@@ -61,9 +62,7 @@ def new_attempt(m, phase, arm):
         request["selection"] = proof["selection"]
     write(folder / "request.json", request)
     # No mutable checkout is placed on PYTHONPATH, including inside Ray workers.
-    (folder / "entry.py").write_text("import sys\nsys.path[:0]=" + repr([
-        str(Path(m["manifest_path"]).parent / "runtime"), m["verl_src"]])
-        + "\nfrom d4_mopd.cli import main\nmain()\n")
+    (folder / "entry.py").write_text(entry_script(m, Path(__file__).with_name("job_exit.py"), folder / "request.json"))
     (folder / "python.txt").write_text(m["python"] + "\n")
     (folder / "stage.pbs").write_text(render_pbs(m, folder, request["job_name"]))
     return dict(folder=str(folder), job_name=request["job_name"])
@@ -148,15 +147,7 @@ def tick(m, state, pbs):
             if not finished(row):
                 s["status"] = row["job_state"]
                 continue
-            result_path = Path(job["folder"]) / "result.json"
-            result = read(result_path) if result_path.exists() else {}
-            if not result:
-                for rank in (0, 1):
-                    path = Path(job["folder"]) / f"gpu_node_{rank}.json"
-                    node = read(path) if path.exists() else {}
-                    if node.get("status") == "FAIL":
-                        result = dict(status="FAIL", error=f"GPU node {rank} preflight: " + node["error"])
-                        break
+            result = failure_result(job)
             if str(row.get("Exit_status")) == "0" and result.get("status") == "PASS":
                 need(result.get("identity") == m["identity"], "Unbound success receipt")
                 if s["phase"] == "qualification":
@@ -185,7 +176,7 @@ def tick(m, state, pbs):
                 s.update(status="READY", previous_job=job, job=None)
             else:
                 reason = retry_reason(row, job)
-                if reason and result.get("status") != "FAIL":
+                if reason and retry_allowed(row, result, job, m["identity"]):
                     s.update(status="READY", previous_job=job, job=None, retry_reason=reason,
                              external_interruptions=s.get("external_interruptions", 0)+1)
                 else:

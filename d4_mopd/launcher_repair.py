@@ -63,9 +63,15 @@ def active_runtime(m):
     pointer = root / "launcher_repair.json"
     if not pointer.exists():
         return root / "runtime"
-    _, inventory, revision, folder = revision_plan(m)
     selected = read(pointer)
-    need(selected == dict(schema=SCHEMA, identity=m["identity"], revision=revision, folder=str(folder)),
+    if selected.get("schema") == SCHEMA:
+        schema, plan = SCHEMA, revision_plan
+    else:
+        from .cuda_repair import SCHEMA as cuda_schema, revision_plan as cuda_plan
+        need(selected.get("schema") == cuda_schema, "Unknown launcher repair schema")
+        schema, plan = cuda_schema, cuda_plan
+    _, inventory, revision, folder = plan(m)
+    need(selected == dict(schema=schema, identity=m["identity"], revision=revision, folder=str(folder)),
          "Launcher repair pointer changed")
     receipt = read(folder / "receipt.json")
     need(receipt.get("status") == "PASS" and receipt.get("identity") == m["identity"]

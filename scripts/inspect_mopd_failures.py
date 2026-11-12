@@ -99,7 +99,9 @@ def log_excerpt(path, *, scan_bytes=16 * MIB, tail_lines=60):
         report.append("候选异常行（去重，至多 32 条；需要结合上下文判断根因）:")
         report.extend(f"{index:>7}: {cause}" for cause, index in causes.items())
         selected = set(range(max(0, len(lines) - tail_lines), len(lines)))
-        for index in set(first) | set(last):
+        # Unique inner exceptions may lie between repeated optional-import
+        # warnings and the final Ray wrapper. Retain their nearby stack frames.
+        for index in set(first) | set(last) | {i - 1 for i in causes.values()}:
             selected.update(range(max(0, index - 6), min(len(lines), index + 49)))
         if not first:
             report.append("本片段无匹配错误行；仍保留末尾。")
@@ -133,8 +135,8 @@ def show_attempt(out, root, key, job, state, scan_bytes, *, previous=False):
         summary["result_status"] = result.get("status")
         print(json.dumps(summary, ensure_ascii=False, indent=2), file=out)
         if str((state.get("pbs") or {}).get("Exit_status")) == "271" and result.get("status") == "FAIL":
-            print("判定依据: PBS=271，同时 result.json=FAIL；现有监护优先保留应用失败并 BLOCKED。"
-                  "仅凭 error 字符串不能区分应用故障与中断后的异常；需结合完整 traceback 和日志时间。", file=out)
+            print("判定提示: PBS=271，同时 result.json=FAIL；不能仅凭退出数字覆盖应用失败。"
+                  "需结合 termination_evidence、完整 traceback、PBS comment 与日志时间。", file=out)
     show_json(out, folder / "result.json", 64 * 1024)
     for name in ("finished", "job_id.txt"):
         try:
@@ -143,7 +145,8 @@ def show_attempt(out, root, key, job, state, scan_bytes, *, previous=False):
         except OSError as exc:
             print(f"{name}: {exc}", file=out)
     if not previous:
-        for name in ("request.json", "resume.json", "gpu_node_0.json", "gpu_node_1.json"):
+        for name in ("request.json", "resume.json", "cuda_runtime_0.json", "cuda_runtime_1.json",
+                     "gpu_node_0.json", "gpu_node_1.json"):
             show_json(out, folder / name, 12 * 1024)
         for name in ("ray_start_0.log", "ray_start_1.log"):
             print(f"\n文件: {folder / name}", file=out)
