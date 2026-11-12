@@ -58,7 +58,7 @@ def revision_plan(m):
 
 
 def active_runtime(m):
-    """Select a checked snapshot; v3 also corrects the batch metadata adapter."""
+    """Select a checked snapshot without rewriting any earlier revision."""
     root = Path(m["manifest_path"]).parent
     pointer = root / "launcher_repair.json"
     if not pointer.exists():
@@ -72,8 +72,12 @@ def active_runtime(m):
             schema, plan = cuda_schema, cuda_plan
         else:
             from .metadata_repair import SCHEMA as metadata_schema, revision_plan as metadata_plan
-            need(selected.get("schema") == metadata_schema, "Unknown launcher repair schema")
-            schema, plan = metadata_schema, metadata_plan
+            if selected.get("schema") == metadata_schema:
+                schema, plan = metadata_schema, metadata_plan
+            else:
+                from .sigterm_repair import SCHEMA as signal_schema, revision_plan as signal_plan
+                need(selected.get("schema") == signal_schema, "Unknown launcher repair schema")
+                schema, plan = signal_schema, signal_plan
     _, inventory, revision, folder = plan(m)
     need(selected == dict(schema=schema, identity=m["identity"], revision=revision, folder=str(folder)),
          "Launcher repair pointer changed")

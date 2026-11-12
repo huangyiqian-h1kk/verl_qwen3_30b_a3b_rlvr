@@ -147,11 +147,10 @@ def load_controller(path):
     return module
 
 
-@pytest.mark.parametrize("controller_kind", ["fresh", "repaired"])
-def test_controller_requires_signal_message_and_preserves_real_failures(cuda_case, tmp_path, controller_kind):
+def test_historical_cuda_controller_retains_original_signal_rule(cuda_case, tmp_path):
     cuda_repair.repair(cuda_case["manifest_path"])
     selected = launcher_repair.active_runtime(cuda_case)
-    ctl = control if controller_kind == "fresh" else load_controller(selected / "d4_mopd/control.py")
+    ctl = load_controller(selected / "d4_mopd/control.py")
     for variant in ("legacy", "sigterm", "different-message", "wrong-attempt", "non-admin", "app-error", "node-fail"):
         state = read(tmp_path / "states.json")
         s = state["qualification:domain_only"]

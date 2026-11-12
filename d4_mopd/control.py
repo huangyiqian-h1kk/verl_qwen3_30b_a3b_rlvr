@@ -11,7 +11,7 @@ import uuid
 
 from . import ARMS
 from .assets import verify
-from .job_exit import entry_script, failure_result, retry_allowed
+from .job_exit_v2 import entry_script, failure_result, retry_assessment
 from d4_teachers.common import active, file_sha, lock, need, now, read, write
 from d4_training_continuation.common import atomic_text, locked
 from d4_training_continuation.scheduler import PBS, Unknown, finished
@@ -62,7 +62,7 @@ def new_attempt(m, phase, arm):
         request["selection"] = proof["selection"]
     write(folder / "request.json", request)
     # No mutable checkout is placed on PYTHONPATH, including inside Ray workers.
-    (folder / "entry.py").write_text(entry_script(m, Path(__file__).with_name("job_exit.py"), folder / "request.json"))
+    (folder / "entry.py").write_text(entry_script(m))
     (folder / "python.txt").write_text(m["python"] + "\n")
     (folder / "stage.pbs").write_text(render_pbs(m, folder, request["job_name"]))
     return dict(folder=str(folder), job_name=request["job_name"])
@@ -176,7 +176,9 @@ def tick(m, state, pbs):
                 s.update(status="READY", previous_job=job, job=None)
             else:
                 reason = retry_reason(row, job)
-                if reason and retry_allowed(row, result, job, m["identity"]):
+                assessment = retry_assessment(row, result, job, m["identity"])
+                s["retry_assessment"] = dict(assessment, pbs_reason=reason, job_id=job["job_id"])
+                if reason and assessment["allowed"]:
                     s.update(status="READY", previous_job=job, job=None, retry_reason=reason,
                              external_interruptions=s.get("external_interruptions", 0)+1)
                 else:

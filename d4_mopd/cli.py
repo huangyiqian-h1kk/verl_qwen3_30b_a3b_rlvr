@@ -5,11 +5,11 @@ import os
 from pathlib import Path
 import sys
 import time
-import traceback
 
 from . import ARMS
 from .assets import prepare, verify
 from . import control
+from .job_exit_v2 import failure_record
 from d4_teachers.common import active, need, now, read, write
 from d4_training_continuation.common import locked
 
@@ -69,8 +69,7 @@ def execute(request_path):
             need(result["status"] in ("PASS", "RESUME_REQUIRED", "CONTROL_PAUSED"),
                  "Native driver returned without a result")
         except BaseException as exc:
-            write(folder / "result.json", dict(status="FAIL", identity=m["identity"], error=str(exc),
-                                                traceback=traceback.format_exc(), at_utc=now()))
+            write(folder / "result.json", failure_record(exc, m["identity"]))
             raise
         finally:
             ray.shutdown()
@@ -94,7 +93,7 @@ def main():
         if name in ("start", "retry-qualification"):
             q.add_argument("--arm", choices=(*ARMS, "both"), default="both")
         if name == "repair-and-retry":
-            q.add_argument("--repair-kind", choices=("te", "megatron-import", "ray-temp", "cuda-runtime", "batch-metadata"), default="te")
+            q.add_argument("--repair-kind", choices=("te", "megatron-import", "ray-temp", "cuda-runtime", "batch-metadata", "pbs-sigterm"), default="te")
         if name == "repair-worker":
             q.add_argument("--repair-folder", required=True)
             q.add_argument("--lease-fd", type=int, required=True)

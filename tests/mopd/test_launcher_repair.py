@@ -28,6 +28,14 @@ def frozen(manifest, tmp_path, monkeypatch):
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     for name in ("node.sh", "control.py"):
         shutil.copy2(FIXTURE / name, runtime / "d4_mopd" / name)
+    # The deployed driver wrote FAIL before shutdown, but captured no exception
+    # attributes. Keep that historical catch block when newer CLI code is copied.
+    cli = runtime / "d4_mopd/cli.py"
+    from d4_mopd.sigterm_repair import NEW_FAILURE, OLD_FAILURE
+    cli.write_text(cli.read_text().replace("from .job_exit_v2 import failure_record\n", "")
+                   .replace(NEW_FAILURE, OLD_FAILURE).replace("import time\n", "import time\nimport traceback\n"))
+    for name in ("job_exit_v2.py", "sigterm_repair.py"):
+        (runtime / "d4_mopd" / name).unlink()
     manifest["runtime_files"] = files(runtime)
     write(tmp_path / "manifest.json", manifest)
     state = {}

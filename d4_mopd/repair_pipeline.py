@@ -87,7 +87,7 @@ def wait_for_pbs_retry(root, seconds):
 
 
 def start(manifest_path, repair_kind="te"):
-    need(repair_kind in ("te", "megatron-import", "ray-temp", "cuda-runtime", "batch-metadata"), "Unknown environment repair kind")
+    need(repair_kind in ("te", "megatron-import", "ray-temp", "cuda-runtime", "batch-metadata", "pbs-sigterm"), "Unknown environment repair kind")
     m = verify(manifest_path)
     root = Path(manifest_path).parent
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(), "Use the manifest interpreter")
@@ -144,7 +144,7 @@ def worker(manifest_path, folder, inherited_fd):
     folder, root = Path(folder), Path(manifest_path).parent
     request = read(folder / "request.json")
     repair_kind = request.get("repair_kind", "te")
-    need(repair_kind in ("te", "megatron-import", "ray-temp", "cuda-runtime", "batch-metadata"), "Unknown environment repair kind")
+    need(repair_kind in ("te", "megatron-import", "ray-temp", "cuda-runtime", "batch-metadata", "pbs-sigterm"), "Unknown environment repair kind")
     need(request["manifest"] == str(manifest_path), "Repair request manifest mismatch")
     need(folder.parent == root / "repair_pipelines", "Invalid repair worker directory")
     record = dict(status="RUNNING", phase="verify", identity=request["identity"], repair_kind=repair_kind,
@@ -187,12 +187,14 @@ def worker(manifest_path, folder, inherited_fd):
                 from .launcher_repair import repair as repair_launcher
                 from .cuda_repair import repair as repair_cuda
                 from .metadata_repair import repair as repair_metadata
+                from .sigterm_repair import repair as repair_sigterm
                 repair_name, repair_action = {
                     "te": ("repair_te", control.repair_te),
                     "megatron-import": ("repair_megatron_import", control.repair_megatron_import),
                     "ray-temp": ("repair_ray_temp", repair_launcher),
                     "cuda-runtime": ("repair_cuda_runtime", repair_cuda),
                     "batch-metadata": ("repair_batch_metadata", repair_metadata),
+                    "pbs-sigterm": ("repair_pbs_sigterm", repair_sigterm),
                 }[repair_kind]
                 stages = (
                     (repair_name, lambda: repair_action(manifest_path, lease_fd=fd,
