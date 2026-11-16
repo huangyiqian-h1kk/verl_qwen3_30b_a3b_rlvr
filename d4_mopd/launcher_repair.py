@@ -59,6 +59,10 @@ def revision_plan(m):
 
 def active_runtime(m):
     """Select a checked snapshot without rewriting any earlier revision."""
+    if m.get("execution"):
+        from .execution import verify_record
+        record = verify_record(m, m["execution"]["record_path"])
+        return Path(record["runtime"])
     root = Path(m["manifest_path"]).parent
     pointer = root / "launcher_repair.json"
     if not pointer.exists():

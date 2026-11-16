@@ -8,6 +8,7 @@ import time
 
 from . import ARMS
 from .assets import prepare, verify
+from .execution import control_root, profile
 from . import control
 from .job_exit_v2 import failure_record
 from d4_teachers.common import active, need, now, read, write
@@ -22,9 +23,20 @@ def execute(request_path):
     from .config import compose
     from .preflight import environment, validate_native_config
     r = read(request_path)
+    select_request_execution(r)
     m = verify(r["manifest"])
     need(m["identity"] == r["identity"], "Job/manifest identity mismatch")
-    folder, root = Path(r["folder"]), Path(r["manifest"]).parent
+    folder, root = Path(r["folder"]), control_root(m)
+    selected = r.get("execution_profile", "dual_node")
+    nodes_required = profile(selected)["physical_nodes"]
+    if m.get("execution"):
+        need(r.get("execution_identity") == m["execution"]["execution_identity"]
+             and r.get("runtime_identity") == m["execution"]["runtime_identity"],
+             "Request execution runtime mismatch")
+        need(Path(__file__).resolve().parents[1] == Path(m["execution"]["runtime"]).resolve(),
+             "Execute requires the immutable entry.py generated for this attempt")
+        if r["phase"] != "qualification":
+            need(selected == m["execution"]["profile"]["name"], "Formal request changed its qualified profile")
     os.environ["D4_MOPD_ATTEMPT"] = folder.name
     need(os.environ.get("PBS_JOBID"), "execute requires its registered PBS allocation")
     if (root / "STOP").exists():
@@ -37,19 +49,21 @@ def execute(request_path):
     with locked(Path(r["run_dir"]) / "writer.lock"):
         write(folder / "result.json", dict(status="RUNNING", identity=m["identity"], at_utc=now()))
         try:
-            ray.init(address=os.environ["RAY_ADDRESS"], runtime_env={"env_vars": {
-                "PYTHONPATH": os.environ["PYTHONPATH"], "D4_MOPD_ATTEMPT": folder.name,
-                "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
-                "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1", "CUDA_DEVICE_MAX_CONNECTIONS": "1"}})
+            ray_env = {"PYTHONPATH": os.environ["PYTHONPATH"], "D4_MOPD_ATTEMPT": folder.name,
+                       "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
+                       "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1", "CUDA_DEVICE_MAX_CONNECTIONS": "1"}
+            if m.get("execution"):
+                ray_env["D4_MOPD_EXECUTION_RECORD"] = m["execution"]["record_path"]
+            ray.init(address=os.environ["RAY_ADDRESS"], runtime_env={"env_vars": ray_env})
             deadline = time.monotonic() + 900
             while time.monotonic() < deadline:
                 nodes = [n for n in ray.nodes() if n["Alive"] and n["Resources"].get("GPU", 0) == 8]
-                if len(nodes) == 2:
+                if len(nodes) == nodes_required:
                     break
                 time.sleep(2)
             else:
-                raise RuntimeError("Both eight-GPU Ray nodes did not register")
-            for rank in (0, 1):
+                raise RuntimeError(f"Expected {nodes_required} eight-GPU Ray nodes did not register")
+            for rank in range(nodes_required):
                 proof = read(folder / f"gpu_node_{rank}.json")
                 need(proof["status"] == "PASS" and proof["identity"] == m["identity"], "GPU node preflight missing")
             # Leave incomplete saves as evidence, and make the retry path empty.
@@ -59,7 +73,8 @@ def execute(request_path):
                     dest.parent.mkdir(exist_ok=True)
                     p.rename(dest)
             cfg = compose(m, r["arm"], r["run_dir"], qualification=r["phase"] == "qualification",
-                          test_checkpoint=r.get("selection") if r["phase"] == "test" else None)
+                          test_checkpoint=r.get("selection") if r["phase"] == "test" else None,
+                          execution_profile=selected)
             need((r["phase"] == "test") == (cfg.mopd.test_checkpoint is not None), "Test selection missing")
             cfg.trainer.validation_data_dir = str(folder / "validation_generations")
             validate_native_config(cfg)
@@ -68,11 +83,23 @@ def execute(request_path):
             result = read(folder / "result.json")
             need(result["status"] in ("PASS", "RESUME_REQUIRED", "CONTROL_PAUSED"),
                  "Native driver returned without a result")
+            if m.get("execution") and result["status"] != "CONTROL_PAUSED":
+                from .profile_report import memory_summary
+                result["physical_gpu_memory"] = memory_summary(folder, nodes_required, max_age_seconds=60)
+                write(folder / "result.json", result)
         except BaseException as exc:
             write(folder / "result.json", failure_record(exc, m["identity"]))
             raise
         finally:
             ray.shutdown()
+
+
+def select_request_execution(request):
+    """The immutable request chooses the runtime; inherited shells cannot override it."""
+    if request.get("execution_record"):
+        os.environ["D4_MOPD_EXECUTION_RECORD"] = request["execution_record"]
+    else:
+        os.environ.pop("D4_MOPD_EXECUTION_RECORD", None)
 
 
 def main():
@@ -84,10 +111,16 @@ def main():
     create.add_argument("--verl-src", required=True)
     create.add_argument("--python", required=True, help="New upstream uv environment; never the teacher environment")
     create.add_argument("--spec")
+    setup = sub.add_parser("prepare-execution")
+    setup.add_argument("--manifest", required=True)
+    setup.add_argument("--profile", choices=("single_node", "dual_node"), required=True)
+    setup.add_argument("--qualification-route", required=True,
+                       help="Explicit source,target profiles; four full updates in each fresh process")
     for name in ("preflight", "guardian", "status", "stop", "resume-control", "start", "repair-te", "repair-megatron-import", "retry-qualification",
                  "repair-and-retry", "repair-worker"):
         q = sub.add_parser(name)
         q.add_argument("--manifest", required=True)
+        q.add_argument("--execution-record")
         if name == "start":
             q.add_argument("--phase", choices=("pipeline", "qualification", "train", "test"), required=True)
         if name in ("start", "retry-qualification"):
@@ -103,12 +136,37 @@ def main():
         if name == "gpu-node":
             q.add_argument("--rank", type=int, required=True)
     a = p.parse_args()
-    if a.command == "prepare":
+    requested_record = getattr(a, "execution_record", None) or os.environ.get("D4_MOPD_EXECUTION_RECORD")
+    if requested_record and hasattr(a, "manifest") and a.command != "prepare-execution":
+        os.environ["D4_MOPD_EXECUTION_RECORD"] = str(Path(requested_record).resolve())
+        selected_manifest = verify(a.manifest, models=False)
+        selected_runtime = Path(selected_manifest["execution"]["runtime"]).resolve()
+        if Path(__file__).resolve().parents[1] != selected_runtime:
+            # CPU receipts and controller decisions must execute the inventory
+            # they certify, even when the user invokes a later mutable checkout.
+            command = control.entry_command(selected_manifest) + sys.argv[1:]
+            os.execv(command[0], command)
+            raise RuntimeError("Execution runtime handoff returned unexpectedly")
+    if a.command == "prepare-execution":
+        from .execution import prepare as prepare_execution
+        os.environ.pop("D4_MOPD_EXECUTION_RECORD", None)
+        m = verify(a.manifest)
+        route = tuple(a.qualification_route.split(","))
+        result = prepare_execution(m, a.profile, source_runtime=Path(__file__).resolve().parents[1],
+                                   qualification_transition=route)
+    elif a.command == "prepare":
+        os.environ.pop("D4_MOPD_EXECUTION_RECORD", None)
         result = prepare(a.teacher_campaign, a.output, a.verl_src, a.python, a.spec)
     elif a.command == "paths":
         r = read(a.request)
-        m = read(r["manifest"])
-        print(str(Path(r["manifest"]).parent / "runtime") + os.pathsep + m["verl_src"])
+        select_request_execution(r)
+        if r.get("execution_record"):
+            m = verify(r["manifest"], models=False)
+            from .launcher_repair import active_runtime
+            print(str(active_runtime(m)) + os.pathsep + m["verl_src"])
+        else:
+            m = read(r["manifest"])
+            print(str(Path(r["manifest"]).parent / "runtime") + os.pathsep + m["verl_src"])
         return
     elif a.command == "execute":
         execute(a.request)
@@ -116,10 +174,15 @@ def main():
     elif a.command == "gpu-node":
         from .preflight import gpu_node
         r = read(a.request)
+        select_request_execution(r)
         result = gpu_node(r["manifest"], r["folder"], a.rank)
     else:
         path = Path(a.manifest).resolve()
-        root = path.parent
+        m = verify(path, models=False)
+        root = control_root(m)
+        if m.get("execution"):
+            need(not a.command.startswith("repair") and a.command != "retry-qualification",
+                 "Legacy environment repair cannot mutate an execution snapshot; inspect failure and prepare a new revision")
         if a.command == "preflight":
             # Prefer the exact pinned checkout even if an unrelated verl is installed.
             sys.path.insert(0, read(path)["verl_src"])
@@ -162,6 +225,9 @@ def main():
         else:
             from .repair_pipeline import status as repair_status
             result = {"manifest": str(path), "guardian_lock_held": active(root / "guardian.lock"),
+                      "execution": {k: m["execution"][k] for k in (
+                          "record_path", "execution_identity", "runtime_identity", "profile", "qualification_transition")}
+                          if m.get("execution") else None,
                       "stopped": (root / "STOP").exists(),
                       "repair_pipeline": repair_status(path),
                       "launcher_repair": read(root / "launcher_repair.json") if (root / "launcher_repair.json").exists() else None,

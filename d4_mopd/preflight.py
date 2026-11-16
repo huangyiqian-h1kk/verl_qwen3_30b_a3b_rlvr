@@ -12,6 +12,7 @@ import traceback
 from . import ARMS, DOMAINS
 from .assets import verify
 from .config import compose
+from .execution import control_root
 from d4_teachers.common import digest, file_sha, need, now, read, write
 
 LOCKED = {"torch": "2.13.0", "ray": "2.55.1", "tensordict": "0.10.0",
@@ -98,7 +99,11 @@ def validate_native_config(config):
 
 
 def cpu(manifest_path):
-    path = Path(manifest_path).parent / "cpu_preflight.json"
+    # Locate the receipt before verification so a failed repeat cannot retain PASS.
+    # An execution always stores record.json directly under its control directory.
+    selected = os.environ.get("D4_MOPD_EXECUTION_RECORD")
+    root = Path(selected).resolve().parent if selected else Path(manifest_path).parent
+    path = root / "cpu_preflight.json"
     # Never leave an earlier PASS usable after a failed repeat preflight.
     write(path, dict(status="RUNNING", at_utc=now()))
     try:
@@ -132,22 +137,27 @@ def _cpu(manifest_path):
     from multidomain.template import render, tokenizer_fingerprint
     from .spec import plan_indices
     m = verify(manifest_path)
+    root = control_root(m)
     from .launcher_repair import active_runtime
     launcher_runtime = str(active_runtime(m))
+    upstream_contract = None
+    if m.get("execution"):
+        from .phase_runtime import verify_upstream_contract
+        upstream_contract = verify_upstream_contract(Path(m["verl_src"]) / "verl")
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(),
          "Run CPU preflight with the NEW pinned verl interpreter recorded at prepare")
     versions = environment(gpu_packages=True)
     abi = native_abi()
-    write(Path(manifest_path).parent / "native_abi.json", abi)
+    write(root / "native_abi.json", abi)
     require_native_abi(abi)
     from .megatron_repair import inspect as inspect_megatron_import
     import_guard = inspect_megatron_import()
-    write(Path(manifest_path).parent / "megatron_import_guard.json", import_guard)
+    write(root / "megatron_import_guard.json", import_guard)
     import verl
     need(Path(verl.__file__).resolve().parent.parent == Path(m["verl_src"]), "Another verl shadows the pinned checkout")
     batch_contract = batch_metadata_probe(m, launcher_runtime)
     if batch_contract is not None:
-        write(Path(manifest_path).parent / "batch_metadata_preflight.json", batch_contract)
+        write(root / "batch_metadata_preflight.json", batch_contract)
     base = AutoTokenizer.from_pretrained(m["student"]["path"], local_files_only=True)
     fingerprint = tokenizer_fingerprint(base)
     for t in m["teachers"].values():
@@ -185,14 +195,17 @@ def _cpu(manifest_path):
             need((len(counts) == 1 if arm == "domain_only" else counts == {d:b//4 for d in DOMAINS}),
                  "Incorrect optimizer batch domain composition")
     configs = {}
+    selected_profiles = tuple(dict.fromkeys(m["execution"]["qualification_transition"])) if m.get("execution") else ("dual_node",)
     for arm in ARMS:
         for qual in (False, True):
-            run = Path(manifest_path).parent / ("qualification" if qual else "runs") / arm
-            run.mkdir(parents=True, exist_ok=True)
-            (run / "agent.yaml").write_text("- name: d4_plain_mopd\n  _target_: d4_mopd.agent_loop.MOPDAgentLoop\n")
-            cfg = compose(m, arm, run, qualification=qual)
-            configs[f"{arm}:{qual}"] = validate_native_config(cfg)
-            OmegaConf.save(cfg, run / "resolved.yaml")
+            # CPU validation artifacts do not touch a running experiment's agent/config files.
+            for selected in selected_profiles:
+                run = root / "preflight_configs" / selected / ("qualification" if qual else "runs") / arm
+                run.mkdir(parents=True, exist_ok=True)
+                (run / "agent.yaml").write_text("- name: d4_plain_mopd\n  _target_: d4_mopd.agent_loop.MOPDAgentLoop\n")
+                cfg = compose(m, arm, run, qualification=qual, execution_profile=selected)
+                configs[f"{selected}:{arm}:{qual}"] = validate_native_config(cfg)
+                OmegaConf.save(cfg, run / "resolved.yaml")
     p = subprocess.run([m["verifier_python"], "-I", str(Path(__file__).with_name("verifier_worker.py")), str(manifest_path)],
                        input='{"import_only":true}', capture_output=True, text=True, timeout=120)
     need(p.returncode == 0, "Original verifier environment failed to import: " + p.stderr[-3000:])
@@ -205,6 +218,10 @@ def _cpu(manifest_path):
                  validation=m["data_summary"]["validation"],
                  domain_only_schedule="iid_uniform; exposure equal only in expectation",
                  gpu_execution_tested=False, at_utc=now())
+    if m.get("execution"):
+        proof.update(upstream_contract=upstream_contract, execution_identity=m["execution"]["execution_identity"],
+                     runtime_identity=m["execution"]["runtime_identity"],
+                     qualification_transition=m["execution"]["qualification_transition"])
     weight_bytes = sum(v["bytes"] for k, v in m["student"]["files"].items()
                        if k.endswith((".safetensors", ".bin")))
     saves_per_arm = (m["spec"]["updates"] + m["spec"]["save_every"]-1) // m["spec"]["save_every"]
@@ -217,7 +234,7 @@ def _cpu(manifest_path):
         estimated_peak_checkpoint_bytes=(2*(retained_per_arm+1)+4)*7*weight_bytes,
         estimate_basis="BF16 HF weights x7 for model/FP32 master/Adam moments; peak includes one new save per arm; excludes incomplete retries and overhead",
         project_quota_checked=False)
-    write(Path(manifest_path).parent / "cpu_preflight.json", proof)
+    write(root / "cpu_preflight.json", proof)
     return proof
 
 

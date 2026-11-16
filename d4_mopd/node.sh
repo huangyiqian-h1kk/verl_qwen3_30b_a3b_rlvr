@@ -6,6 +6,7 @@ mopd_folder=$(dirname "$mopd_request")
 mopd_rank=${OMPI_COMM_WORLD_RANK:?MPI allocation required}
 mopd_python=$(cat "$mopd_folder/python.txt")
 mopd_ray_started=0
+mopd_memory_pid=
 cleanup() {
   mopd_status=$?
   trap - EXIT INT TERM
@@ -15,6 +16,10 @@ cleanup() {
   fi
   if [[ "$mopd_ray_started" == 1 ]]; then
     "$mopd_python" -m ray.scripts.scripts stop --force > "$mopd_folder/ray_stop_$mopd_rank.log" 2>&1 || true
+  fi
+  if [[ -n "$mopd_memory_pid" ]]; then
+    kill "$mopd_memory_pid" 2>/dev/null || true
+    wait "$mopd_memory_pid" 2>/dev/null || true
   fi
   exit "$mopd_status"
 }
@@ -47,6 +52,15 @@ PY
 while IFS='=' read -r mopd_env _; do
   case "$mopd_env" in OMPI_*|PMI_*|PMIX_*|MPI_*) unset "$mopd_env" ;; esac
 done < <(env)
+# Sample the entire physical allocation, including initialization and native
+# save/restore/synchronization. These are 250 ms samples, not exact CUDA peaks.
+# Keep one CSV per physical node; GPU UUIDs prevent confusing local indices.
+if "$mopd_python" -I -c 'import json,sys; sys.exit(not bool(json.load(open(sys.argv[1])).get("execution_record")))' "$mopd_request"; then
+  TZ=UTC nvidia-smi --query-gpu=timestamp,index,uuid,memory.used,memory.total,utilization.gpu \
+    --format=csv,noheader,nounits --loop-ms=250 \
+    > "$mopd_folder/gpu_memory_${mopd_rank}.csv" 2> "$mopd_folder/gpu_memory_${mopd_rank}.stderr" &
+  mopd_memory_pid=$!
+fi
 "$mopd_python" -I "$mopd_folder/entry.py" gpu-node --request "$mopd_request" --rank "$mopd_rank"
 mopd_ip=$("$mopd_python" -c 'import socket; print(socket.gethostbyname(socket.gethostname()))')
 if [[ "$mopd_rank" == 0 ]]; then

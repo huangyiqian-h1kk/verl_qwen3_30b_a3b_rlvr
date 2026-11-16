@@ -3,11 +3,17 @@ from pathlib import Path
 from . import DOMAINS
 
 
-def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None):
+def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None,
+            execution_profile=None):
     from hydra import compose as hydra_compose, initialize_config_dir
     from omegaconf import OmegaConf
+    from .execution import profile
+    execution = manifest.get("execution")
+    selected = execution_profile or (execution["profile"]["name"] if execution else "dual_node")
+    topology = profile(selected)
+    full_qualification = bool(qualification and execution)
     s = dict(manifest["spec"])
-    if qualification:
+    if qualification and not full_qualification:
         s.update(train_batch_size=8, updates=8, save_every=4, validate_every=4)
     with initialize_config_dir(version_base=None, config_dir=str(Path(manifest["verl_src"]).resolve() / "verl/trainer/config")):
         c = hydra_compose(config_name="ppo_trainer", overrides=["model_engine=megatron"])
@@ -15,7 +21,7 @@ def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None
     # Upper bounds for separately padded prompt and response tensors. Actual per-row
     # prompt+response remains <=64K; teacher prompt-logprob API needs one extra token.
     prompt = manifest["max_prompt_tokens"]
-    response = 256 if qualification else s["max_context_tokens"] - 1
+    response = 256 if qualification and not full_qualification else s["max_context_tokens"] - 1
     vals = {
         "trainer.use_v1": False,
         "trainer.project_name": "d4_plain_mopd",
@@ -24,9 +30,9 @@ def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None
         "trainer.nnodes": s["student_nodes"],
         "trainer.n_gpus_per_node": 8,
         "trainer.total_epochs": 1,
-        "trainer.total_training_steps": s["updates"],
-        "trainer.save_freq": s["save_every"],
-        "trainer.test_freq": s["validate_every"],
+        "trainer.total_training_steps": 8 if full_qualification else s["updates"],
+        "trainer.save_freq": 4 if full_qualification else s["save_every"],
+        "trainer.test_freq": 4 if full_qualification else s["validate_every"],
         "trainer.val_before_train": True,
         "trainer.val_only": test_checkpoint is not None,
         "trainer.balance_batch": True,
@@ -48,7 +54,7 @@ def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None
         "data.dataloader_num_workers": 0,
         "data.custom_cls.path": "pkg://d4_mopd.dataset",
         "data.custom_cls.name": "MOPDDataset",
-        "data.mopd_qualification": qualification,
+        "data.mopd_qualification": qualification and not full_qualification,
         "actor_rollout_ref.model.path": manifest["student"]["path"],
         "actor_rollout_ref.model.use_remove_padding": True,
         "actor_rollout_ref.model.use_fused_kernels": True,
@@ -132,6 +138,13 @@ def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None
         "distillation.distillation_loss.log_prob_min_clamp": None,
         "ray_kwargs.ray_init.runtime_env.py_executable": None,
     }
+    if topology["shared_gpus"]:
+        vals.update({
+            "actor_rollout_ref.rollout.agent.agent_loop_manager_class":
+                "d4_mopd.phase_runtime.PhasedAgentLoopManager",
+            "actor_rollout_ref.rollout.checkpoint_manager_class":
+                "d4_mopd.phase_runtime.PhasedCheckpointEngineManager",
+        })
     OmegaConf.set_struct(c, False)
     for key, value in vals.items():
         OmegaConf.update(c, key, value, force_add=True)
@@ -150,6 +163,11 @@ def compose(manifest, arm, run_dir, *, qualification=False, test_checkpoint=None
     c.mopd = {"manifest_path": manifest["manifest_path"], "identity": manifest["identity"],
               "arm": arm, "run_dir": str(root), "qualification": qualification,
               "test_checkpoint": test_checkpoint,
+              "execution_profile": selected, "full_qualification": full_qualification,
+              "execution_identity": execution["execution_identity"] if execution else None,
+              "runtime_identity": execution["runtime_identity"] if execution else None,
+              "qualification_profile_sequence": execution["qualification_transition"] if execution else None,
+              "control_root": execution["control_root"] if execution else str(Path(manifest["manifest_path"]).parent),
               "effective_spec": s}
     OmegaConf.resolve(c)
     return c

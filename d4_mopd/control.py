@@ -1,6 +1,6 @@
 """Shared-filesystem supervisor and identity-bound PBS submission for two arms."""
 import os
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import shlex
 import socket
@@ -11,6 +11,7 @@ import uuid
 
 from . import ARMS
 from .assets import verify
+from .execution import control_root, profile, validate_qualification
 from .job_exit_v2 import entry_script, failure_result, retry_assessment
 from d4_teachers.common import active, file_sha, lock, need, now, read, write
 from d4_training_continuation.common import atomic_text, locked
@@ -21,30 +22,36 @@ from d4_teachers.controller import retry_reason
 def task_root(m, phase, arm):
     folders = {"qualification": "qualification", "train": "runs", "test": "final_tests"}
     need(phase in folders and arm in ARMS, "Unknown MOPD task")
-    return Path(m["manifest_path"]).parent / folders[phase] / arm
+    root = control_root(m) if phase == "qualification" else Path(m["manifest_path"]).parent
+    return root / folders[phase] / arm
 
 
 def entry_command(m):
     from .launcher_repair import active_runtime
     runtime = active_runtime(m)
-    bootstrap = ("import sys; sys.path[:0]=" + repr([str(runtime), m["verl_src"]])
+    prefix = ("import os; os.environ['D4_MOPD_EXECUTION_RECORD']=" + repr(m["execution"]["record_path"]) + "; "
+              if m.get("execution") else "")
+    bootstrap = (prefix + "import sys; sys.path[:0]=" + repr([str(runtime), m["verl_src"]])
                  + "; from d4_mopd.cli import main; main()")
     return [m["python"], "-I", "-c", bootstrap]
 
 
-def render_pbs(m, folder, job_name):
+def render_pbs(m, folder, job_name, execution_profile=None):
     q = shlex.quote
-    runtime = Path(m["manifest_path"]).parent / "runtime"
+    from .launcher_repair import active_runtime
+    runtime = active_runtime(m)
+    selected = execution_profile or (m["execution"]["profile"]["name"] if m.get("execution") else "dual_node")
+    nodes = profile(selected)["physical_nodes"]
     return "\n".join([
         "#!/bin/bash", "#PBS -P gcg51557", "#PBS -q R9920261000", "#PBS -v RTYPE=rt_HF",
-        "#PBS -l select=2", "#PBS -l walltime=24:00:00", "#PBS -N " + job_name,
+        f"#PBS -l select={nodes}", "#PBS -l walltime=24:00:00", "#PBS -N " + job_name,
         "#PBS -r n", "#PBS -c n", "#PBS -j oe", "#PBS -k oe", "set -euo pipefail",
         "exec > >(tee -a " + q(str(folder / "pbs.log")) + ") 2>&1",
         "if ! type module >/dev/null 2>&1; then source /etc/profile.d/modules.sh; fi",
         "module load gcc/13.2.0 hpcx/2.20",
         "awk '!seen[$0]++' \"$PBS_NODEFILE\" > " + q(str(folder / "hosts")),
-        "[[ $(wc -l < " + q(str(folder / "hosts")) + ") -eq 2 ]]",
-        "mpirun -np 2 --map-by ppr:1:node --bind-to none --hostfile " + q(str(folder / "hosts"))
+        "[[ $(wc -l < " + q(str(folder / "hosts")) + ") -eq " + str(nodes) + " ]]",
+        f"mpirun -np {nodes} --map-by ppr:1:node --bind-to none --hostfile " + q(str(folder / "hosts"))
         + " bash " + q(str(runtime / "d4_mopd/node.sh")) + " " + q(str(folder / "request.json")), ""])
 
 
@@ -56,17 +63,68 @@ def new_attempt(m, phase, arm):
     request = dict(manifest=m["manifest_path"], identity=m["identity"], phase=phase, arm=arm,
                    folder=str(folder), run_dir=str(run), job_name="0390_mp_" + {"qualification":"q", "train":"t", "test":"e"}[phase]
                    + ("mix" if arm == "domain_mix" else "only"))
+    if m.get("execution"):
+        e = m["execution"]
+        selected = e["profile"]["name"]
+        if phase == "qualification":
+            # Only committed checkpoints can switch the second process's topology.
+            markers = list((run / "checkpoints").glob("global_step_*/mopd_complete.json"))
+            completed = max((int(read(p)["step"]) for p in markers), default=0)
+            need(completed in (0, 4, 8), "Unexpected qualification checkpoint boundary")
+            selected = e["qualification_transition"][int(completed >= 4)]
+        request.update(execution_record=e["record_path"], execution_identity=e["execution_identity"],
+                       execution_profile=selected, runtime_identity=e["runtime_identity"])
     if phase == "test":
         proof = read(task_root(m, "train", arm) / "receipt.json")
         need(proof["status"] == "PASS" and proof["identity"] == m["identity"], "Training has not completed")
         request["selection"] = proof["selection"]
     write(folder / "request.json", request)
     # No mutable checkout is placed on PYTHONPATH, including inside Ray workers.
-    (folder / "entry.py").write_text(entry_script(m))
+    if m.get("execution"):
+        from .launcher_repair import active_runtime
+        bootstrap = "import os; os.environ['D4_MOPD_EXECUTION_RECORD']=" + repr(m["execution"]["record_path"]) + "\n"
+        (folder / "entry.py").write_text(bootstrap + entry_script(m, runtime=active_runtime(m)))
+    else:
+        (folder / "entry.py").write_text(entry_script(m))
     (folder / "python.txt").write_text(m["python"] + "\n")
-    (folder / "stage.pbs").write_text(render_pbs(m, folder, request["job_name"]))
+    (folder / "stage.pbs").write_text(render_pbs(m, folder, request["job_name"], request.get("execution_profile")))
     return dict(folder=str(folder), job_name=request["job_name"])
 
+
+
+@contextmanager
+def formal_submission(m, phase, pbs):
+    """Serialize profile writers and require the former controller to be retired."""
+    if not m.get("execution") or phase == "qualification":
+        yield
+        return
+    base = Path(m["manifest_path"]).parent
+    current = control_root(m)
+    with lock(base / "execution_launch.lock", wait=60):
+        roots = [base] + sorted((base / "executions").glob("*"))
+        for other in roots:
+            if other == current or not other.is_dir():
+                continue
+            states = read(other / "states.json") if (other / "states.json").exists() else {}
+            formal = [v for v in states.values() if v.get("phase") in ("train", "test")]
+            if not formal and not (other / "pipeline.json").exists():
+                continue
+            need(not active(other / "guardian.lock"),
+                 "Retire the former guardian before formal profile handoff: " + str(other))
+            need((other / "STOP").exists() or all(v.get("status") in ("DONE", "BLOCKED") for v in formal),
+                 "Former controller can still register work; stop it before handoff: " + str(other))
+            for old in formal:
+                need(not old.get("pending"), "Resolve ambiguous submission before handoff: " + str(other))
+                if old.get("job"):
+                    need(finished(pbs.observe(old["job"])), "Former formal PBS allocation is still active")
+        own_states = read(current / "states.json") if (current / "states.json").exists() else {}
+        own_running_arms = {v["arm"] for v in own_states.values()
+                            if v.get("phase") in ("train", "test") and v.get("job")
+                            and v.get("status") not in ("DONE", "BLOCKED", "READY")}
+        for arm in ARMS:
+            if arm not in own_running_arms:
+                need(not active(base / "runs" / arm / "writer.lock"), "A formal checkpoint writer is still active")
+        yield
 
 def register_final_tests(m, state):
     for s in list(state.values()):
@@ -81,6 +139,9 @@ def register_final_tests(m, state):
 
 def qualification_passed(m, arm):
     q = read(task_root(m, "qualification", arm) / "receipt.json")
+    if m.get("execution"):
+        validate_qualification(q, m, arm)
+        return
     need(q.get("status") == "PASS" and q.get("identity") == m["identity"]
          and q.get("scope") == "qualification" and q.get("arm") == arm
          and q.get("step") == 8 and q.get("resumed_from") == 4,
@@ -89,7 +150,7 @@ def qualification_passed(m, arm):
 
 def advance_pipeline(m, state):
     """Parallel qualification chains, then training after every requested arm passes."""
-    path = Path(m["manifest_path"]).parent / "pipeline.json"
+    path = control_root(m) / "pipeline.json"
     if not path.exists():
         return
     p = read(path)
@@ -116,7 +177,7 @@ def advance_pipeline(m, state):
 
 
 def tick(m, state, pbs):
-    if (Path(m["manifest_path"]).parent / "STOP").exists():
+    if (control_root(m) / "STOP").exists():
         return state
     # Also repairs a restart between recording train success and registering test.
     advance_pipeline(m, state)
@@ -128,18 +189,20 @@ def tick(m, state, pbs):
         try:
             job = s.get("job")
             if not job:
-                if (Path(m["manifest_path"]).parent / "STOP").exists():
+                if (control_root(m) / "STOP").exists():
                     break
-                # Durable pending directory precedes qsub. An ambiguous qsub is
-                # recovered at the same path, never retried with a new directory.
-                pending = s.get("pending")
-                if pending is None:
-                    pending = new_attempt(m, s["phase"], s["arm"])
-                    s["pending"] = pending
-                    write(Path(m["manifest_path"]).parent / "states.json", state)
-                s["job"] = pbs.submit(pending["folder"], pending["job_name"])
-                s["pending"] = None
-                s["status"] = "SUBMITTED"
+                with formal_submission(m, s["phase"], pbs):
+                    # Durable pending directory precedes qsub. An ambiguous qsub is
+                    # recovered at the same path, never retried with a new directory.
+                    pending = s.get("pending")
+                    if pending is None:
+                        pending = new_attempt(m, s["phase"], s["arm"])
+                        s["pending"] = pending
+                        write(control_root(m) / "states.json", state)
+                    s["job"] = pbs.submit(pending["folder"], pending["job_name"])
+                    s["pending"] = None
+                    s["status"] = "SUBMITTED"
+                    write(control_root(m) / "states.json", state)
                 continue
             row = pbs.observe(job)  # validates owner, queue, job name and exact script path
             s["pbs"] = {k: row.get(k) for k in ("job_state", "Exit_status", "comment")}
@@ -150,7 +213,14 @@ def tick(m, state, pbs):
             result = failure_result(job)
             if str(row.get("Exit_status")) == "0" and result.get("status") == "PASS":
                 need(result.get("identity") == m["identity"], "Unbound success receipt")
+                if m.get("execution"):
+                    request = read(Path(job["folder"]) / "request.json")
+                    need(result.get("execution_identity") == m["execution"]["execution_identity"]
+                         and result.get("execution_profile") == request["execution_profile"],
+                         "Result belongs to another execution profile")
                 if s["phase"] == "qualification":
+                    if m.get("execution"):
+                        validate_qualification(dict(result, scope="qualification"), m, s["arm"])
                     need(result.get("resumed_from") == 4 and result["step"] == 8 and result.get("arm") == s["arm"],
                          "Missing arm-bound fresh-process resume proof")
                 elif s["phase"] == "train":
@@ -168,6 +238,10 @@ def tick(m, state, pbs):
                 write(run / "receipt.json", proof)
                 s["status"] = "DONE"
             elif str(row.get("Exit_status")) == "0" and result.get("status") == "RESUME_REQUIRED":
+                if m.get("execution"):
+                    need(result.get("execution_identity") == m["execution"]["execution_identity"]
+                         and result.get("execution_profile") == m["execution"]["qualification_transition"][0],
+                         "Qualification pause belongs to another execution/profile")
                 need(result.get("identity") == m["identity"] and s["phase"] == "qualification"
                      and result.get("step") == 4 and result.get("arm") == s["arm"], "Unexpected pause")
                 s.update(status="READY", previous_job=job, job=None)
@@ -189,16 +263,16 @@ def tick(m, state, pbs):
             s.update(status="BLOCKED", error=str(exc))
         finally:
             s["observed_utc"] = now()
-            write(Path(m["manifest_path"]).parent / "states.json", state)
+            write(control_root(m) / "states.json", state)
     advance_pipeline(m, state)
     register_final_tests(m, state)
-    write(Path(m["manifest_path"]).parent / "states.json", state)
+    write(control_root(m) / "states.json", state)
     return state
 
 
 def guardian(manifest_path):
     m = verify(manifest_path)
-    root = Path(manifest_path).parent
+    root = control_root(m)
     with ExitStack() as lease:
         lease.enter_context(locked(root / "guardian.lock"))
         while True:
@@ -226,14 +300,20 @@ def guardian(manifest_path):
 
 def start(manifest_path, phase, arms):
     m = verify(manifest_path)
-    root = Path(manifest_path).parent
+    root = control_root(m)
     need(phase in ("pipeline", "qualification", "train", "test")
          and list(arms) == [a for a in ARMS if a in arms] and arms, "Invalid phase/arms")
     need(not (root / "STOP").exists(), "Experiment is stopped; use resume-control explicitly")
+    if m.get("execution"):
+        need(phase != "pipeline", "Execution profiles require explicit qualification then train; automatic pipeline is disabled")
     proof = read(root / "cpu_preflight.json")
+    if m.get("execution"):
+        need(proof.get("execution_identity") == m["execution"]["execution_identity"]
+             and proof.get("runtime_identity") == m["execution"]["runtime_identity"],
+             "CPU preflight belongs to another execution runtime")
     need(proof["status"] == "PASS" and proof["identity"] == m["identity"], "CPU preflight has not passed")
     need(proof.get("native_abi", {}).get("status") == "PASS", "Repeat CPU preflight with the native GLIBC check")
-    if phase == "train":
+    if phase == "train" or (m.get("execution") and phase == "test"):
         for arm in arms:
             qualification_passed(m, arm)
     with lock(root / "launch.lock", wait=60):
@@ -310,7 +390,7 @@ def repair_te(manifest_path, *, lease_fd=None, on_pbs_unknown=None):
     import importlib.metadata
     import shutil
     m = verify(manifest_path)
-    root = Path(manifest_path).parent
+    root = control_root(m)
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(), "Use the manifest interpreter")
     def packages():
         return {d.metadata["Name"].lower().replace("_", "-"): d.version
@@ -361,7 +441,7 @@ def repair_megatron_import(manifest_path, *, lease_fd=None, on_pbs_unknown=None)
     from .preflight import environment, native_abi, require_native_abi
     from .repair_pipeline import environment_lease
     m = verify(manifest_path)
-    root = Path(manifest_path).parent
+    root = control_root(m)
     need(Path(sys.executable).absolute() == Path(m["python"]).absolute(), "Use the manifest interpreter")
 
     def packages():
@@ -409,7 +489,7 @@ def retry_qualification(manifest_path, arms, *, on_pbs_unknown=None):
     m = verify(manifest_path)
     from .launcher_repair import active_runtime
     launcher_runtime = active_runtime(m)
-    root = Path(manifest_path).parent
+    root = control_root(m)
     need(list(arms) == [a for a in ARMS if a in arms] and arms, "Invalid arms")
     need(not (root / "STOP").exists(), "Experiment is stopped")
     with lock(root / "launch.lock"), locked(root / "guardian.lock"), lock(root / "states.lock"):

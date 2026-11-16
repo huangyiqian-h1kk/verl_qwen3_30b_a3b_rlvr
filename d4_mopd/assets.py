@@ -184,4 +184,8 @@ def verify(path, *, models=True):
         need(model_inventory(m["student"]["path"]) == m["student"]["files"], "Student base changed")
         for t in m["teachers"].values():
             validate_export(t["export"])
+    execution_path = os.environ.get("D4_MOPD_EXECUTION_RECORD")
+    if execution_path:
+        from .execution import attach_execution
+        return attach_execution(m, execution_path)
     return m
