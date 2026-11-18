@@ -274,7 +274,11 @@ def guardian(manifest_path):
     m = verify(manifest_path)
     root = control_root(m)
     with ExitStack() as lease:
-        lease.enter_context(locked(root / "guardian.lock"))
+        # Read-only status probes also briefly acquire this lease. Tolerate a
+        # probe during startup while still excluding another real guardian.
+        lease.enter_context(lock(root / "guardian.lock", wait=30))
+        write(root / "guardian_startup.json", dict(at_utc=now(), host=socket.gethostname(), pid=os.getpid(),
+                                                   token=os.environ.pop("D4_MOPD_GUARDIAN_START_TOKEN", None)))
         while True:
             if (root / "STOP").exists():
                 with lock(root / "launch.lock", wait=60):
@@ -334,15 +338,25 @@ def start(manifest_path, phase, arms):
                     state.setdefault(key, dict(phase=phase, arm=arm, status="READY", job=None, pending=None))
             write(path, state)
         if not active(root / "guardian.lock"):
+            token = uuid.uuid4().hex
             with (root / "guardian.log").open("ab") as log:
                 child = subprocess.Popen(entry_command(m) + ["guardian", "--manifest", str(manifest_path)],
                                          stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                         start_new_session=True, cwd=str(root))
+                                         start_new_session=True, cwd=str(root),
+                                         env=dict(os.environ, D4_MOPD_GUARDIAN_START_TOKEN=token))
             deadline = time.monotonic() + 30
-            while not active(root / "guardian.lock") and time.monotonic() < deadline:
+            while True:
                 need(child.poll() is None, "Guardian exited during startup; inspect guardian.log")
+                # Never probe the lease here: active() temporarily holds it and
+                # can prevent the child from acquiring it. The ACK precedes the
+                # first potentially slow PBS tick, unlike the regular heartbeat.
+                ack = root / "guardian_startup.json"
+                ready = read(ack) if ack.exists() else {}
+                if (ready.get("token") == token and ready.get("pid") == child.pid
+                        and ready.get("host") == socket.gethostname()):
+                    break
+                need(time.monotonic() < deadline, "Guardian did not acknowledge startup; inspect guardian.log")
                 time.sleep(0.1)
-            need(active(root / "guardian.lock"), "Guardian did not acquire its lease; inspect guardian.log")
     return dict(status="REGISTERED", tasks=list(state), manifest=m["manifest_path"],
                 automatic_pipeline=(root / "pipeline.json").exists(),
                 note="Use status to confirm the guardian heartbeat and PBS submission")
