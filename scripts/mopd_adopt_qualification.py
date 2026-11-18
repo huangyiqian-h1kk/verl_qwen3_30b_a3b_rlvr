@@ -2,8 +2,9 @@
 """One-time, journaled adoption of both qualified step-8 states into formal runs.
 
 This operator tool does not edit an immutable runtime, start a guardian, submit a
-job, remove STOP, or change qualification proofs. Prepare copies into an isolated
-staging directory. Activate requires stopped controllers and terminal PBS jobs.
+job, remove STOP, or change qualification proofs. Prepare copies or hardlinks the
+immutable files into independent staging directories. Activate requires stopped
+controllers and terminal PBS jobs.
 """
 import argparse
 from collections import Counter
@@ -182,7 +183,8 @@ def states_at(root):
     return read(path) if path.exists() else {}
 
 
-def make_plan(m, operation, expected_jobs, git):
+def make_plan(m, operation, expected_jobs, git, copy_mode="copy"):
+    need(copy_mode in ("copy", "hardlink"), "Unknown checkpoint copy mode")
     base, control = Path(m["manifest_path"]).parent, control_root(m)
     operation = safe_id(operation)
     folder = base / "qualification_adoptions" / operation
@@ -216,7 +218,7 @@ def make_plan(m, operation, expected_jobs, git):
                          sampler_identity=sampler, checkpoint_marker=proof, source_files=tree(source),
                          receipt=str(receipt_path), receipt_sha256=file_sha(receipt_path),
                          baseline=baseline(m, arm, receipt, validation_rows), old_files=tree(destination))
-    payload = dict(schema=SCHEMA, operation=operation, folder=str(folder), identity=m["identity"],
+    payload = dict(schema=SCHEMA, operation=operation, folder=str(folder), identity=m["identity"], copy_mode=copy_mode,
                    manifest=m["manifest_path"], execution_record=m["execution"]["record_path"],
                    execution_identity=m["execution"]["execution_identity"], runtime_identity=m["execution"]["runtime_identity"],
                    expected_jobs=expected_jobs, git=git, arms=arms, controller_states=states,
@@ -228,6 +230,7 @@ def checked_plan(m, folder):
     folder = Path(folder)
     no_links(folder, Path(m["manifest_path"]).parent)
     plan = read(folder / "plan.json")
+    need(plan.get("copy_mode", "copy") in ("copy", "hardlink"), "Unknown checkpoint copy mode")
     need(plan["schema"] == SCHEMA and plan["plan_identity"] == digest({k: v for k, v in plan.items() if k != "plan_identity"}),
          "Adoption plan changed")
     need(plan["manifest"] == m["manifest_path"] and plan["identity"] == m["identity"]
@@ -300,6 +303,13 @@ def copy_with_progress(source, partial, folder, completed_bytes, total_bytes):
                          completed_bytes=completed_bytes, total_bytes=total_bytes)
 
 
+def hardlink_identity(source, target):
+    a, b = regular(source).stat(), regular(target).stat()
+    need((a.st_dev, a.st_ino) == (b.st_dev, b.st_ino) and a.st_nlink >= 2,
+         "Hardlink does not share the qualified source inode")
+    return dict(device=a.st_dev, inode=a.st_ino, minimum_links=2)
+
+
 def prepare(m, plan):
     folder = Path(plan["folder"])
     no_links(folder / "operation.lock", Path(m["manifest_path"]).parent)
@@ -307,6 +317,7 @@ def prepare(m, plan):
     with locked(folder / "operation.lock"):
         publish_new(folder / "plan.json", plan)
         checked_plan(m, folder)
+        hardlink = plan.get("copy_mode", "copy") == "hardlink"
         need(not (folder / "activation.json").exists(), "Activation has begun; resume activate instead")
         validate_sources(m, plan)
         ledger_path = folder / "copied_files.json"
@@ -315,7 +326,8 @@ def prepare(m, plan):
         completed = 0
         remaining = sum(info["bytes"] for arm in plan["arms"].values() for name, info in arm["source_files"].items()
                         if not (Path(arm["staging"]) / "checkpoints/global_step_8" / name).exists())
-        need(shutil.disk_usage(folder).free >= remaining + min(total // 100, 10 << 30), "Insufficient staging disk space")
+        need(hardlink or shutil.disk_usage(folder).free >= remaining + min(total // 100, 10 << 30),
+             "Insufficient staging disk space")
         with ExitStack() as lease:
             for arm in ARMS:
                 lease.enter_context(locked(control_root(m) / "qualification" / arm / "writer.lock"))
@@ -329,9 +341,21 @@ def prepare(m, plan):
                     no_links(target, folder)
                     key = arm + "/" + name
                     need(metadata(source) == expected, "Source file changed: " + str(source))
-                    source_sha = hash_progress(source, folder, "hash_source", completed, total)
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    if not target.exists():
+                    if hardlink:
+                        need(source.stat().st_dev == target.parent.stat().st_dev,
+                             "Hardlink adoption requires the same filesystem; copy fallback is disabled")
+                        if not target.exists():
+                            partial = target.with_name("." + target.name + ".adoption-link")
+                            if not partial.exists():
+                                os.link(source, partial, follow_symlinks=False)
+                            hardlink_identity(source, partial)
+                            rename_new(partial, target)
+                        link = hardlink_identity(source, target)
+                        source_sha = expected["sha256"]  # Small-file hashes remain in the native inventory.
+                    else:
+                        source_sha = hash_progress(source, folder, "hash_source", completed, total)
+                    if not hardlink and not target.exists():
                         partial = target.with_name("." + target.name + ".adoption-partial")
                         need(not partial.is_symlink(), "Unsafe partial copy")
                         copy_with_progress(source, partial, folder, completed, total)
@@ -340,17 +364,19 @@ def prepare(m, plan):
                         with partial.open("rb") as stream:
                             os.fsync(stream.fileno())
                         rename_new(partial, target)
-                    else:
+                    elif not hardlink:
                         need(metadata(target) == expected and hash_progress(target, folder, "verify_existing", completed, total) == source_sha,
                              "Existing staging file changed; refusing to overwrite it")
                     need(metadata(source) == expected, "Source changed during copy")
                     event = dict(source=str(source), destination=str(target), **expected, full_sha256=source_sha)
+                    if hardlink:
+                        event["hardlink"] = link
                     need(key not in ledger or ledger[key] == event, "Completed copy evidence changed")
                     ledger[key] = event
                     write(ledger_path, ledger)
                     completed += expected["bytes"]
                     progress(folder, phase="file_verified", file=key, completed_files=len(ledger),
-                             completed_bytes=completed, total_bytes=total)
+                             completed_bytes=completed, total_bytes=total, copy_mode=plan.get("copy_mode", "copy"))
                 no_links(stage / "validation/step_0.json", folder)
                 no_links(stage / "qualification_adoption.json", folder)
                 publish_new(stage / "validation/step_0.json", item["baseline"]["canonical"])
@@ -362,7 +388,8 @@ def prepare(m, plan):
             validate_sources(m, plan)
         publish_new(folder / "prepared.json", dict(status="PREPARED", plan_identity=plan["plan_identity"],
                                                   copied_files_sha256=digest(ledger), total_bytes=total))
-        progress(folder, phase="PREPARED", completed_files=len(ledger), completed_bytes=completed, total_bytes=total)
+        progress(folder, phase="PREPARED", completed_files=len(ledger), completed_bytes=completed,
+                 total_bytes=total, copy_mode=plan.get("copy_mode", "copy"))
         return read(folder / "prepared.json")
 
 
@@ -382,7 +409,10 @@ def validate_staging(m, plan, arm, stage, ledger, full_hash=True):
         need(proof["source"] == str(Path(item["source"]) / name)
              and proof["destination"] == str(Path(item["staging"]) / "checkpoints/global_step_8" / name),
              "Copy ledger path changed")
-        if full_hash:
+        if plan.get("copy_mode", "copy") == "hardlink":
+            need(hardlink_identity(proof["source"], cp / name) == proof["hardlink"],
+                 "Qualified source inode changed after preparation")
+        elif full_hash:
             need(hash_progress(cp / name, plan["folder"], "verify_activation", 0, 0) == proof["full_sha256"],
                  "Staged file hash changed before activation")
 
@@ -521,6 +551,7 @@ def main():
     parser.add_argument("--operation", required=True)
     parser.add_argument("--expected-mix-job", required=True)
     parser.add_argument("--expected-only-job", required=True)
+    parser.add_argument("--copy-mode", choices=("copy", "hardlink"), default="copy")
     args = parser.parse_args()
     m = load_manifest(args.manifest, args.execution_record)
     folder = Path(m["manifest_path"]).parent / "qualification_adoptions" / safe_id(args.operation)
@@ -531,11 +562,13 @@ def main():
         plan = checked_plan(m, folder)
         need(plan["expected_jobs"] == expected and plan["git"]["script_sha256"] == git["script_sha256"],
              "Operation job IDs or operator code changed")
+        need(plan.get("copy_mode", "copy") == args.copy_mode, "Existing plan has another copy mode")
     else:
-        plan = make_plan(m, args.operation, expected, git)
+        plan = make_plan(m, args.operation, expected, git, args.copy_mode)
     if args.action == "plan":
-        emit(dict(event="plan", plan=plan, required_copy_bytes=sum(
-            f["bytes"] for arm in plan["arms"].values() for f in arm["source_files"].values())))
+        logical_bytes = sum(f["bytes"] for arm in plan["arms"].values() for f in arm["source_files"].values())
+        emit(dict(event="plan", plan=plan, logical_checkpoint_bytes=logical_bytes,
+                  required_copy_bytes=0 if args.copy_mode == "hardlink" else logical_bytes))
     elif args.action == "prepare":
         emit(dict(event="prepared", result=prepare(m, plan)))
     else:

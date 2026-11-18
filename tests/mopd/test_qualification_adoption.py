@@ -1,5 +1,6 @@
 """CPU adoption checks with complete native-layout states and real file locks."""
 from copy import deepcopy
+import errno
 import importlib.util
 import json
 import os
@@ -273,3 +274,68 @@ def test_activate_recovers_states_published_before_final_journal(case, monkeypat
     assert read(Path(case.plan["folder"]) / "activation.json")["status"] == "ACTIVATING"
     monkeypatch.setattr(adopt, "write", original)
     assert adopt.activate(case.m, case.plan["folder"], case.pbs)["status"] == "ACTIVATED"
+
+
+def linked_plan(case):
+    return adopt.make_plan(case.m, "adopt-step8-links", case.jobs, {}, copy_mode="hardlink")
+
+
+def test_hardlink_adoption_avoids_bulk_io_and_pruning_keeps_source(case, monkeypatch):
+    plan = linked_plan(case)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Hardlink adoption must not copy or bulk-hash the shared payload")
+    monkeypatch.setattr(adopt, "hash_progress", forbidden)
+    monkeypatch.setattr(adopt.shutil, "copy2", forbidden)
+    adopt.prepare(case.m, plan)
+    adopt.prepare(case.m, plan)
+    adopt.activate(case.m, plan["folder"], case.pbs)
+    for arm, item in plan["arms"].items():
+        source, run = Path(item["source"]), Path(item["destination"])
+        formal = run / "checkpoints/global_step_8"
+        assert not formal.is_symlink()
+        for name in item["source_files"]:
+            a, b = (source / name).stat(), (formal / name).stat()
+            assert (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino) and a.st_nlink == 2
+        for step in (10, 15, 20):
+            checkpoint(run, case.m, arm, step, item["sampler_identity"])
+        assert checkpoints.prune(run, case.m["identity"], arm, item["sampler_identity"], 2, 200)["retained_steps"] == [15, 20]
+        assert not formal.exists()
+        assert adopt.tree(source) == item["source_files"]
+        assert checkpoints.latest(source.parent, case.m["identity"], arm, item["sampler_identity"]) == source
+        assert (source / "data.pt").stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("replaced", ["source", "staging"])
+def test_hardlink_activation_rejects_different_inode_even_with_identical_bytes(case, replaced):
+    plan = linked_plan(case)
+    adopt.prepare(case.m, plan)
+    item = plan["arms"]["domain_mix"]
+    folder = Path(item[replaced]) if replaced == "source" else Path(item[replaced]) / "checkpoints/global_step_8"
+    path = folder / "data.pt"
+    copied = path.with_name("replacement")
+    adopt.shutil.copy2(path, copied)
+    copied.replace(path)
+    assert adopt.tree(folder) == item["source_files"]
+    with pytest.raises(RuntimeError, match="Hardlink does not share"):
+        adopt.activate(case.m, plan["folder"], case.pbs)
+    assert not Path(item["archive"]).exists()
+
+
+def test_hardlink_cross_filesystem_error_never_falls_back_to_copy(case, monkeypatch):
+    plan = linked_plan(case)
+    def cross_device(*args, **kwargs):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+    monkeypatch.setattr(adopt.os, "link", cross_device)
+    monkeypatch.setattr(adopt.shutil, "copy2", lambda *a, **k: pytest.fail("No copy fallback is permitted"))
+    with pytest.raises(OSError) as error:
+        adopt.prepare(case.m, plan)
+    assert error.value.errno == errno.EXDEV
+    assert not (Path(plan["folder"]) / "prepared.json").exists()
+
+
+def test_transfer_mode_is_bound_into_the_plan_identity(case):
+    plan = adopt.make_plan(case.m, case.plan["operation"], case.jobs, case.plan["git"], copy_mode="hardlink")
+    assert plan["plan_identity"] != case.plan["plan_identity"]
+    adopt.prepare(case.m, case.plan)
+    with pytest.raises(RuntimeError, match="Refusing to replace existing adoption evidence"):
+        adopt.prepare(case.m, plan)
