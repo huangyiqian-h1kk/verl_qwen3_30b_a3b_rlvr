@@ -12,7 +12,8 @@ import uuid
 from . import ARMS
 from .assets import verify
 from .execution import control_root, profile, validate_qualification
-from .job_exit_v2 import entry_script, failure_result, retry_assessment
+from .job_exit_v2 import entry_script, failure_result
+from .walltime_retry import retry_assessment
 from d4_teachers.common import active, file_sha, lock, need, now, read, write
 from d4_training_continuation.common import atomic_text, locked
 from d4_training_continuation.scheduler import PBS, Unknown, finished
